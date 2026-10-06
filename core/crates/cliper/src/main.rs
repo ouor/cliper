@@ -39,6 +39,21 @@ enum Cmd {
         #[arg(long)]
         variant_height: Option<u32>,
     },
+    /// Download the video of a VOD time range (segments covering it, stream copy)
+    FetchVideo {
+        video: String,
+        #[arg(long)]
+        start: f64,
+        #[arg(long)]
+        end: f64,
+        #[arg(short, long)]
+        out: PathBuf,
+        /// target height (default: highest)
+        #[arg(long)]
+        height: Option<u32>,
+        #[arg(short, long)]
+        cookies: Option<PathBuf>,
+    },
     /// Detect song sections in an audio/video file (PANNs + v6 segmenter)
     Detect {
         input: PathBuf,
@@ -94,6 +109,21 @@ async fn main() -> Result<()> {
                 "saving": 1.0 - res.fetched_bytes as f64 / res.full_source_bytes.max(1) as f64,
                 "fallback_segments": res.fallback_segments, "elapsed_sec": res.elapsed_sec,
             }))?);
+        }
+        Cmd::FetchVideo { video, start, end, out, height, cookies } => {
+            use cliper_core::hls::video_fetch::{self, VideoOptions};
+            let src = cliper_core::platforms::resolve(&video, load_cookies(&cookies)?.as_ref()).await?;
+            let progress = Arc::new(|p: Progress| {
+                if let Some(m) = p.message {
+                    eprintln!("\n{}: {m}", p.stage);
+                } else {
+                    eprint!("\r{} {}/{} ({:.1} MB)", p.stage, p.done, p.total, p.bytes.unwrap_or(0) as f64 / 1e6);
+                }
+            });
+            let t0 = std::time::Instant::now();
+            let clip = video_fetch::fetch_video(&src, start, end, &out, &VideoOptions { height, workers: None }, progress, CancellationToken::new()).await?;
+            eprintln!("\ndone in {:.1}s", t0.elapsed().as_secs_f64());
+            println!("{}", serde_json::to_string_pretty(&clip)?);
         }
         Cmd::Detect { input, model, probs, cpu, probs_json } => {
             use cliper_core::analysis::detect;
