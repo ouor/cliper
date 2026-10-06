@@ -1,0 +1,28 @@
+# reference clones (read-only porting sources)
+/reference/
+
+# build
+/core/target/
+node_modules/
+dist/
+
+# runtime data
+/models/
+/projects/
+/var/
+*.onnx
+*.pth
+
+# media
+*.aac
+*.m4a
+*.mp3
+*.mp4
+*.ts
+*.wav
+*.f32
+
+# misc
+.DS_Store
+Thumbs.db
+__pycache__/
