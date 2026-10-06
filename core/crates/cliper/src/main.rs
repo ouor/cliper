@@ -74,6 +74,27 @@ enum Cmd {
         #[arg(long, default_value = "models/panns_sed.onnx")]
         model: PathBuf,
     },
+    /// Export one song from a separated clip
+    Export {
+        /// clip directory holding source.mp4 (or --video), orig.wav, vocals.wav
+        clip_dir: PathBuf,
+        #[arg(long)]
+        video: Option<PathBuf>,
+        /// song in/out (clip seconds)
+        #[arg(long = "in")]
+        in_t: f64,
+        #[arg(long = "out")]
+        out_t: f64,
+        /// vocal mute "a-b" in clip seconds (repeatable)
+        #[arg(long)]
+        mute: Vec<String>,
+        #[arg(long, default_value_t = 0.3)]
+        fade: f64,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long, default_value = "h264_nvenc")]
+        codec: String,
+    },
     /// Detect song sections in an audio/video file (PANNs + v6 segmenter)
     Detect {
         input: PathBuf,
@@ -175,6 +196,35 @@ async fn main() -> Result<()> {
                 eprintln!("talk {:7.2} ~ {:7.2} ({:.1}s)", a, b, b - a);
             }
             println!("{}", serde_json::to_string(&regs)?);
+        }
+        Cmd::Export { clip_dir, video, in_t, out_t, mute, fade, output, codec } => {
+            use cliper_core::export::{ExportSpec, export_song};
+            use cliper_core::render::MuteSpan;
+            let mutes = mute
+                .iter()
+                .filter_map(|s| s.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+                .map(|(start, end)| MuteSpan { start, end, fade_in: fade, fade_out: fade })
+                .collect();
+            let spec = ExportSpec {
+                source_mp4: video.unwrap_or_else(|| clip_dir.join("source.mp4")),
+                orig_wav: clip_dir.join("orig.wav"),
+                vocals_wav: clip_dir.join("vocals.wav"),
+                in_t,
+                out_t,
+                mutes,
+                out: output,
+                video_codec: codec,
+                video_quality: 19,
+                audio_bitrate_k: 320,
+                title: None,
+            };
+            let progress: cliper_core::progress::ProgressFn = Arc::new(|p: Progress| {
+                if let Some(m) = p.message {
+                    eprintln!("{}: {m}", p.stage);
+                }
+            });
+            let r = tokio::task::spawn_blocking(move || export_song(&spec, &progress, &CancellationToken::new())).await??;
+            println!("{}", serde_json::to_string_pretty(&r)?);
         }
         Cmd::Detect { input, model, probs, cpu, probs_json } => {
             use cliper_core::analysis::detect;
