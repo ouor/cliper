@@ -17,3 +17,5 @@ url.workspace = true
 regex.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+ort = { version = "=2.0.0-rc.13", features = ["cuda"] }
+ndarray = "0.17"

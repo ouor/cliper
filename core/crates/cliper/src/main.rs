@@ -39,6 +39,21 @@ enum Cmd {
         #[arg(long)]
         variant_height: Option<u32>,
     },
+    /// Detect song sections in an audio/video file (PANNs + v6 segmenter)
+    Detect {
+        input: PathBuf,
+        /// panns_sed.onnx (labels json next to it)
+        #[arg(long, default_value = "models/panns_sed.onnx")]
+        model: PathBuf,
+        /// write probabilities (CLPROBS1) here / reuse if it exists
+        #[arg(long)]
+        probs: Option<PathBuf>,
+        #[arg(long)]
+        cpu: bool,
+        /// write probabilities as JSON (for golden comparisons)
+        #[arg(long)]
+        probs_json: Option<PathBuf>,
+    },
 }
 
 fn load_cookies(p: &Option<PathBuf>) -> Result<Option<std::collections::BTreeMap<String, String>>> {
@@ -80,6 +95,46 @@ async fn main() -> Result<()> {
                 "fallback_segments": res.fallback_segments, "elapsed_sec": res.elapsed_sec,
             }))?);
         }
+        Cmd::Detect { input, model, probs, cpu, probs_json } => {
+            use cliper_core::analysis::detect;
+            use cliper_core::ml::panns::{self, Probs, Tagger};
+            let cached = probs.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| Probs::from_bytes(&b));
+            let pr = match cached {
+                Some(p) => p,
+                None => {
+                    let t0 = std::time::Instant::now();
+                    let mut tagger = Tagger::open(&model, cpu)?;
+                    eprintln!("PANNs on {:?}", tagger.device);
+                    let mut rd = cliper_core::audio::ffmpeg::decode(&input, panns::SAMPLE_RATE, 1, None, None)?;
+                    let progress: cliper_core::progress::ProgressFn = Arc::new(|_p: Progress| {});
+                    let pr = tagger.probs_streaming(
+                        |buf| rd.read(buf).map_err(std::io::Error::other),
+                        None,
+                        &progress,
+                        &CancellationToken::new(),
+                    )?;
+                    let el = t0.elapsed().as_secs_f64();
+                    eprintln!("tagged {:.0}s of audio in {:.1}s ({:.0}x)", pr.duration, el, pr.duration / el);
+                    if let Some(p) = &probs {
+                        std::fs::write(p, pr.to_bytes())?;
+                    }
+                    pr
+                }
+            };
+            if let Some(p) = probs_json {
+                std::fs::write(p, serde_json::to_vec(&pr)?)?;
+            }
+            let segs = detect::segment(&pr, &detect::Params::default());
+            for (i, (s, e)) in segs.iter().enumerate() {
+                eprintln!("[{:02}] {} ~ {} ({:.0}s)", i + 1, hms(*s), hms(*e), e - s);
+            }
+            println!("{}", serde_json::to_string(&segs)?);
+        }
     }
     Ok(())
+}
+
+fn hms(t: f64) -> String {
+    let t = t as u64;
+    format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
 }
