@@ -64,6 +64,16 @@ enum Cmd {
         #[arg(long)]
         cpu: bool,
     },
+    /// Talk (speech) regions in a vocal stem → mute suggestions
+    Talk {
+        /// clip directory holding orig.wav + vocals.wav
+        clip_dir: PathBuf,
+        /// song ranges inside the clip, "a-b" seconds (repeatable)
+        #[arg(long)]
+        song: Vec<String>,
+        #[arg(long, default_value = "models/panns_sed.onnx")]
+        model: PathBuf,
+    },
     /// Detect song sections in an audio/video file (PANNs + v6 segmenter)
     Detect {
         input: PathBuf,
@@ -149,6 +159,22 @@ async fn main() -> Result<()> {
             .await??;
             eprintln!();
             println!("{}", serde_json::to_string_pretty(&st)?);
+        }
+        Cmd::Talk { clip_dir, song, model } => {
+            use cliper_core::analysis::talk;
+            let mut tagger = cliper_core::ml::panns::Tagger::open(&model, false)?;
+            let c = CancellationToken::new();
+            let v = talk::probs_of_file(&mut tagger, &clip_dir.join("vocals.wav"), &c)?;
+            let m = talk::probs_of_file(&mut tagger, &clip_dir.join("orig.wav"), &c)?;
+            let songs: Vec<(f64, f64)> = song
+                .iter()
+                .filter_map(|s| s.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+                .collect();
+            let regs = talk::talk_regions(&v, &m, &songs, &Default::default());
+            for (a, b) in &regs {
+                eprintln!("talk {:7.2} ~ {:7.2} ({:.1}s)", a, b, b - a);
+            }
+            println!("{}", serde_json::to_string(&regs)?);
         }
         Cmd::Detect { input, model, probs, cpu, probs_json } => {
             use cliper_core::analysis::detect;
