@@ -1,0 +1,14 @@
+[package]
+name = "cliper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cliper-core = { path = "../cliper-core" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
