@@ -26,3 +26,6 @@ dist/
 .DS_Store
 Thumbs.db
 __pycache__/
+
+# CUDA/cuDNN runtime DLLs (fetched, not committed)
+/runtime/
