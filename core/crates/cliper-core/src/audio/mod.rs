@@ -1,3 +1,5 @@
-//! Audio I/O helpers (ffmpeg-backed decode, peaks).
+//! Audio I/O and DSP helpers.
 
 pub mod ffmpeg;
+pub mod stft;
+pub mod wav;

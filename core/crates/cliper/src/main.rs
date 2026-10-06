@@ -54,6 +54,16 @@ enum Cmd {
         #[arg(short, long)]
         cookies: Option<PathBuf>,
     },
+    /// Separate a clip into orig.wav / vocals.wav (MDX-Net)
+    Separate {
+        clip: PathBuf,
+        #[arg(long)]
+        out_dir: PathBuf,
+        #[arg(long, default_value = "models")]
+        models: PathBuf,
+        #[arg(long)]
+        cpu: bool,
+    },
     /// Detect song sections in an audio/video file (PANNs + v6 segmenter)
     Detect {
         input: PathBuf,
@@ -124,6 +134,21 @@ async fn main() -> Result<()> {
             let clip = video_fetch::fetch_video(&src, start, end, &out, &VideoOptions { height, workers: None }, progress, CancellationToken::new()).await?;
             eprintln!("\ndone in {:.1}s", t0.elapsed().as_secs_f64());
             println!("{}", serde_json::to_string_pretty(&clip)?);
+        }
+        Cmd::Separate { clip, out_dir, models, cpu } => {
+            let progress: cliper_core::progress::ProgressFn = Arc::new(|p: Progress| {
+                if let Some(m) = p.message {
+                    eprintln!("{}: {m}", p.stage);
+                } else {
+                    eprint!("\r{} {}/{}", p.stage, p.done, p.total);
+                }
+            });
+            let st = tokio::task::spawn_blocking(move || {
+                cliper_core::stems::separate_clip(&clip, &out_dir, &models, cliper_core::ml::separator::ModelSpec::voc_ft(), cpu, &progress, &CancellationToken::new())
+            })
+            .await??;
+            eprintln!();
+            println!("{}", serde_json::to_string_pretty(&st)?);
         }
         Cmd::Detect { input, model, probs, cpu, probs_json } => {
             use cliper_core::analysis::detect;
