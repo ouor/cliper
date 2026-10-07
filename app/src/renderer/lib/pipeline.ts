@@ -21,6 +21,9 @@ export async function applyDefaultSettings(id: string, extra: Partial<Settings> 
     song_fade_out: s.songFadeOut,
     filename_template: s.filenameTemplate,
     loudness: s.loudness === null ? null : { target_lufs: s.loudness, true_peak: -1 },
+    export_height: s.exportHeight,
+    video_bitrate_k: s.exportVideoK,
+    audio_bitrate_k: s.exportAudioK,
     ...extra,
   });
 }

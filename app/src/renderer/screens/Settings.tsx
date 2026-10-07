@@ -12,6 +12,7 @@ import { player } from "@/audio/player";
 import { DEFAULT_SETTINGS } from "../../shared/settings";
 import { friendly } from "@/lib/errors";
 import { CudaAddonCard } from "@/components/CudaAddonCard";
+import { QualityPicker } from "@/components/QualityPicker";
 import { cudaAddon } from "@/state/addon";
 
 const TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
@@ -403,6 +404,9 @@ export function SettingsScreen() {
                     <Num value={st.songFadeIn} onChange={(v) => set({ songFadeIn: v })} min={0.01} max={5} step={0.01} unit="초" />
                     <Num value={st.songFadeOut} onChange={(v) => set({ songFadeOut: v })} min={0.01} max={5} step={0.01} unit="초" />
                   </span>
+                </Row>
+                <Row label="화질 (mp4)" hint="원본은 받은 영상 크기 그대로 일정 품질로 만들어요. 작은 화질은 키우지 않고, '빠르게'에는 적용되지 않아요.">
+                  <QualityPicker value={{ height: st.exportHeight, videoK: st.exportVideoK, audioK: st.exportAudioK }} onChange={(q) => set({ exportHeight: q.height, exportVideoK: q.videoK, exportAudioK: q.audioK })} />
                 </Row>
                 <Row label="파일 이름" hint="{date} {yymmdd} {platform} {vod_id} {channel} {vod_title} {idx} {title} {artist} {start}">
                   <input className="input sm mono" style={{ width: 320 }} value={st.filenameTemplate} onChange={(e) => set({ filenameTemplate: e.target.value })} />

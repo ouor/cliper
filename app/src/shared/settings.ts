@@ -42,6 +42,9 @@ export interface AppSettings {
   // 내보내기
   exportPreset: ExportPreset;
   audioFormat: "wav" | "flac" | "mp3";
+  exportHeight: number | null; // 화질: null = 받은 영상 크기
+  exportVideoK: number | null; // null = 일정 품질
+  exportAudioK: number; // mp4 AAC kbps
   songFadeIn: number;
   songFadeOut: number;
   filenameTemplate: string;
@@ -86,6 +89,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   loopPad: 3,
   exportPreset: "accurate",
   audioFormat: "wav",
+  exportHeight: null,
+  exportVideoK: null,
+  exportAudioK: 320,
   songFadeIn: 0.3,
   songFadeOut: 1.5,
   filenameTemplate: "{vod_id}_{idx}_{title}",

@@ -2292,3 +2292,28 @@
   border-radius: var(--r-lg);
   background: var(--bg-1);
 }
+
+/* 화질 (export size + bitrate) */
+.quality-pick {
+  gap: 6px;
+  align-items: flex-start;
+}
+.quality-pick .seg {
+  flex-wrap: wrap;
+}
+.quality-fields {
+  gap: 12px;
+}
+.quality-field {
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+.quality-pick .hint svg {
+  vertical-align: -2px;
+}
+.ex-quality {
+  align-items: flex-start;
+}
+.ex-quality .ex-lab {
+  line-height: 30px;
+}

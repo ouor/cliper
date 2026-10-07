@@ -292,7 +292,7 @@ function validSettingsPatch(patch: unknown): Partial<AppSettings> | null {
     if (k === "projectsRoot") {
       if (v !== null && (typeof v !== "string" || !/^([a-zA-Z]:[\\/]|\\\\)/.test(v))) return null;
       if (typeof v === "string" && /^[a-zA-Z]:[\\/](windows|program files)/i.test(v)) return null;
-    } else if (k === "videoHeight" || k === "loudness" || k === "muteGainDb") {
+    } else if (k === "videoHeight" || k === "loudness" || k === "muteGainDb" || k === "exportHeight" || k === "exportVideoK") {
       if (v !== null && typeof v !== "number") return null;
     } else if (k === "keymap") {
       if (!v || typeof v !== "object" || Object.values(v).some((x) => typeof x !== "string")) return null;

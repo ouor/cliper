@@ -9,7 +9,9 @@ import { setMode, toast, updateSettings, useApp } from "@/state/app";
 import { projectUi, setProjectUi, updateProjectSettings, useProjects } from "@/state/projects";
 import { runningJobs, songProgress, startJob, useJobs } from "@/state/jobs";
 import { useWs } from "@/state/ws";
-import { renderDescription, songNumbers, songTitle, unconfirmedMutes, videoState, vodLink } from "@/lib/song";
+import { hostClip, renderDescription, songNumbers, songTitle, unconfirmedMutes, videoState, vodLink } from "@/lib/song";
+import { fromSettings, toSettings, type ExportQuality } from "@/lib/quality";
+import { QualityPicker } from "@/components/QualityPicker";
 import { fmtBytes, fmtEta, fmtTime } from "@/lib/format";
 import { call } from "@/lib/rpc";
 import { friendly } from "@/lib/errors";
@@ -17,7 +19,7 @@ import type { ExportPreset } from "../../../shared/settings";
 import { Progress } from "@/components/common";
 
 const PRESETS: { id: ExportPreset; title: string; sub: string }[] = [
-  { id: "accurate", title: "유튜브 업로드용 (정확하게)", sub: "원본 해상도 그대로 고화질로 다시 만들어요. 시작점이 정확해요." },
+  { id: "accurate", title: "유튜브 업로드용 (정확하게)", sub: "고른 화질로 다시 만들어요. 시작점이 정확해요." },
   { id: "fast", title: "빠르게 (영상 화질 그대로)", sub: "영상은 손대지 않고 잘라요. 곡당 몇 초면 끝나요." },
   { id: "archive", title: "아카이브 (멘트 그대로)", sub: "멘트를 지우지 않은 원본 소리로 정확하게 만들어요." },
   { id: "audio", title: "오디오만", sub: "WAV · FLAC · MP3 파일로 내보내요." },
@@ -94,7 +96,16 @@ export function ExportView({ p }: { p: Project }) {
   };
   const selected = songs.filter((s) => checked.has(s.id) && ready(s.id));
   const totalDur = selected.reduce((n, s) => n + (s.end - s.start), 0);
-  const estBytes = preset === "audio" ? totalDur * (format === "wav" ? 384000 : format === "flac" ? 200000 : 40000) : preset === "editor" ? totalDur * 384000 * 4 : totalDur * ((p.source?.variants[0]?.bandwidth || 8e6) / 8);
+  const quality = fromSettings(p.settings);
+  // 화질 applies to rendered mp4 (not to stream copy, audio-only or editor stems without a render)
+  const showQuality = hasVideoTrack && (preset === "accurate" || preset === "archive" || (preset === "editor" && alsoRender));
+  // smallest fetched video among the selection (engine never upscales)
+  const sourceHeight = useMemo(() => {
+    const hs = selected.map((s) => Number(hostClip(p, s)?.video?.resolution.split("x")[1])).filter((h) => h > 0);
+    return hs.length ? Math.min(...hs) : null;
+  }, [p, selected.map((s) => s.id).join()]);
+  const mp4Bps = quality.videoK && preset !== "fast" ? ((quality.videoK + quality.audioK) * 1000) / 8 : (p.source?.variants[0]?.bandwidth || 8e6) / 8;
+  const estBytes = preset === "audio" ? totalDur * (format === "wav" ? 384000 : format === "flac" ? 200000 : 40000) : preset === "editor" ? totalDur * 384000 * 4 + (alsoRender ? totalDur * mp4Bps : 0) : totalDur * mp4Bps;
   const estSec = preset === "fast" ? selected.length * 4 : preset === "audio" ? selected.length * 3 : preset === "editor" ? selected.length * 8 : totalDur * 0.15;
   const unconfSongs = selected.filter((s) => s.mute_enabled && unconfirmedMutes(s) > 0);
   const notListened = selected.filter((s) => s.mute_enabled && s.mutes.some((m) => m.confirmed) && !ui.listened.includes(s.id));
@@ -113,8 +124,15 @@ export function ExportView({ p }: { p: Project }) {
     setMode("talk");
   };
 
+  // the 화질 choice is a project default (project.update_settings); export.run waits for it
+  const qualitySave = useRef<Promise<void>>(Promise.resolve());
+  const setQuality = (q: ExportQuality) => {
+    qualitySave.current = updateProjectSettings(p.id, toSettings(q));
+  };
+
   const start = async () => {
     if (!selected.length || diskShort) return;
+    await qualitySave.current;
     if (!ui.firstExportHintShown) setProjectUi(p.id, { firstExportHintShown: true });
     void updateSettings({ exportPreset: preset, audioFormat: format });
     if (tpl !== p.settings.filename_template) await updateProjectSettings(p.id, { filename_template: tpl });
@@ -285,10 +303,16 @@ export function ExportView({ p }: { p: Project }) {
               <div className="hint">앞뒤로 3초씩 여유를 붙여요. 원본 링크와 시점은 마커 CSV에 들어가요.</div>
             </div>
           )}
+          {showQuality && (
+            <div className="row ex-quality">
+              <span className="label ex-lab">화질</span>
+              <QualityPicker value={quality} onChange={setQuality} quality={p.settings.video_quality} sourceHeight={sourceHeight} />
+            </div>
+          )}
           <details>
             <summary>자세히</summary>
             <div className="hint">
-              영상: {preset === "fast" ? "스트림 복사(무손실)" : `${p.settings.video_codec} · 품질 ${p.settings.video_quality}`} · 오디오 AAC {p.settings.audio_bitrate_k}kbps · 확인한 멘트 구간만 적용 · 곡 페이드 인 {p.settings.song_fade_in}초 / 아웃 {p.settings.song_fade_out}초
+              영상: {preset === "fast" ? "스트림 복사(무손실)" : `${p.settings.video_codec} · ${quality.height ? `${quality.height}p` : "원본 크기"} · ${quality.videoK ? `${quality.videoK}kbps (VBR)` : `품질 ${p.settings.video_quality}`}`} · 오디오 AAC {p.settings.audio_bitrate_k}kbps · 확인한 멘트 구간만 적용 · 곡 페이드 인 {p.settings.song_fade_in}초 / 아웃 {p.settings.song_fade_out}초
             </div>
           </details>
         </section>
