@@ -223,7 +223,7 @@ export function SettingsScreen() {
 
   const diag = () =>
     [
-      `Cliper desktop 0.1.0 · Electron ${window.cliper.versions.electron} · Chrome ${window.cliper.versions.chrome}`,
+      `Cliper desktop 0.2.0 · Electron ${window.cliper.versions.electron} · Chrome ${window.cliper.versions.chrome}`,
       `engine ${system?.version ?? "?"} · state ${engine.state} · restarts ${engine.restarts}`,
       `ffmpeg: ${system?.ffmpeg ?? "없음"}`,
       `models: ${system ? Object.entries(system.models).map(([k, v]) => `${k}=${v ? "ok" : "missing"}`).join(", ") : "?"}`,
@@ -525,7 +525,7 @@ export function SettingsScreen() {
                   </div>
                   <div className="about">
                     <div>
-                      <Mic2 size={13} /> Cliper 0.1.0 · 처리 엔진 {system?.version ?? "?"}
+                      <Mic2 size={13} /> Cliper 0.2.0 · 처리 엔진 {system?.version ?? "?"}
                     </div>
                     <div>
                       <Film size={13} /> 목소리 분리: MDX-Net (UVR-MDX-NET-Voc_FT) · 곡 찾기: PANNs
