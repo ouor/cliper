@@ -150,6 +150,8 @@ api_from!(crate::stems::StemError, |e: crate::stems::StemError| match e {
     crate::stems::StemError::Io(e) => e.into(),
     crate::stems::StemError::Separate(crate::ml::separator::SeparateError::Model(m)) => m.into(),
     crate::stems::StemError::Separate(crate::ml::separator::SeparateError::Cancelled(_)) => ApiError::new("CANCELLED", "cancelled"),
+    crate::stems::StemError::Separate(crate::ml::separator::SeparateError::OutOfMemory) => ApiError::new("MODEL", "GPU out of memory"),
+    crate::stems::StemError::Separate(crate::ml::separator::SeparateError::Io(e)) => e.into(),
 });
 api_from!(crate::export::ExportError, |e: crate::export::ExportError| match e {
     crate::export::ExportError::Ffmpeg(f) => f.into(),
@@ -260,6 +262,9 @@ pub struct Engine {
     sources: tokio::sync::Mutex<HashMap<String, (Source, Instant)>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     tagger: Arc<Mutex<Option<Tagger>>>,
+    /// separation session, kept open between clips; holding its lock also
+    /// serializes GPU separation across jobs
+    separator: Mutex<Option<crate::ml::separator::Separator>>,
     cookies: Mutex<CookieJar>,
     keep_awake: AtomicBool,
     /// ADTS frame byte offsets of a project's analysis audio (audio.window)
@@ -656,6 +661,7 @@ impl Engine {
             sources: tokio::sync::Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
             tagger: Arc::new(Mutex::new(None)),
+            separator: Mutex::new(None),
             cookies: Mutex::new(cookies),
             keep_awake: AtomicBool::new(keep_awake),
             frame_index: Mutex::new(HashMap::new()),
@@ -1752,17 +1758,8 @@ impl Engine {
 
         // 3) stems
         let clip = if clip.stems.as_ref().is_none_or(|s| !s.vocals.is_file()) {
-            let (models, cpu, progress, cancel, mp4c, dirc) =
-                (self.cfg.models_dir.clone(), self.cfg.prefer_cpu, ctx.progress.clone(), ctx.cancel.clone(), mp4.clone(), dir.clone());
-            let stems = tokio::task::spawn_blocking(move || -> ApiResult<crate::stems::Stems> {
-                let st = crate::stems::separate_clip(&mp4c, &dirc, &models, ModelSpec::voc_ft(), cpu, &progress, &cancel)?;
-                for (wavp, name) in [(&st.orig, "orig.peaks"), (&st.vocals, "vocals.peaks")] {
-                    let w = wav::read_f32(wavp)?;
-                    peaks::of_stereo(&w.samples, w.sample_rate, 100).write(&dirc.join(name))?;
-                }
-                Ok(st)
-            })
-            .await??;
+            let (eng, progress, cancel, mp4c, dirc) = (self.clone(), ctx.progress.clone(), ctx.cancel.clone(), mp4.clone(), dir.clone());
+            let stems = tokio::task::spawn_blocking(move || eng.separate_with_fallback(&mp4c, &dirc, &progress, &cancel)).await??;
             let r = self
                 .mutate(pid, |p| {
                     let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
@@ -1891,6 +1888,36 @@ impl Engine {
             Err(e) => {
                 tracing::warn!("alignment task failed ({e}); using the predicted offset");
                 fallback(0.0)
+            }
+        }
+    }
+
+    /// Separate a clip with the cached separator. On GPU out-of-memory at
+    /// batch 1: free the detection model's GPU memory and retry once, then
+    /// redo this clip on the CPU. Blocking.
+    fn separate_with_fallback(&self, mp4: &Path, dir: &Path, progress: &ProgressFn, cancel: &CancellationToken) -> ApiResult<crate::stems::Stems> {
+        use crate::ml::separator::{SeparateError, Separator};
+        use crate::stems::StemError;
+        let mut slot = self.separator.lk();
+        let mut freed = false;
+        loop {
+            if slot.is_none() {
+                *slot = Some(Separator::open(&self.cfg.models_dir, ModelSpec::voc_ft(), self.cfg.prefer_cpu)?);
+            }
+            match crate::stems::separate_clip(mp4, dir, slot.as_mut().unwrap(), progress, cancel) {
+                Err(StemError::Separate(SeparateError::OutOfMemory)) if !freed => {
+                    freed = true;
+                    *slot = None;
+                    *self.tagger.lk() = None;
+                    tracing::warn!("separation out of GPU memory; freeing the detection model and retrying");
+                }
+                Err(StemError::Separate(SeparateError::OutOfMemory)) => {
+                    *slot = None;
+                    progress(Progress::note("separate", "gpu_out_of_memory", "GPU out of memory; separating this clip on the CPU"));
+                    let mut cpu = Separator::open(&self.cfg.models_dir, ModelSpec::voc_ft(), true)?;
+                    return Ok(crate::stems::separate_clip(mp4, dir, &mut cpu, progress, cancel)?);
+                }
+                r => return Ok(r?),
             }
         }
     }

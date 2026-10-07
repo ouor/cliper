@@ -222,13 +222,19 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
             (crate::stems::STEM_RATE, render(&pcm, &silence, crate::stems::STEM_RATE, in_t, spec.out_t, &[], spec.fade_in, spec.fade_out))
         }
         None => {
-            let orig = wav::read_f32(&spec.orig_wav)?;
-            let voc = wav::read_f32(&spec.vocals_wav)?;
+            // read just the song's frames; render on that window's time base
+            let (rate, _, _) = wav::info(&spec.orig_wav)?;
+            let a = (in_t.max(0.0) * rate as f64).round() as u64;
+            let n = ((spec.out_t - in_t).max(0.0) * rate as f64).round() as u64 + 1;
+            let orig = wav::read_f32_range(&spec.orig_wav, a, n)?;
+            let voc = wav::read_f32_range(&spec.vocals_wav, a, n)?;
             if orig.sample_rate != voc.sample_rate || orig.channels != 2 || voc.channels != 2 {
                 return Err(ExportError::Invalid("stems must be stereo at the same rate".into()));
             }
-            let a = render(&orig.samples, &voc.samples, orig.sample_rate, in_t, spec.out_t, &spec.mutes, spec.fade_in, spec.fade_out);
-            (orig.sample_rate, a)
+            let t0 = a as f64 / rate as f64;
+            let mutes = shift(&spec.mutes, t0);
+            let out = render(&orig.samples, &voc.samples, rate, in_t - t0, spec.out_t - t0, &mutes, spec.fade_in, spec.fade_out);
+            (rate, out)
         }
     };
     if let Some(dir) = spec.out.parent() {
@@ -365,11 +371,9 @@ pub struct StemsResult {
     pub duration: f64,
 }
 
-fn slice(x: &[f32], rate: u32, a: f64, b: f64) -> Vec<f32> {
-    let frames = x.len() / 2;
-    let i = ((a.max(0.0) * rate as f64).round() as usize).min(frames);
-    let j = ((b * rate as f64).round() as usize).clamp(i, frames);
-    x[2 * i..2 * j].to_vec()
+/// Mutes moved onto a time base that starts at `t0`.
+fn shift(mutes: &[MuteSpan], t0: f64) -> Vec<MuteSpan> {
+    mutes.iter().map(|m| MuteSpan { start: m.start - t0, end: m.end - t0, ..*m }).collect()
 }
 
 fn hms_ms(t: f64) -> String {
@@ -382,18 +386,23 @@ fn hms_ms(t: f64) -> String {
 pub fn export_stems(spec: &StemsSpec, progress: &ProgressFn) -> Result<StemsResult, ExportError> {
     std::fs::create_dir_all(&spec.dir)?;
     progress(Progress::note("export.stems", "write_stems", "writing stems"));
-    let orig = wav::read_f32(&spec.orig_wav)?;
-    let voc = wav::read_f32(&spec.vocals_wav)?;
-    let rate = orig.sample_rate;
+    let (rate, _, frames_o) = wav::info(&spec.orig_wav)?;
+    let (_, _, frames_v) = wav::info(&spec.vocals_wav)?;
     let a = (spec.in_t - spec.handles).max(0.0);
-    let total = orig.samples.len().min(voc.samples.len()) as f64 / 2.0 / rate as f64;
+    let total = frames_o.min(frames_v) as f64 / rate as f64;
     let b = (spec.out_t + spec.handles).min(total);
-    let processed = render_full(&orig.samples, &voc.samples, rate, &spec.mutes);
+    // only [a, b] is read; times inside it are relative to a
+    let fa = (a * rate as f64).round() as u64;
+    let fb = ((b * rate as f64).round() as u64).max(fa);
+    let orig = wav::read_f32_range(&spec.orig_wav, fa, fb - fa)?;
+    let voc = wav::read_f32_range(&spec.vocals_wav, fa, fb - fa)?;
+    let t0 = fa as f64 / rate as f64;
+    let processed = render_full(&orig.samples, &voc.samples, rate, &shift(&spec.mutes, t0));
     let inst: Vec<f32> = orig.samples.iter().zip(&voc.samples).map(|(o, v)| o - v).collect();
     let mut files = Vec::new();
     for (suffix, data) in [("original", &orig.samples), ("processed", &processed), ("vocals", &voc.samples), ("accompaniment", &inst)] {
         let p = spec.dir.join(format!("{}_{suffix}.wav", spec.name));
-        wav::write_f32(&p, rate, 2, &slice(data, rate, a, b))?;
+        wav::write_f32(&p, rate, 2, data)?;
         files.push(p);
     }
 

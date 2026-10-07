@@ -127,7 +127,10 @@ pub fn open_session(model: &Path, prefer_cpu: bool) -> Result<(Session, Device),
     let build = |cuda: bool| -> Result<Session, ModelError> {
         let mut b = Session::builder()?.with_optimization_level(GraphOptimizationLevel::Level3)?;
         if cuda {
-            b = b.with_execution_providers([ep::CUDA::default().build().error_on_failure()])?;
+            // grow the memory arena only as needed (the default doubles), so
+            // smaller GPUs fit the separator next to the tagger
+            let cuda = ep::CUDA::default().with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested);
+            b = b.with_execution_providers([cuda.build().error_on_failure()])?;
         }
         Ok(b.commit_from_file(model)?)
     };

@@ -341,7 +341,7 @@ async fn run() -> Result<()> {
                 }
             });
             let st = tokio::task::spawn_blocking(move || {
-                cliper_core::stems::separate_clip(&clip, &out_dir, &models, cliper_core::ml::separator::ModelSpec::voc_ft(), cpu, &progress, &CancellationToken::new())
+                cliper_core::stems::separate_clip_auto(&clip, &out_dir, &models, cliper_core::ml::separator::ModelSpec::voc_ft(), cpu, &progress, &CancellationToken::new())
             })
             .await??;
             eprintln!();
