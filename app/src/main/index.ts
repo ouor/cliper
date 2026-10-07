@@ -291,5 +291,7 @@ app.on("before-quit", () => {
 app.on("window-all-closed", async () => {
   await engine.stop();
   app.quit();
+  // never linger without a window (e.g. a stuck handle keeping the loop alive)
+  setTimeout(() => app.exit(0), 5000).unref();
 });
 
