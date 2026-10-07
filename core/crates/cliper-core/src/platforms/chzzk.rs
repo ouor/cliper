@@ -157,7 +157,7 @@ async fn resolve_rewind(http: Http, master_url: &str, content: Value, video_id: 
         token_query: None,
         head_hint: 32768,
         warm_head: true,
-        default_workers: 16,
+        default_workers: 4,
         raw: serde_json::json!({ "chzzk_video": content }),
         http,
     })
@@ -212,7 +212,7 @@ async fn resolve_ts(http: Http, content: Value, video_id: &str) -> Result<Source
         token_query: token,
         head_hint: 32768,
         warm_head: true,
-        default_workers: 16,
+        default_workers: 4,
         raw: serde_json::json!({ "chzzk_video": content, "chzzk_playback": playback }),
         http,
     })
