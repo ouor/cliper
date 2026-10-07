@@ -2,7 +2,8 @@
 // exposes a tiny localhost-only HTTP API for scripted checks and screenshots.
 //
 //   node scripts/devdriver.mjs [--port 7788] [--width 1600 --height 960]
-//   env: CLIPER_PROJECTS, CLIPER_USER_DATA, CLIPER_SKIP_FIRST_RUN=1
+//   env: CLIPER_PROJECTS, CLIPER_USER_DATA, CLIPER_SKIP_FIRST_RUN=1 (dev builds);
+//        DEVDRIVER_EXE + DEVDRIVER_ARGS for a packaged QA build
 //
 //   POST /eval   {"js": "<expression>"}          → {"value": …}  (renderer context)
 //   POST /shot   {"path": "C:/…/x.png"}           → screenshot of the window
@@ -41,7 +42,12 @@ const token = process.env.DEVDRIVER_TOKEN || randomBytes(16).toString("hex");
 const tokenFile = join(tmpdir(), "cliper-devdriver.token");
 writeFileSync(tokenFile, token);
 
-const app = await electron.launch({ args: [appDir], cwd: appDir, env: { ...process.env } });
+// DEVDRIVER_EXE: drive a packaged QA build instead (needs CLIPER_PACK_INSPECT=1 at pack time;
+// packaged builds ignore CLIPER_* env, so pass DEVDRIVER_ARGS e.g. "--user-data-dir=<dir>")
+const exe = process.env.DEVDRIVER_EXE;
+const app = exe
+  ? await electron.launch({ executablePath: exe, args: (process.env.DEVDRIVER_ARGS || "").split(" ").filter(Boolean), env: { ...process.env } })
+  : await electron.launch({ args: [appDir], cwd: appDir, env: { ...process.env } });
 const page = await app.firstWindow();
 app.on("close", () => process.exit(0)); // the app quit (e.g. window closed): free the port
 const logs = [];

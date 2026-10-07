@@ -8,6 +8,7 @@ import { useWs } from "./state/ws";
 import { syncStats, useProjects } from "./state/projects";
 import { useJobs } from "./state/jobs";
 import { useApp } from "./state/app";
+import { installTipA11y } from "./lib/a11y-tips";
 
 // QA handle (the renderer's own state; nothing privileged)
 Object.assign(window, { __cliper: { player, usePlayer, useWs, useProjects, useJobs, useApp, workletUrl: WORKLET_URL, syncStats } });
@@ -16,3 +17,6 @@ Object.assign(window, { __cliper: { player, usePlayer, useWs, useProjects, useJo
 for (const type of ["dragover", "drop"] as const) document.addEventListener(type, (e) => e.preventDefault());
 
 createRoot(document.getElementById("root")!).render(<App />);
+
+// CSS tooltips → accessible names / descriptions
+installTipA11y();

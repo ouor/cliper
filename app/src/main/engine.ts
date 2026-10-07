@@ -32,7 +32,6 @@ const LOG_ROTATE = 5 * 1024 * 1024;
 /** Per-method response timeouts (ms). Jobs return a handle immediately; 0 = no timeout. */
 const TIMEOUTS: Record<string, number> = {
   "project.create": 180_000,
-  "audio.window": 90_000,
   "system.probe_gpu": 180_000,
   "system.check_cookies": 60_000,
   "project.drop_media": 120_000,

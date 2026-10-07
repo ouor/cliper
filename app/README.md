@@ -100,9 +100,30 @@ app/
 - 진행 표시는 `job.started.items`, `progress.item_index/items_total/eta_sec`, `progress.note.code`(한국어 문장은 앱이 만듦)를 씁니다. 소리 받는 동안은 `progress.peaks_until`에 맞춰 `overview.peaks`를 다시 읽어 파형을 채웁니다.
 - 진행 중 작업 요청은 userData에 기록해 두었다가, 앱이 작업 중에 닫히면 다음 실행 때 "지난번에 멈춘 작업 [이어서 하기]"로 다시 요청합니다.
 
-## 패키징 (후속 과제)
+## 패키징
 
-설치 파일은 아직 만들지 않았습니다(electron-builder 설정, Electron fuses 미적용). 준비된 부분:
-- 패키지 빌드(`app.isPackaged`)에서는 `process.resourcesPath` 아래 `engine/cliper.exe`, `models/`를 쓰고, `ffmpeg/ffmpeg.exe`가 있으면 엔진에 `CLIPER_FFMPEG`로 넘깁니다. CUDA DLL은 엔진이 `runtime/cuda`를 찾습니다.
-- `CLIPER_*` 환경 변수(엔진·모델·작업 폴더·userData 덮어쓰기)와 `ELECTRON_RENDERER_URL`은 개발 빌드에서만 적용됩니다.
-- 남은 일: electron-builder `extraResources`, `@electron/fuses`(RunAsNode·NodeOptions·Inspect 끄기, OnlyLoadAppFromAsar, asar 무결성, `GrantFileProtocolExtraPrivileges` 끄기), 패키지 상태에서 AudioWorklet 로딩 확인.
+설정: `electron-builder.config.cjs`. 결과물은 `dist/`(git에 들어가지 않음).
+
+```sh
+npm run pack:win   # dist/win-unpacked (설치 파일 없이 빠른 확인)
+npm run dist:win   # dist/cliper-v0.1.0-amd64.exe (포터블) + dist/cliper-v0.1.0-amd64-installer.exe (NSIS)
+```
+
+패키저가 기대하는 것(모두 git 밖에 있고, 빌드할 때 `resources/`로 복사됩니다):
+
+| resources/ | 내용 | 원본 (환경 변수로 바꿀 수 있음) |
+|---|---|---|
+| `engine/` | `cliper.exe` + 옆의 DLL(onnxruntime 공급자, DirectML) | `CLIPER_PACK_ENGINE_DIR`, 기본 `../core/target/release` (`cargo build --release`) |
+| `engine/cuda/` | CUDA 13 + cuDNN 9 DLL. 엔진이 `<exe 폴더>/cuda`를 찾고, 앱도 `CLIPER_CUDA_DIR`로 넘깁니다 | `CLIPER_PACK_CUDA_DIR`, 기본 `../runtime/cuda`. `CLIPER_PACK_CUDA=0`이면 넣지 않음(CPU 전용) |
+| `ffmpeg/` | `ffmpeg.exe`, `ffprobe.exe`(공유 빌드면 DLL도). 앱이 `CLIPER_FFMPEG`로 넘기고, 엔진은 그 옆에서 ffprobe를 찾습니다 | `CLIPER_PACK_FFMPEG_DIR`, 기본은 PATH에 있는 ffmpeg의 폴더 |
+| `models/` | `*.onnx`, `panns_labels.json` (`.pth`는 넣지 않음) | `CLIPER_PACK_MODELS_DIR`, 기본 `../models` |
+
+빠진 파일이 있으면 빌드가 처음에 어떤 파일이 없는지 알려 주고 멈춥니다.
+
+- 패키지 빌드는 `resources/` 아래 경로만 씁니다. `CLIPER_*` 환경 변수와 `ELECTRON_RENDERER_URL`은 개발 빌드에서만 적용됩니다. 저장소 경로로 되돌아가지 않습니다.
+- Electron은 npm이 설치한 `node_modules/electron/dist`를 그대로 씁니다(`electronDist`). 렌더러와 main은 electron-vite가 묶으므로 asar에는 `out/`과 `package.json`만 들어갑니다. 그래서 런타임 패키지도 devDependencies에 있습니다.
+- Electron fuses: RunAsNode·NODE_OPTIONS·`--inspect` 인자 끔, OnlyLoadAppFromAsar·쿠키 암호화 켬, `GrantFileProtocolExtraPrivileges` 끔(렌더러는 `app://cliper`에서 옵니다). `afterPack`에서 `default_app.asar`를 지웁니다.
+- 아직 꺼 둔 것: 실행 파일 편집과 서명(`signAndEditExecutable: false`, 아이콘·버전 정보·코드 서명에는 GitHub에서 받는 winCodeSign 묶음이 필요), 그리고 그에 기대는 `EnableEmbeddedAsarIntegrityValidation`. 릴리스 파이프라인에서 서명 도구와 함께 켜세요.
+- NSIS·포터블 대상은 electron-builder가 처음 한 번 GitHub(electron-userland/electron-builder-binaries)에서 NSIS 도구를 받습니다. `pack:win`은 받지 않습니다.
+- QA: `CLIPER_PACK_INSPECT=1`로 만든 빌드만 `--inspect`를 허용하므로, `DEVDRIVER_EXE=dist/win-unpacked/Cliper.exe DEVDRIVER_ARGS=--user-data-dir=<임시 폴더> node scripts/devdriver.mjs`로 조종할 수 있습니다. 배포 빌드는 이 퓨즈가 꺼져 있습니다.
+- 확인한 것(패키지 빌드, PATH에서 ffmpeg를 뺀 상태): `app://cliper`에서 로드, 엔진·모델·ffmpeg를 `resources/`에서 찾음, asar 안의 AudioWorklet 로드와 재생.

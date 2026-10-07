@@ -31,11 +31,20 @@ function firstExisting(...paths: (string | undefined)[]): string {
   for (const p of paths) if (p && existsSync(p)) return p;
   return paths.find(Boolean) as string;
 }
-const ENGINE_EXE = firstExisting(env("CLIPER_ENGINE"), app.isPackaged ? join(process.resourcesPath, "engine", "cliper.exe") : undefined, join(repoRoot, "core", "target", "release", "cliper.exe"));
-const MODELS_DIR = firstExisting(env("CLIPER_MODELS"), app.isPackaged ? join(process.resourcesPath, "models") : undefined, join(repoRoot, "models"));
-// packaged: ffmpeg ships in resources/ffmpeg; the engine finds it through CLIPER_FFMPEG
+// Packaged builds use only what ships in resources/ (layout: app/README.md "패키징");
+// dev uses the repo checkout, overridable through env.
+const RES = app.isPackaged ? process.resourcesPath : "";
+const ENGINE_EXE = app.isPackaged ? join(RES, "engine", "cliper.exe") : firstExisting(env("CLIPER_ENGINE"), join(repoRoot, "core", "target", "release", "cliper.exe"));
+const MODELS_DIR = app.isPackaged ? join(RES, "models") : firstExisting(env("CLIPER_MODELS"), join(repoRoot, "models"));
 const ENGINE_ENV: Record<string, string> = {};
-if (app.isPackaged && existsSync(join(process.resourcesPath, "ffmpeg", "ffmpeg.exe"))) ENGINE_ENV.CLIPER_FFMPEG = join(process.resourcesPath, "ffmpeg", "ffmpeg.exe");
+if (app.isPackaged) {
+  // ffmpeg/ffprobe ship side by side in resources/ffmpeg (the engine looks for ffprobe next to ffmpeg);
+  // the CUDA runtime in resources/engine/cuda (the engine also finds <exe dir>/cuda by itself)
+  const ff = join(RES, "ffmpeg", "ffmpeg.exe");
+  if (existsSync(ff)) ENGINE_ENV.CLIPER_FFMPEG = ff;
+  const cuda = join(RES, "engine", "cuda");
+  if (existsSync(cuda)) ENGINE_ENV.CLIPER_CUDA_DIR = cuda;
+}
 
 const DEV_URL = env("ELECTRON_RENDERER_URL");
 const ENTRY_URL = DEV_URL ?? `${APP_ORIGIN}/index.html`;

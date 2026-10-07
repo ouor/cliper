@@ -22,8 +22,8 @@ export interface PlayerState {
   loopOn: boolean;
   volume: number;
   source: "none" | "stream" | "stems";
-  /** stems window currently loaded */
-  stems: { projectId: string; clipId: string; start: number; end: number; progress: number; error?: string } | null;
+  /** stems window currently loaded (`paged`: a long song held a page at a time) */
+  stems: { projectId: string; clipId: string; start: number; end: number; progress: number; paged?: boolean; error?: string } | null;
   streamError?: string;
 }
 
@@ -42,6 +42,11 @@ export const usePlayer = create<PlayerState>(() => ({
 
 const SR = 48000;
 const CHUNK = 6; // seconds per stream chunk
+/** longest stems window held in memory (2 × int16 stereo = 8 bytes/frame → ~115 MB); longer songs page */
+const STEMS_MAX_SEC = 300;
+/** a new page starts this far before the playhead; paging starts this close to the page end */
+const STEMS_LEAD = 30;
+const STEMS_EDGE = 15;
 
 interface VideoBinding {
   el: HTMLVideoElement;
@@ -66,6 +71,8 @@ class Player {
   // stems
   private stemsAbort: AbortController | null = null;
   private stemsGen = 0;
+  /** the requested stems range (frames from the clip start); a long one is held a page at a time */
+  private stemsRange: { key: string; projectId: string; clipId: string; origin: number; f0: number; f1: number; bust: string; capped: boolean } | null = null;
   private stemsKey = "";
   private video: VideoBinding | null = null;
 
@@ -151,9 +158,25 @@ class Player {
     if (st.playing && Math.abs(st.pos - pos) > 0.03) usePlayer.setState({ pos });
     for (const l of this.listeners) l(pos);
     if (st.source === "stream" && (st.playing || st.buffering)) this.prefetch(pos, st.rate);
+    if (st.source === "stems" && st.playing) this.pageStems(pos, st.rate);
     this.syncVideo(pos, st.playing && !st.buffering, st.rate);
     requestAnimationFrame(this.tick);
   };
+
+  /** Long stems ranges: move the page when the playhead leaves it or nears its end. */
+  private pageStems(pos: number, rate: number) {
+    const r = this.stemsRange;
+    const st = usePlayer.getState().stems;
+    if (!r?.capped || !st || st.progress < 1) return;
+    const rs = r.origin + r.f0 / SR;
+    const re = r.origin + r.f1 / SR;
+    if (pos < rs || pos > re) return;
+    const outside = pos < st.start || pos > st.end;
+    const nearEnd = rate > 0 && st.end < re - 0.01 && pos > st.end - STEMS_EDGE;
+    const nearStart = rate < 0 && st.start > rs + 0.01 && pos < st.start + STEMS_EDGE;
+    if (outside || nearEnd) void this.loadStemsPage(pos, false);
+    else if (nearStart) void this.loadStemsPage(pos - STEMS_MAX_SEC + 2 * STEMS_LEAD, false);
+  }
 
   // ── sources ──
 
@@ -167,6 +190,7 @@ class Player {
     this.streamProject = projectId;
     this.streamDuration = duration;
     this.post({ type: "stream:init", chunkSec: CHUNK, duration });
+    this.stemsRange = null;
     usePlayer.setState({ source: "stream", stems: null, streamError: undefined });
     this.prefetch(this.repPos, 1);
   }
@@ -232,13 +256,36 @@ class Player {
    */
   async useStems(projectId: string, clipId: string, origin: number, clipFrames: number, start: number, end: number, bust = "") {
     await this.init();
-    const f0 = Math.max(0, Math.floor((start - origin) * SR));
-    const f1 = Math.min(clipFrames, Math.ceil((end - origin) * SR));
+    const rf0 = Math.max(0, Math.floor((start - origin) * SR));
+    const rf1 = Math.min(clipFrames, Math.ceil((end - origin) * SR));
+    const rangeKey = `${projectId}/${clipId}/${rf0}/${rf1}/${bust}`;
+    if (this.stemsRange?.key === rangeKey) return;
+    // reuse when the requested range is inside the loaded (uncapped) one
+    const cur = usePlayer.getState().stems;
+    const r = this.stemsRange;
+    if (r && !r.capped && cur && !cur.error && r.projectId === projectId && r.clipId === clipId && r.bust === bust && r.f0 <= rf0 && r.f1 >= rf1) return;
+    const capped = rf1 - rf0 > STEMS_MAX_SEC * SR;
+    this.stemsRange = { key: rangeKey, projectId, clipId, origin, f0: rf0, f1: rf1, bust, capped };
+    const now = this.now();
+    const anchor = now >= start && now <= end ? now : start;
+    await this.loadStemsPage(anchor, true);
+  }
+
+  /** Load the page of the current stems range around VOD time `anchor` (the whole range when it is short). */
+  private async loadStemsPage(anchor: number, fresh: boolean) {
+    const r = this.stemsRange;
+    if (!r) return;
+    let f0 = r.f0;
+    let f1 = r.f1;
+    if (r.capped) {
+      const max = STEMS_MAX_SEC * SR;
+      f0 = Math.max(r.f0, Math.floor((anchor - STEMS_LEAD - r.origin) * SR));
+      f1 = Math.min(r.f1, f0 + max);
+      f0 = Math.max(r.f0, f1 - max);
+    }
+    const { projectId, clipId, origin, bust } = r;
     const key = `${projectId}/${clipId}/${f0}/${f1}/${bust}`;
     if (key === this.stemsKey) return;
-    // reuse when the requested window is inside the loaded one
-    const cur = usePlayer.getState().stems;
-    if (cur && cur.projectId === projectId && cur.clipId === clipId && !cur.error && cur.start <= start + 0.01 && cur.end >= end - 0.01 && this.stemsKey.endsWith(`/${bust}`)) return;
     this.stopStems();
     this.stemsKey = key;
     this.streamProject = null;
@@ -248,14 +295,14 @@ class Player {
     const frames = Math.max(0, f1 - f0);
     const wStart = origin + f0 / SR;
     const wEnd = origin + f1 / SR;
-    const wasPlaying = usePlayer.getState().playing;
-    if (wasPlaying) this.pause();
+    // a new song pauses; paging inside a long song keeps playing (the worklet waits for data)
+    if (fresh && usePlayer.getState().playing) this.pause();
     // allocate here (not on the audio thread) and hand the buffers to the worklet
     const gen = ++this.stemsGen;
     const ob = new Int16Array(frames * 2);
     const vb = new Int16Array(frames * 2);
     this.post({ type: "stems:init", gen, origin: wStart, frames, orig: ob, voc: vb }, [ob.buffer, vb.buffer]);
-    usePlayer.setState({ source: "stems", stems: { projectId, clipId, start: wStart, end: wEnd, progress: 0 } });
+    usePlayer.setState({ source: "stems", stems: { projectId, clipId, start: wStart, end: wEnd, progress: 0, paged: r.capped } });
     const ac = new AbortController();
     this.stemsAbort = ac;
     let doneO = 0;
@@ -324,6 +371,7 @@ class Player {
   async clearSource() {
     await this.init();
     this.stopStems();
+    this.stemsRange = null;
     this.streamProject = null;
     this.post({ type: "none" });
     usePlayer.setState({ source: "none", stems: null, playing: false });
@@ -364,6 +412,7 @@ class Player {
     usePlayer.setState({ pos: p });
     this.post({ type: "seek", pos: p });
     if (usePlayer.getState().source === "stream") this.prefetch(p, usePlayer.getState().rate);
+    if (usePlayer.getState().source === "stems") this.pageStems(p, 0);
     for (const l of this.listeners) l(p);
   }
 
