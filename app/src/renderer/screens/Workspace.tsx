@@ -233,6 +233,15 @@ export function Workspace({ projectId }: { projectId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, engineReady]);
 
+  // select the first song to check once songs appear (e.g. right after 곡 찾기)
+  const songCount = p?.songs.length ?? 0;
+  useEffect(() => {
+    const st = useWs.getState();
+    const proj = useProjects.getState().projects[projectId];
+    if (!proj || !songCount) return;
+    if (!st.selected || !proj.songs.some((s) => s.id === st.selected)) useWs.setState({ selected: sortSongs(proj, "attention", "")[0]?.id ?? null });
+  }, [songCount, projectId]);
+
   // remember the selected song
   useEffect(() => {
     if (ws.selected) setProjectUi(projectId, { lastSongId: ws.selected });
@@ -279,11 +288,18 @@ export function Workspace({ projectId }: { projectId: string }) {
         }
         return;
       }
+      if (mode === "export" && combo === "Enter") {
+        e.preventDefault();
+        window.dispatchEvent(new Event("cliper:export-start"));
+        return;
+      }
       const acts = keys.get(combo);
       if (!acts) return;
       const scopes = mode === "review" ? ["review", "play", "global"] : mode === "talk" ? ["talk", "play", "global"] : ["play", "global"];
       const a = scopes.map((sc) => acts.find((x) => x.scope === sc)).find(Boolean) as KeyAction | undefined;
       if (!a) return;
+      // jobs / settings / help are owned by the app-level handler
+      if (a.id === "jobs" || a.id === "settings" || a.id === "help") return;
       e.preventDefault();
       run(a.id);
     };

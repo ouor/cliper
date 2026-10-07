@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Ban, CheckCircle2, Clock, Loader2, Moon, RotateCw, Trash2, X, XCircle } from "lucide-react";
 import { useApp, go, openSettings } from "@/state/app";
-import { cancelJob, cancelWaiting, clearFinished, dismissJob, KIND_LABEL, retryJob, STAGE_LABEL, useJobs, type Job } from "@/state/jobs";
+import { cancelJob, cancelWaiting, clearFinished, dismissJob, KIND_LABEL, noteKo, retryJob, STAGE_LABEL, useJobs, type Job } from "@/state/jobs";
 import { useProjects } from "@/state/projects";
 import { Progress } from "./common";
 import { fmtDurationKo, fmtEta } from "@/lib/format";
@@ -57,7 +57,7 @@ function JobRow({ j }: { j: Job }) {
       </div>
       {j.status === "running" && <Progress value={j.fraction} />}
       <div className={`job-sub ${j.status === "failed" ? "err" : ""}`}>{jobProgressText(j)}</div>
-      {j.status === "running" && j.message && <div className="job-sub faint">{j.message}</div>}
+      {j.status === "running" && noteKo(j.message) && <div className="job-sub faint">{noteKo(j.message)}</div>}
       {j.status === "failed" && j.error && (
         <div className="job-fail">
           {j.error.hint && <div className="muted">{j.error.hint}</div>}

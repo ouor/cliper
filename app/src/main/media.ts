@@ -10,7 +10,9 @@ import { createReadStream, existsSync, promises as fsp, statSync } from "node:fs
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 
-const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// one path segment: no separators, reserved characters or control chars (ids can contain
+// non-ASCII, e.g. local recordings named in Korean); containment is re-checked after resolve
+const ID_RE = /^(?!\.{1,2}$)[^\\\/:*?"<>|\u0000-\u001f]{1,160}$/u;
 const REL_RE = /^(overview\.peaks|probs\.bin|clips\/[A-Za-z0-9_-]{1,64}\/(source\.mp4|orig\.wav|vocals\.wav|orig\.peaks|vocals\.peaks))$/;
 
 const MIME: Record<string, string> = {
@@ -30,8 +32,12 @@ function deny(status: number, msg: string): Response {
 }
 
 /** Resolve a project-relative media path, or null if it is not allowed. */
+export function isProjectId(id: string): boolean {
+  return ID_RE.test(id) && !id.includes("..");
+}
+
 export function resolveProjectFile(root: string, projectId: string, rel: string): string | null {
-  if (!ID_RE.test(projectId) || projectId.includes("..")) return null;
+  if (!isProjectId(projectId)) return null;
   if (!REL_RE.test(rel)) return null;
   const base = resolve(root);
   const full = resolve(base, projectId, rel);
@@ -211,7 +217,7 @@ export function createMediaHandler(ctx: MediaContext) {
     }
     if (url.host === "pcm") {
       const projectId = parts[0] ?? "";
-      if (!ID_RE.test(projectId)) return deny(403, "forbidden");
+      if (!isProjectId(projectId)) return deny(403, "forbidden");
       const t = Number(url.searchParams.get("t"));
       const d = Number(url.searchParams.get("d"));
       if (!(t >= 0) || !(d > 0 && d <= 60)) return deny(400, "bad window");

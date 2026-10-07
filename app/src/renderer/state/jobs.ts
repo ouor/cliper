@@ -36,6 +36,31 @@ export const STAGE_LABEL: Record<string, string> = {
   "export.stems": "편집기용 파일 만드는 중",
 };
 
+const NOTE_KO: [RegExp, string | ((m: RegExpExecArray) => string)][] = [
+  [/^copying the audio track/i, "녹화 파일에서 소리를 꺼내는 중"],
+  [/^cutting the recording/i, "녹화 파일에서 곡 부분을 자르는 중"],
+  [/^finding talk/i, "목소리에서 멘트를 찾는 중"],
+  [/^rendering audio/i, "소리 만드는 중"],
+  [/^measuring loudness/i, "소리 크기 재는 중"],
+  [/^writing stems/i, "편집기용 WAV 쓰는 중"],
+  [/^writing reference video/i, "참조용 영상 만드는 중"],
+  [/^remuxing/i, "영상 정리 중"],
+  [/^decoding/i, "소리 푸는 중"],
+  [/segment/i, "일부 구간은 다른 화질의 소리로 채웠어요"],
+  [/^clip (\d+)\/(\d+)$/i, (m) => `구간 ${m[1]}/${m[2]}`],
+  [/^song (\d+)\/(\d+)$/i, (m) => `곡 ${m[1]}/${m[2]}`],
+];
+
+/** Engine progress notes are English; show Korean (unknown English notes are hidden). */
+export function noteKo(msg?: string): string | undefined {
+  if (!msg) return undefined;
+  for (const [re, out] of NOTE_KO) {
+    const m = re.exec(msg);
+    if (m) return typeof out === "string" ? out : out(m);
+  }
+  return /[가-힣]/.test(msg) ? msg : undefined;
+}
+
 const CLIP_STAGE_WEIGHT: Record<string, [number, number]> = {
   // [offset, weight] inside one clip
   "clips.fetch": [0, 0.02],

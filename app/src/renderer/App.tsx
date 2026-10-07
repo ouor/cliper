@@ -5,7 +5,7 @@ import { applyTheme, ask, go, openSettings, toast, useApp } from "./state/app";
 import { applyChanged, loadProject, refreshList } from "./state/projects";
 import { markEngineLost, useJobs, wireJobs } from "./state/jobs";
 import { onNotification } from "./lib/rpc";
-import { comboFromEvent } from "./lib/keys";
+import { comboFromEvent, keysFor } from "./lib/keys";
 import { DialogHost, isTyping, Toasts } from "./components/common";
 import { StatusBar } from "./components/StatusBar";
 import { JobsPanel } from "./components/JobsPanel";
@@ -123,14 +123,16 @@ export function App() {
       if (!combo) return;
       const st = useApp.getState();
       if (st.dialog) return;
-      if (combo === "Ctrl+J") {
+      const km = st.settings.keymap;
+      const is = (id: string, scope: "global") => keysFor(id, scope, km).includes(combo);
+      if (is("jobs", "global")) {
         e.preventDefault();
         useApp.setState({ jobsOpen: !st.jobsOpen });
-      } else if (combo === "Ctrl+,") {
+      } else if (is("settings", "global")) {
         e.preventDefault();
         if (st.overlay === "settings") useApp.setState({ overlay: null });
         else openSettings();
-      } else if (combo === "?" && !isTyping(e) && st.overlay !== "settings") {
+      } else if (is("help", "global") && !isTyping(e) && st.overlay !== "settings") {
         e.preventDefault();
         useApp.setState({ overlay: st.overlay === "help" ? null : "help" });
       } else if (combo === "Escape" && (st.overlay === "help" || st.jobsOpen) && !isTyping(e)) {

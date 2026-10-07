@@ -1630,14 +1630,15 @@
   border-color: var(--line-3);
 }
 .mute-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 2px dashed var(--suggest);
+  width: 14px;
+  height: 9px;
+  border-radius: 2px;
+  border: 1px solid var(--suggest);
+  background: repeating-linear-gradient(135deg, var(--suggest) 0 1.5px, transparent 1.5px 4px);
   flex: none;
 }
 .mute-dot.on {
-  border: 2px solid var(--mute);
+  border-color: var(--mute);
   background: var(--mute);
 }
 .mr-pos {

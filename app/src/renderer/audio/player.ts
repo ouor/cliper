@@ -185,6 +185,7 @@ class Player {
         const data = new Float32Array(buf, 0, Math.floor(buf.byteLength / 4));
         this.post({ type: "stream:chunk", index: i, data }, [buf]);
         this.sent.add(i);
+        if (usePlayer.getState().streamError) usePlayer.setState({ streamError: undefined });
       })
       .catch((e) => {
         if ((e as Error).name !== "AbortError") usePlayer.setState({ streamError: String((e as Error).message ?? e) });

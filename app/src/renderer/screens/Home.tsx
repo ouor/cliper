@@ -324,8 +324,11 @@ export function Home() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return q ? summaries.filter((s) => `${s.title ?? ""} ${s.channel ?? ""}`.toLowerCase().includes(q)) : summaries;
-  }, [summaries, search]);
+    // a just-resolved broadcast stays out of the list until it is started
+    const hidden = resolved && !resolved.existed ? resolved.project.id : null;
+    const list = summaries.filter((s) => s.id !== hidden);
+    return q ? list.filter((s) => `${s.title ?? ""} ${s.channel ?? ""}`.toLowerCase().includes(q)) : list;
+  }, [summaries, search, resolved]);
   const grouped = useMemo(() => {
     if (!byChannel) return null;
     const m = new Map<string, ProjectSummary[]>();

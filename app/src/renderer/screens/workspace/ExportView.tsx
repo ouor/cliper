@@ -1,5 +1,5 @@
 // S5 내보내기.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, CheckCircle2, ClipboardCopy, FileAudio, FileSpreadsheet, FolderOpen, Headphones, Info, Play, Rocket, Scissors, Upload, Wand2 } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { ExportOptions } from "@ipc/generated/ExportOptions";
@@ -44,7 +44,10 @@ function previewName(p: Project, tpl: string, songId: string | undefined): strin
     artist: s?.artist ?? "",
     start: `${Math.floor(st / 3600)}-${String(Math.floor((st % 3600) / 60)).padStart(2, "0")}-${String(st % 60).padStart(2, "0")}`,
   };
-  return tpl.replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m).replace(/[\\/:*?"<>|]/g, "_");
+  vars.title = s?.title.trim() || vars.start; // the engine names untitled songs by their start time
+  let out = tpl.replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m).replace(/[\\/:*?"<>|]/g, "_");
+  for (const [a, b] of [["__", "_"], ["()", ""], ["[]", ""], ["  ", " "]]) while (out.includes(a)) out = out.split(a).join(b);
+  return out.replace(/^[_\- ]+|[_\- ]+$/g, "") || "_";
 }
 
 export function ExportView({ p }: { p: Project }) {
@@ -73,8 +76,15 @@ export function ExportView({ p }: { p: Project }) {
 
   const running = runningJobs(jobs, p.id, "export.run")[0];
   const finished = lastJob ? jobs.jobs[lastJob] : undefined;
+  const resultsRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (finished?.status === "done" && finished.result) setResults(finished.result as typeof results);
+    if (finished?.status === "done" && finished.result) {
+      const r = finished.result as NonNullable<typeof results>;
+      setResults(r);
+      const first = r.exports[0]?.result.path ?? r.stems[0]?.stems.dir;
+      toast(`${r.exports.length || r.stems.length}곡 내보내기를 마쳤어요. 원본은 그대로예요.`, { kind: "ok", action: first ? { label: "폴더 열기", run: () => void window.cliper.showItem(first) } : undefined });
+      requestAnimationFrame(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
   }, [finished?.status, finished?.result]);
   const prog = songProgress(jobs, p.id);
 
@@ -136,6 +146,12 @@ export function ExportView({ p }: { p: Project }) {
       toast(`${f.title} ${f.hint ?? ""}`, { kind: "error" });
     }
   };
+
+  useEffect(() => {
+    const h = () => void start();
+    window.addEventListener("cliper:export-start", h);
+    return () => window.removeEventListener("cliper:export-start", h);
+  });
 
   const copy = async (text: string, what: string) => {
     await navigator.clipboard.writeText(text);
@@ -313,7 +329,7 @@ export function ExportView({ p }: { p: Project }) {
               </button>
             ))}
           </div>
-          <div className="hint mono">
+          <div className="hint">
             예: {previewName(p, tpl, selected[0]?.id)}.{preset === "audio" ? format : "mp4"} · 같은 이름이 있으면 _v2로 따로 저장해요
           </div>
           <div className="row">
@@ -383,7 +399,7 @@ export function ExportView({ p }: { p: Project }) {
         <div className="ex-go">
           <div className="grow">
             <div>
-              선택 {selected.length}곡 · 약 {fmtEta(estSec).replace(" 남음", "").replace("곧 끝나요", "몇 초")} 소요 · 약 {fmtBytes(estBytes)}
+              선택 {selected.length}곡 · {fmtEta(estSec).replace(" 남음", "").replace("곧 끝나요", "몇 초")} 걸려요 · 약 {fmtBytes(estBytes)}
             </div>
             {running && (
               <div className="col" style={{ gap: 4, marginTop: 6 }}>
@@ -399,7 +415,7 @@ export function ExportView({ p }: { p: Project }) {
           </button>
         </div>
 
-        <section className="ex-card">
+        <section className="ex-card" ref={resultsRef}>
           <div className="ex-card-title">
             결과 <span className="faint">· 원본은 바뀌지 않았어요</span>
           </div>

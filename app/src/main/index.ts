@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, promises as fsp, readFileSync, writeFileSync, ac
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Engine } from "./engine";
-import { createMediaHandler } from "./media";
+import { createMediaHandler, isProjectId } from "./media";
 import { DEFAULT_SETTINGS, type AppSettings } from "../shared/settings";
 import type { CloseAction, DriveInfo, FolderCheck } from "../shared/bridge";
 
@@ -244,8 +244,9 @@ function registerIpc() {
   ipcMain.handle("fs:check", (_e, path: string) => folderCheck(path));
   ipcMain.handle("fs:projectSize", async (_e, projectId: string) => {
     const root = settings.projectsRoot;
-    if (!root || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(projectId)) return { total: 0, clips: 0 };
+    if (!root || !isProjectId(projectId)) return { total: 0, clips: 0 };
     const dir = join(root, projectId);
+    if (!resolve(dir).startsWith(resolve(root) + "\\")) return { total: 0, clips: 0 };
     return { total: await dirSize(dir), clips: await dirSize(join(dir, "clips")) };
   });
   ipcMain.handle("app:logDir", () => LOG_DIR);
