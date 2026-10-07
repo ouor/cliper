@@ -37,6 +37,8 @@ const RES = app.isPackaged ? process.resourcesPath : "";
 const ENGINE_EXE = app.isPackaged ? join(RES, "engine", "cliper.exe") : firstExisting(env("CLIPER_ENGINE"), join(repoRoot, "core", "target", "release", "cliper.exe"));
 const MODELS_DIR = app.isPackaged ? join(RES, "models") : firstExisting(env("CLIPER_MODELS"), join(repoRoot, "models"));
 const ENGINE_ENV: Record<string, string> = {};
+/** where the engine installs add-ons (CUDA runtime); only opened in Explorer from the app */
+const ADDONS_DIR = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Cliper", "addons") : undefined;
 if (app.isPackaged) {
   // ffmpeg/ffprobe ship side by side in resources/ffmpeg (the engine looks for ffprobe next to ffmpeg);
   // the CUDA runtime in resources/engine/cuda (the engine also finds <exe dir>/cuda by itself)
@@ -242,6 +244,8 @@ const ENGINE_METHODS = new Set([
   "audio.window", "detect.default_params", "detect.rerun",
   "audio.fetch", "detect.run", "clips.fetch", "export.run",
   "job.list", "job.cancel", "queue.add", "queue.list", "queue.cancel", "queue.clear",
+  // CUDA runtime add-on (engine downloads from its own fixed URL and verifies SHA-256)
+  "addon.install_cuda", "addon.remove_cuda",
 ]);
 
 /** Params that would make the engine write to arbitrary places must come from the user's dialogs. */
@@ -268,7 +272,7 @@ function openable(path: unknown): path is string {
   const p = resolve(path);
   if (EXECUTABLE.has(extname(p).toLowerCase())) return false;
   if (savedPaths.has(p)) return true;
-  const roots = [settings.projectsRoot, LOG_DIR, ...knownOutputDirs].filter((r): r is string => !!r).map((r) => resolve(r));
+  const roots = [settings.projectsRoot, LOG_DIR, ADDONS_DIR, ...knownOutputDirs].filter((r): r is string => !!r).map((r) => resolve(r));
   return roots.some((r) => p === r || isInside(r, p));
 }
 

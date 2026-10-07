@@ -9,9 +9,10 @@ import { syncStats, useProjects } from "./state/projects";
 import { useJobs } from "./state/jobs";
 import { useApp } from "./state/app";
 import { installTipA11y } from "./lib/a11y-tips";
+import { useAddon } from "./state/addon";
 
 // QA handle (the renderer's own state; nothing privileged)
-Object.assign(window, { __cliper: { player, usePlayer, useWs, useProjects, useJobs, useApp, workletUrl: WORKLET_URL, syncStats } });
+Object.assign(window, { __cliper: { player, usePlayer, useWs, useProjects, useJobs, useApp, workletUrl: WORKLET_URL, syncStats, useAddon } });
 
 // A file dropped anywhere except a real drop zone must not make Chromium navigate to it.
 for (const type of ["dragover", "drop"] as const) document.addEventListener(type, (e) => e.preventDefault());

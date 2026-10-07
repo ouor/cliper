@@ -17,6 +17,7 @@ export type JobKind = "audio.fetch" | "detect.run" | "clips.fetch" | "export.run
 type JobMethod = Extract<Method, JobKind>;
 
 export const KIND_LABEL: Record<string, string> = {
+  "addon.install_cuda": "GPU 가속 구성요소 설치",
   "audio.fetch": "소리 받기",
   "detect.run": "곡 찾기",
   "clips.fetch": "영상 받기 · 목소리 나누기",
@@ -24,6 +25,8 @@ export const KIND_LABEL: Record<string, string> = {
 };
 
 export const STAGE_LABEL: Record<string, string> = {
+  "addon.download": "GPU 가속 구성요소 받는 중",
+  "addon.extract": "GPU 가속 구성요소 설치 중",
   "audio.fetch": "소리 받는 중",
   "detect.tag": "노래를 찾는 중",
   "video.fetch": "영상 받는 중",

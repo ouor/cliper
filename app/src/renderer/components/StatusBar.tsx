@@ -1,3 +1,4 @@
+import { CudaAddonStatus } from "./CudaAddonCard";
 import { useEffect, useState } from "react";
 import { Cpu, HardDrive, Moon, ShieldCheck } from "lucide-react";
 import { useApp } from "@/state/app";
@@ -56,6 +57,7 @@ export function StatusBar() {
         </span>
       )}
       <span className="spacer" />
+      <CudaAddonStatus />
       {route.name === "workspace" && route.mode === "talk" && source === "stems" && (
         <span className={`sb-item listen-pill m${mode}`}>듣는 중: {LISTEN_LABEL[mode]}</span>
       )}

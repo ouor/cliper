@@ -4,7 +4,9 @@
 //
 // Native payload (none of it is in git) is copied into resources/:
 //   resources/engine/   cliper.exe + its DLLs      ← CLIPER_PACK_ENGINE_DIR (default ../core/target/release)
-//   resources/engine/cuda/  CUDA 13 + cuDNN 9 DLLs ← CLIPER_PACK_CUDA_DIR   (default ../runtime/cuda; CLIPER_PACK_CUDA=0 skips → CPU only)
+//   resources/engine/cuda/  only with CLIPER_PACK_CUDA=1 ← CLIPER_PACK_CUDA_DIR (default ../runtime/cuda).
+//                       Release builds are CPU-only; the CUDA runtime ships as a separate add-on
+//                       (scripts/pack-cuda-addon.mjs) that the app installs when an NVIDIA GPU needs it.
 //   resources/ffmpeg/   ffmpeg.exe + ffprobe.exe   ← CLIPER_PACK_FFMPEG_DIR (default: the folder of ffmpeg on PATH)
 //   resources/models/   *.onnx + panns_labels.json ← CLIPER_PACK_MODELS_DIR (default ../models)
 const { existsSync, readdirSync } = require("node:fs");
@@ -26,12 +28,12 @@ function need(dir, files, what) {
 const engineDir = need(envDir("CLIPER_PACK_ENGINE_DIR", "../core/target/release"), ["cliper.exe"], "engine (cargo build --release in core/)");
 const ffmpegDir = need(process.env.CLIPER_PACK_FFMPEG_DIR ? envDir("CLIPER_PACK_FFMPEG_DIR") : onPath("ffmpeg.exe") || "", ["ffmpeg.exe", "ffprobe.exe"], "ffmpeg (set CLIPER_PACK_FFMPEG_DIR)");
 const modelsDir = need(envDir("CLIPER_PACK_MODELS_DIR", "../models"), ["panns_sed.onnx", "panns_labels.json", "UVR-MDX-NET-Voc_FT.onnx"], "models");
-const withCuda = process.env.CLIPER_PACK_CUDA !== "0";
-const cudaDir = withCuda ? need(envDir("CLIPER_PACK_CUDA_DIR", "../runtime/cuda"), ["cudart64_13.dll"], "CUDA runtime (or CLIPER_PACK_CUDA=0)") : null;
+const withCuda = process.env.CLIPER_PACK_CUDA === "1";
+const cudaDir = withCuda ? need(envDir("CLIPER_PACK_CUDA_DIR", "../runtime/cuda"), ["cudart64_13.dll"], "CUDA runtime") : null;
 // a shared (non-static) ffmpeg build needs its DLLs too
 const ffmpegFiles = ["ffmpeg.exe", "ffprobe.exe", ...readdirSync(ffmpegDir).filter((f) => /\.dll$/i.test(f))];
 
-console.log(`[pack] engine ${engineDir}\n[pack] ffmpeg ${ffmpegDir}\n[pack] models ${modelsDir}\n[pack] cuda   ${cudaDir ?? "(none, CPU only)"}`);
+console.log(`[pack] engine ${engineDir}\n[pack] ffmpeg ${ffmpegDir}\n[pack] models ${modelsDir}\n[pack] cuda   ${cudaDir ?? "(none: CPU-only build, CUDA via the add-on)"}`);
 
 /** @type {import('electron-builder').Configuration} */
 module.exports = {

@@ -105,16 +105,19 @@ app/
 설정: `electron-builder.config.cjs`. 결과물은 `dist/`(git에 들어가지 않음).
 
 ```sh
-npm run pack:win   # dist/win-unpacked (설치 파일 없이 빠른 확인)
-npm run dist:win   # dist/cliper-v0.1.0-amd64.exe (포터블) + dist/cliper-v0.1.0-amd64-installer.exe (NSIS)
+npm run pack:win         # dist/win-unpacked (설치 파일 없이 빠른 확인)
+npm run dist:win         # dist/cliper-v0.1.0-amd64.exe (포터블) + dist/cliper-v0.1.0-amd64-installer.exe (NSIS)
+npm run pack:cuda-addon  # dist/cliper-cuda-addon-v1-amd64.zip + .json (크기, sha256) — GPU 가속 구성요소
 ```
+
+릴리스 빌드는 **CPU 전용**입니다(각 약 605MB). CUDA 런타임(압축 약 965MB)은 v0.1.0 GitHub 릴리스에 `cliper-cuda-addon-v1-amd64.zip`으로 따로 올리고, NVIDIA 그래픽카드가 있는데 CUDA 런타임이 없는 PC에서는 앱이 자동으로 받아 설치합니다. 엔진 job은 `addon.install_cuda`이고, 받은 뒤 SHA-256을 확인해 `%LOCALAPPDATA%\Cliperddons\cuda-v1`에 풀며, 앱이 엔진을 다시 시작합니다. 이후 버전도 v1 애드온을 그대로 씁니다. zip 안에는 DLL만 루트에 있습니다. 애드온 URL·크기·sha256은 엔진이 `system.info.cuda_addon`으로 알려 줍니다. 그러니 zip을 다시 만들면 엔진 쪽 값도 같이 바꿔야 합니다.
 
 패키저가 기대하는 것(모두 git 밖에 있고, 빌드할 때 `resources/`로 복사됩니다):
 
 | resources/ | 내용 | 원본 (환경 변수로 바꿀 수 있음) |
 |---|---|---|
 | `engine/` | `cliper.exe` + 옆의 DLL(onnxruntime 공급자, DirectML) | `CLIPER_PACK_ENGINE_DIR`, 기본 `../core/target/release` (`cargo build --release`) |
-| `engine/cuda/` | CUDA 13 + cuDNN 9 DLL. 엔진이 `<exe 폴더>/cuda`를 찾고, 앱도 `CLIPER_CUDA_DIR`로 넘깁니다 | `CLIPER_PACK_CUDA_DIR`, 기본 `../runtime/cuda`. `CLIPER_PACK_CUDA=0`이면 넣지 않음(CPU 전용) |
+| `engine/cuda/` | `CLIPER_PACK_CUDA=1`일 때만(내부 확인용). CUDA 13 + cuDNN 9 DLL. 엔진이 `<exe 폴더>/cuda`를 찾고, 앱도 `CLIPER_CUDA_DIR`로 넘깁니다 | `CLIPER_PACK_CUDA_DIR`, 기본 `../runtime/cuda` |
 | `ffmpeg/` | `ffmpeg.exe`, `ffprobe.exe`(공유 빌드면 DLL도). 앱이 `CLIPER_FFMPEG`로 넘기고, 엔진은 그 옆에서 ffprobe를 찾습니다 | `CLIPER_PACK_FFMPEG_DIR`, 기본은 PATH에 있는 ffmpeg의 폴더 |
 | `models/` | `*.onnx`, `panns_labels.json` (`.pth`는 넣지 않음) | `CLIPER_PACK_MODELS_DIR`, 기본 `../models` |
 
@@ -124,6 +127,7 @@ npm run dist:win   # dist/cliper-v0.1.0-amd64.exe (포터블) + dist/cliper-v0.1
 - Electron은 npm이 설치한 `node_modules/electron/dist`를 그대로 씁니다(`electronDist`). 렌더러와 main은 electron-vite가 묶으므로 asar에는 `out/`과 `package.json`만 들어갑니다. 그래서 런타임 패키지도 devDependencies에 있습니다.
 - Electron fuses: RunAsNode·NODE_OPTIONS·`--inspect` 인자 끔, OnlyLoadAppFromAsar·쿠키 암호화 켬, `GrantFileProtocolExtraPrivileges` 끔(렌더러는 `app://cliper`에서 옵니다). `afterPack`에서 `default_app.asar`를 지웁니다.
 - 아직 꺼 둔 것: 실행 파일 편집과 서명(`signAndEditExecutable: false`, 아이콘·버전 정보·코드 서명에는 GitHub에서 받는 winCodeSign 묶음이 필요), 그리고 그에 기대는 `EnableEmbeddedAsarIntegrityValidation`. 릴리스 파이프라인에서 서명 도구와 함께 켜세요.
-- NSIS·포터블 대상은 electron-builder가 처음 한 번 GitHub(electron-userland/electron-builder-binaries)에서 NSIS 도구를 받습니다. `pack:win`은 받지 않습니다.
+- NSIS·포터블 대상을 처음 빌드할 때 electron-builder가 GitHub(electron-userland/electron-builder-binaries)에서 NSIS·7zip 도구를 받아 `%LOCALAPPDATA%\electron-builder\Cache`에 둡니다. `pack:win`은 받지 않습니다.
+- 포터블 exe는 실행할 때마다 임시 폴더에 약 1.3GB를 풀기 때문에 시작이 몇 초 걸립니다.
 - QA: `CLIPER_PACK_INSPECT=1`로 만든 빌드만 `--inspect`를 허용하므로, `DEVDRIVER_EXE=dist/win-unpacked/Cliper.exe DEVDRIVER_ARGS=--user-data-dir=<임시 폴더> node scripts/devdriver.mjs`로 조종할 수 있습니다. 배포 빌드는 이 퓨즈가 꺼져 있습니다.
 - 확인한 것(패키지 빌드, PATH에서 ffmpeg를 뺀 상태): `app://cliper`에서 로드, 엔진·모델·ffmpeg를 `resources/`에서 찾음, asar 안의 AudioWorklet 로드와 재생.

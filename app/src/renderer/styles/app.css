@@ -2262,3 +2262,33 @@
 .cookie-status {
   align-items: center;
 }
+
+/* GPU 가속 구성요소 (CUDA add-on) */
+.addon-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  max-width: 440px;
+}
+.addon-card > .row > svg {
+  color: var(--accent);
+  flex: none;
+}
+.addon-card .hint {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.addon-card .faint.grow {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.addon-card.compact {
+  max-width: none;
+  margin-top: 10px;
+  padding: 12px 16px;
+  border-radius: var(--r-lg);
+  background: var(--bg-1);
+}

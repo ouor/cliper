@@ -11,6 +11,8 @@ import { call } from "@/lib/rpc";
 import { player } from "@/audio/player";
 import { DEFAULT_SETTINGS } from "../../shared/settings";
 import { friendly } from "@/lib/errors";
+import { CudaAddonCard } from "@/components/CudaAddonCard";
+import { cudaAddon } from "@/state/addon";
 
 const TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
   { id: "general", label: "일반", icon: <Settings2 size={15} /> },
@@ -226,6 +228,10 @@ export function SettingsScreen() {
       `models: ${system ? Object.entries(system.models).map(([k, v]) => `${k}=${v ? "ok" : "missing"}`).join(", ") : "?"}`,
       `cuda: ${system?.cuda_dirs.join("; ") || "없음"} · prefer_cpu ${system?.prefer_cpu}`,
       `gpu: ${system?.gpu ? `${system.gpu.name} ${system.gpu.vram_mb}MB cuda_ok=${system.gpu.cuda_ok} ${system.gpu.reason ?? ""}` : "없음"} · keep_awake ${system?.keep_awake}`,
+      `cuda_addon: ${(() => {
+        const a = cudaAddon();
+        return a ? `v${a.version} installed=${a.installed} needed=${a.needed} dir=${a.dir}` : "n/a";
+      })()}`,
       `projects: ${st.projectsRoot}`,
     ].join("\n");
 
@@ -461,6 +467,11 @@ export function SettingsScreen() {
                       CPU
                     </button>
                   </div>
+                </Row>
+                <Row label="GPU 가속" hint="NVIDIA 그래픽카드에서 멘트 지우기를 빠르게 하는 구성요소예요. 필요한 PC에서는 자동으로 받아요.">
+                  <span className="grow">
+                    {cudaAddon() ? <CudaAddonCard /> : <span className="faint">이 엔진 버전에서는 지원하지 않아요</span>}
+                  </span>
                 </Row>
                 <Row label="오디오 출력 장치" hint="모니터 헤드폰을 따로 쓰는 경우">
                   <select

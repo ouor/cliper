@@ -5,6 +5,8 @@ import { updateSettings, useApp } from "@/state/app";
 import { call } from "@/lib/rpc";
 import { fmtBytes } from "@/lib/format";
 import type { DriveInfo } from "../../shared/bridge";
+import { CudaAddonCard } from "@/components/CudaAddonCard";
+import { maybeAutoInstall } from "@/state/addon";
 
 export function FirstRun() {
   const settings = useApp((s) => s.settings);
@@ -49,6 +51,8 @@ export function FirstRun() {
       .finally(() => {
         setProbing(false);
         setProbed(true);
+        // NVIDIA GPU without a CUDA runtime: fetch the add-on in the background now
+        maybeAutoInstall({ firstRun: true });
       });
   }, [step, engine.state, probed, probing]);
 
@@ -161,6 +165,7 @@ export function FirstRun() {
                 )}
               </div>
             </div>
+            <CudaAddonCard compact />
             {system && (
               <div className="hint">
                 처리 엔진 {system.version} · 영상 도구 {system.ffmpeg ? "준비됨" : "없음"} · 분리 모델 {Object.values(system.models).every(Boolean) ? "준비됨" : "일부 없음"}

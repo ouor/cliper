@@ -1,3 +1,4 @@
+import { onEngineReady, wireAddon } from "./state/addon";
 import { lazy, Suspense, useEffect, useRef } from "react";
 import { AlertTriangle, RotateCw } from "lucide-react";
 import type { SystemInfo } from "@ipc/generated/SystemInfo";
@@ -31,6 +32,7 @@ async function boot() {
 
   await takeInterrupted(); // once per app start (M3)
   wireJobs();
+  wireAddon();
   onNotification("project.changed", (p) => applyChanged(p.project));
 
   let wasReady = false;
@@ -43,6 +45,7 @@ async function boot() {
       if (wasReady) toast("처리 엔진을 다시 시작했어요. 저장된 작업은 그대로예요.", { kind: "ok" });
       wasReady = true;
       void reconcileJobs();
+      void onEngineReady();
     } else if (wasReady) {
       // any way out of "ready" (crash, user restart, root/device change) ends the running jobs
       markEngineLost();
