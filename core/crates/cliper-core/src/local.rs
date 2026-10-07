@@ -113,17 +113,19 @@ pub fn normalize(input: &str) -> PathBuf {
     PathBuf::from(input.trim().trim_matches('"'))
 }
 
-/// Stable project id for a file: `local-<stem>-<hash of path+size>`.
+/// Stable project id for a file: `local-<stem>-<FNV-1a of the lower-cased path>`
+/// (stable across toolchains; a growing recording keeps its id).
 pub fn project_id(path: &Path) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    path.to_string_lossy().to_lowercase().hash(&mut h);
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0).hash(&mut h);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.to_string_lossy().to_lowercase().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
     let stem: String = path
         .file_stem()
         .map(|s| s.to_string_lossy().chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').take(32).collect())
         .unwrap_or_default();
-    format!("local-{}-{:08x}", if stem.is_empty() { "file".into() } else { stem }, h.finish() as u32)
+    format!("local-{}-{:08x}", if stem.is_empty() { "file".into() } else { stem }, h as u32)
 }
 
 pub fn source_info(path: &Path) -> Result<SourceInfo, LocalError> {
@@ -178,7 +180,7 @@ pub fn extract_audio(path: &Path, track: u32, out: &Path) -> Result<(), LocalErr
 
 /// Cut `[start, end)` of the recording into an MP4 (video stream-copied from the
 /// keyframe at/before `start`; audio copied, or AAC if the codec doesn't fit MP4).
-pub fn cut_clip(path: &Path, start: f64, end: f64, track: u32, out: &Path) -> Result<VideoClip, LocalError> {
+pub fn cut_clip(path: &Path, start: f64, end: f64, track: u32, out: &Path, cancel: &tokio_util::sync::CancellationToken) -> Result<VideoClip, LocalError> {
     let pr = probe(path)?;
     let kf = if pr.has_video { keyframe_before(path, start).unwrap_or(start) } else { start };
     let end = if pr.duration > 0.0 { end.min(pr.duration) } else { end };
@@ -190,9 +192,9 @@ pub fn cut_clip(path: &Path, start: f64, end: f64, track: u32, out: &Path) -> Re
             c.args(["-map", "0:v:0", "-c:v", "copy"]);
         }
         c.args(["-map", &format!("0:a:{track}")]).args(audio_codec).args(["-movflags", "+faststart"]).arg(out);
-        ffmpeg::run(c)
+        ffmpeg::run_cancellable(c, cancel)
     };
-    if run(&["-c:a", "copy"]).is_err() {
+    if run(&["-c:a", "copy"]).is_err() && !cancel.is_cancelled() {
         run(&["-c:a", "aac", "-b:a", "320k"])?;
     }
     Ok(VideoClip {

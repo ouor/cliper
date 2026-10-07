@@ -173,11 +173,11 @@ pub async fn fetch_video(
             }
         }
         progress(Progress::note("video.remux", "remux", "remuxing"));
-        let (raw_c, out_c) = (raw.clone(), out.to_path_buf());
+        let (raw_c, out_c, cancel_c) = (raw.clone(), out.to_path_buf(), cancel.clone());
         tokio::task::spawn_blocking(move || {
             let mut c = ffmpeg::command();
             c.arg("-y").arg("-i").arg(&raw_c).args(["-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"]).arg(&out_c);
-            ffmpeg::run(c)
+            ffmpeg::run_cancellable(c, &cancel_c)
         })
         .await
         .map_err(|e| VideoError::Format(e.to_string()))??;

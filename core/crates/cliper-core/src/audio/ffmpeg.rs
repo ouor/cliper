@@ -52,6 +52,28 @@ pub fn run(mut cmd: Command) -> Result<(), FfmpegError> {
     Ok(())
 }
 
+/// Like [`run`], but kills ffmpeg when `cancel` fires.
+pub fn run_cancellable(mut cmd: Command, cancel: &tokio_util::sync::CancellationToken) -> Result<(), FfmpegError> {
+    let mut child = cmd.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(map_spawn)?;
+    let stderr = drain_stderr(&mut child);
+    loop {
+        if let Some(st) = child.try_wait()? {
+            if !st.success() {
+                let tail = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
+                let tail: String = tail.chars().rev().take(800).collect::<Vec<_>>().into_iter().rev().collect();
+                return Err(FfmpegError::Failed(tail));
+            }
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(FfmpegError::Failed("cancelled".into()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn map_spawn(e: std::io::Error) -> FfmpegError {
     if e.kind() == std::io::ErrorKind::NotFound { FfmpegError::Missing } else { FfmpegError::Io(e) }
 }

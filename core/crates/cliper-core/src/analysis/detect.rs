@@ -157,7 +157,7 @@ pub fn percentile(x: &[f64], q: f64) -> f64 {
         return f64::NAN;
     }
     let mut v = x.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     let pos = q / 100.0 * (v.len() - 1) as f64;
     let lo = pos.floor() as usize;
     let hi = pos.ceil() as usize;
@@ -186,6 +186,22 @@ fn win(sec: f64, fps: f64) -> usize {
 }
 
 /// Detect song sections. `probs` on a uniform grid (`probs.fps`).
+impl Params {
+    /// Clamp every parameter to a sane range (a huge smoothing window would
+    /// hang the filter; negative lengths make no sense).
+    pub fn sanitized(mut self) -> Self {
+        let c = |v: &mut f64, lo: f64, hi: f64| *v = if v.is_finite() { v.clamp(lo, hi) } else { lo };
+        c(&mut self.pann_smooth_sec, 0.0, 60.0);
+        c(&mut self.pann_edge_sec, 0.0, 60.0);
+        c(&mut self.close_sec, 0.0, 600.0);
+        c(&mut self.min_song_sec, 0.0, 3600.0);
+        c(&mut self.long_blob_sec, 1.0, 36000.0);
+        c(&mut self.sc_smooth_sec, 0.0, 60.0);
+        c(&mut self.sc_close_sec, 0.0, 600.0);
+        self
+    }
+}
+
 pub fn segment(probs: &Probs, p: &Params) -> Vec<Seg> {
     analyze(probs, p).segments
 }
@@ -345,7 +361,7 @@ pub fn analyze(probs: &Probs, p: &Params) -> Analysis {
 
     // keep candidates that don't overlap an accepted song, deduplicated
     candidates.retain(|c| !segs.iter().any(|&(s, e)| c.start < e && s < c.end));
-    candidates.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    candidates.sort_by(|a, b| a.start.total_cmp(&b.start));
     candidates.dedup_by(|a, b| a.start < b.end && b.start < a.end);
     Analysis { segments: segs, confidence, candidates }
 }

@@ -36,7 +36,7 @@ pub fn plan_clips(p: &mut Project) {
     }
 
     // 2) merge pending ranges
-    pending.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    pending.sort_by(|a, b| a.1.total_cmp(&b.1));
     let mut groups: Vec<(f64, f64, Vec<usize>)> = Vec::new();
     for (i, a, b) in pending {
         match groups.last_mut() {
@@ -71,7 +71,7 @@ pub fn plan_clips(p: &mut Project) {
         }
         p.clips.push(clip);
     }
-    p.clips.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    p.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
     refresh_song_ids(p);
 }
 
@@ -100,7 +100,7 @@ pub fn pin_exact(p: &mut Project, song_ids: &[String]) -> Vec<String> {
         .filter(|(_, s)| !p.clips.iter().any(|c| c.covered().is_some_and(|(a, b)| a <= s.start && s.end <= b)))
         .map(|(i, s)| (i, (s.start - mb).max(0.0), (s.end + ma).min(dur)))
         .collect();
-    want.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    want.sort_by(|a, b| a.1.total_cmp(&b.1));
     let mut groups: Vec<(f64, f64, Vec<usize>)> = Vec::new();
     for (i, a, b) in want {
         match groups.last_mut() {

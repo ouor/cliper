@@ -98,8 +98,33 @@ impl Store {
     }
 }
 
+/// Write `bytes` to a unique temp file next to `path`, flush it to disk, then
+/// rename it over `path` (retrying briefly: on Windows an antivirus or indexer
+/// can hold the target open for a moment).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.{}-{}.tmp", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    let mut delay = 20u64;
+    for attempt in 0..6 {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 5 => {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                delay *= 2;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    }
+    unreachable!()
 }

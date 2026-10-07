@@ -213,7 +213,7 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
             eng.set_keep_awake(p::<KeepAwakeArg>(&params)?.enabled)?;
             Ok(json!(true))
         }
-        "project.list" => to_json(eng.list()),
+        "project.list" => to_json(eng.list_async().await?),
         "project.create" => to_json(eng.create(&p::<CreateArg>(&params)?.input).await?),
         "project.get" => to_json(eng.get(&p::<IdArg>(&params)?.id)?),
         "project.delete" => {
@@ -365,7 +365,12 @@ pub async fn serve(cfg: EngineConfig) -> anyhow::Result<()> {
         }
         let (eng, out) = (eng.clone(), out_tx.clone());
         tokio::spawn(async move {
-            let res = dispatch(&eng, &method, params).await;
+            use futures::FutureExt;
+            // a panic while handling a request still answers it
+            let res = std::panic::AssertUnwindSafe(dispatch(&eng, &method, params))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(ApiError::new("INTERNAL", format!("{method} panicked"))));
             let Some(id) = id else { return }; // JSON-RPC notification: no response
             let msg = match res {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
@@ -377,6 +382,9 @@ pub async fn serve(cfg: EngineConfig) -> anyhow::Result<()> {
             let _ = out.send(msg.to_string());
         });
     }
+    // stdin closed or engine.shutdown: stop all work (jobs observe the token;
+    // blocking work is bounded by the runtime's shutdown timeout in main)
+    eng.cancel_all();
     drop(out_tx);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
     Ok(())

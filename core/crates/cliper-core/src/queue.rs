@@ -5,6 +5,7 @@
 //! still missing up to `through`: audio → detection → (optionally) clips.
 //! Entries run strictly sequentially so the network and GPU are never shared.
 
+use crate::engine::LockExt;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -53,7 +54,7 @@ pub struct QueueEntry {
 
 impl Engine {
     pub fn queue(&self) -> Vec<QueueEntry> {
-        self.queue.lock().unwrap().clone()
+        self.queue.lk().clone()
     }
 
     fn queue_changed(&self) {
@@ -61,7 +62,7 @@ impl Engine {
     }
 
     fn queue_update(&self, id: &str, f: impl FnOnce(&mut QueueEntry)) {
-        if let Some(e) = self.queue.lock().unwrap().iter_mut().find(|e| e.id == id) {
+        if let Some(e) = self.queue.lk().iter_mut().find(|e| e.id == id) {
             f(e);
         }
         self.queue_changed();
@@ -86,7 +87,7 @@ impl Engine {
                 finished_at: None,
             })
             .collect();
-        self.queue.lock().unwrap().extend(added.iter().cloned());
+        self.queue.lk().extend(added.iter().cloned());
         self.queue_changed();
         self.queue_wake.notify_one();
         self.ensure_queue_worker();
@@ -97,7 +98,7 @@ impl Engine {
     pub fn queue_cancel(&self, id: &str) -> bool {
         let mut job = None;
         let found = {
-            let mut q = self.queue.lock().unwrap();
+            let mut q = self.queue.lk();
             match q.iter_mut().find(|e| e.id == id) {
                 Some(e) if e.status == QueueStatus::Waiting => {
                     e.status = QueueStatus::Cancelled;
@@ -122,12 +123,12 @@ impl Engine {
 
     /// Remove finished / failed / cancelled entries.
     pub fn queue_clear(&self) {
-        self.queue.lock().unwrap().retain(|e| matches!(e.status, QueueStatus::Waiting | QueueStatus::Running));
+        self.queue.lk().retain(|e| matches!(e.status, QueueStatus::Waiting | QueueStatus::Running));
         self.queue_changed();
     }
 
     fn ensure_queue_worker(self: &Arc<Self>) {
-        let mut started = self.queue_worker.lock().unwrap();
+        let mut started = self.queue_worker.lk();
         if *started {
             return;
         }
@@ -136,7 +137,7 @@ impl Engine {
         tokio::spawn(async move {
             loop {
                 let next = {
-                    let q = eng.queue.lock().unwrap();
+                    let q = eng.queue.lk();
                     q.iter().find(|e| e.status == QueueStatus::Waiting).map(|e| (e.id.clone(), e.input.clone(), e.through))
                 };
                 let Some((qid, input, through)) = next else {
@@ -145,7 +146,7 @@ impl Engine {
                 };
                 eng.queue_update(&qid, |e| e.status = QueueStatus::Running);
                 let res = eng.run_queue_entry(&qid, &input, through).await;
-                let cancelled = eng.queue.lock().unwrap().iter().any(|e| e.id == qid && e.status == QueueStatus::Cancelled);
+                let cancelled = eng.queue.lk().iter().any(|e| e.id == qid && e.status == QueueStatus::Cancelled);
                 eng.queue_update(&qid, |e| {
                     e.step = None;
                     e.job_id = None;
@@ -164,17 +165,25 @@ impl Engine {
     }
 
     async fn run_queue_entry(self: &Arc<Self>, qid: &str, input: &str, through: QueueThrough) -> Result<(), ApiError> {
-        let is_cancelled = || self.queue.lock().unwrap().iter().any(|e| e.id == qid && e.status == QueueStatus::Cancelled);
+        let is_cancelled = || self.queue.lk().iter().any(|e| e.id == qid && e.status == QueueStatus::Cancelled);
         self.queue_update(qid, |e| e.step = Some("project.create".into()));
         let p = self.create(input).await?;
         self.queue_update(qid, |e| e.project_id = Some(p.id.clone()));
+        if is_cancelled() {
+            return Ok(());
+        }
 
+        // record the job, then re-check: a cancel that arrived while the job was
+        // being started has to reach the job
         let step = |name: &str, job: String| {
-            let (name, job) = (name.to_string(), job);
+            let (name, jc) = (name.to_string(), job.clone());
             self.queue_update(qid, move |e| {
                 e.step = Some(name);
-                e.job_id = Some(job);
+                e.job_id = Some(jc);
             });
+            if is_cancelled() {
+                self.cancel(&job);
+            }
         };
         if p.audio.is_none() {
             let j = self.job_fetch_audio(&p.id)?;

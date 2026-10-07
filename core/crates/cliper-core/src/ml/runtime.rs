@@ -9,6 +9,7 @@
 //!   3. `runtime/cuda` in any ancestor of the exe (dev checkout)
 //!   4. `$CUDA_PATH/bin/x64`, `$CUDA_PATH/bin`
 
+use crate::engine::LockExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -99,7 +100,7 @@ pub struct CudaStatus {
 static CUDA_STATUS: Mutex<Option<CudaStatus>> = Mutex::new(None);
 
 pub fn cuda_status() -> Option<CudaStatus> {
-    CUDA_STATUS.lock().unwrap().clone()
+    CUDA_STATUS.lk().clone()
 }
 
 /// GPU name and memory from `nvidia-smi` (first GPU), if available.
@@ -133,12 +134,12 @@ pub fn open_session(model: &Path, prefer_cpu: bool) -> Result<(Session, Device),
     if !prefer_cpu {
         match build(true) {
             Ok(s) => {
-                *CUDA_STATUS.lock().unwrap() = Some(CudaStatus { ok: true, reason: None });
+                *CUDA_STATUS.lk() = Some(CudaStatus { ok: true, reason: None });
                 return Ok((s, Device::Cuda));
             }
             Err(e) => {
                 tracing::warn!("CUDA execution provider unavailable, falling back to CPU: {e}");
-                *CUDA_STATUS.lock().unwrap() = Some(CudaStatus { ok: false, reason: Some(e.to_string()) });
+                *CUDA_STATUS.lk() = Some(CudaStatus { ok: false, reason: Some(e.to_string()) });
             }
         }
     }

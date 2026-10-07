@@ -391,7 +391,7 @@ impl Project {
                 export: None,
             });
         }
-        songs.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+        songs.sort_by(|a, b| a.start.total_cmp(&b.start));
         self.songs = songs;
     }
 }

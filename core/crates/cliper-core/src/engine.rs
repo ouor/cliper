@@ -34,6 +34,22 @@ use crate::project::{self, Alignment, Detection, JobError, naming, Mute, Origin,
 use crate::render::MuteSpan;
 use crate::source::{ResolveError, Source};
 
+/// `lock()` that survives a panic in another holder (the data is still usable
+/// for this engine's simple maps; a poisoned lock must not take the engine down).
+pub(crate) trait LockExt<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into())
+}
+
 /// Re-resolve playback URLs older than this (tokens expire after a few hours).
 const SOURCE_TTL: Duration = Duration::from_secs(20 * 60);
 
@@ -249,7 +265,7 @@ pub struct Engine {
     /// ADTS frame byte offsets of a project's analysis audio (audio.window)
     frame_index: Mutex<HashMap<String, FrameIndex>>,
     /// results of finished jobs, for `wait_job` (kept until read)
-    finished: Mutex<HashMap<String, ApiResult<Value>>>,
+    finished: Mutex<(HashMap<String, ApiResult<Value>>, std::collections::VecDeque<String>)>,
     job_finished: tokio::sync::Notify,
     pub(crate) queue: Mutex<Vec<crate::queue::QueueEntry>>,
     pub(crate) queue_wake: tokio::sync::Notify,
@@ -265,7 +281,7 @@ fn keep_awake_while_busy(eng: std::sync::Weak<Engine>) {
             loop {
                 std::thread::sleep(Duration::from_secs(30));
                 let Some(e) = eng.upgrade() else { return };
-                let busy = !e.jobs.lock().unwrap().is_empty() && e.keep_awake.load(Ordering::Relaxed);
+                let busy = !e.jobs.lk().is_empty() && e.keep_awake.load(Ordering::Relaxed);
                 drop(e);
                 #[cfg(windows)]
                 if busy {
@@ -351,7 +367,7 @@ fn validate_song(s: &mut Song) -> ApiResult<()> {
     for m in s.mutes.iter_mut() {
         validate_mute(m).map_err(|e| invalid(format!("song {}: {}", s.id, e.message)))?;
     }
-    s.mutes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    s.mutes.sort_by(|a, b| a.start.total_cmp(&b.start));
     Ok(())
 }
 
@@ -380,7 +396,7 @@ fn check_revision(p: &Project, base: Option<u64>) -> ApiResult<()> {
 }
 
 fn sort_songs(p: &mut Project) {
-    p.songs.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    p.songs.sort_by(|a, b| a.start.total_cmp(&b.start));
 }
 
 /// Byte offset of every ADTS frame in `path` (streamed: only headers are
@@ -548,12 +564,12 @@ fn follow(audio: &Path, out: &Path, done: &AtomicBool, until_ms: &AtomicU64) -> 
                 let whole = carry.len() / 4 * 4;
                 let samples: Vec<f32> = carry[..whole].chunks_exact(4).map(|x| f32::from_le_bytes(x.try_into().unwrap())).collect();
                 carry.drain(..whole);
-                b.lock().unwrap().push(&samples);
+                b.lk().push(&samples);
             }
         })
     };
     let snapshot = |b: &Mutex<peaks::PeakBuilder>| -> std::io::Result<()> {
-        let pk = b.lock().unwrap().snapshot();
+        let pk = b.lk().snapshot();
         if pk.data.is_empty() {
             return Ok(());
         }
@@ -606,6 +622,13 @@ type FrameIndex = (u64, Arc<Vec<u64>>);
 /// Current stage of a job for the ETA: (stage, item, started, `done` at start).
 type StageClock = (String, Option<String>, Instant, u64);
 
+/// Job kinds that must not run together on one project: audio.fetch replaces
+/// the analysis audio that detect.run and clips.fetch (alignment) read.
+fn conflicts(a: &str, b: &str) -> bool {
+    let pair = |x: &str, y: &str| (a == x && b == y) || (a == y && b == x);
+    pair("audio.fetch", "detect.run") || pair("audio.fetch", "clips.fetch")
+}
+
 fn is_local(p: &Project) -> bool {
     p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local)
 }
@@ -636,7 +659,7 @@ impl Engine {
             cookies: Mutex::new(cookies),
             keep_awake: AtomicBool::new(keep_awake),
             frame_index: Mutex::new(HashMap::new()),
-            finished: Mutex::new(HashMap::new()),
+            finished: Mutex::new((HashMap::new(), std::collections::VecDeque::new())),
             job_finished: tokio::sync::Notify::new(),
             queue: Mutex::new(Vec::new()),
             queue_wake: tokio::sync::Notify::new(),
@@ -654,11 +677,16 @@ impl Engine {
     pub async fn wait_job(&self, job_id: &str) -> ApiResult<Value> {
         loop {
             let notified = self.job_finished.notified();
-            if let Some(r) = self.finished.lock().unwrap().remove(job_id) {
-                return r;
-            }
-            if !self.jobs.lock().unwrap().contains_key(job_id) && !self.finished.lock().unwrap().contains_key(job_id) {
-                return Err(ApiError::new("NOT_FOUND", format!("job {job_id}")));
+            {
+                // results are recorded before a job leaves `jobs`, so checking
+                // both under the `finished` lock can't miss a finishing job
+                let mut f = self.finished.lk();
+                if let Some(r) = f.0.remove(job_id) {
+                    return r;
+                }
+                if !self.jobs.lk().contains_key(job_id) {
+                    return Err(ApiError::new("NOT_FOUND", format!("job {job_id}")));
+                }
             }
             notified.await;
         }
@@ -672,12 +700,19 @@ impl Engine {
 
     pub fn system_info(&self) -> SystemInfo {
         let rt = runtime::init();
-        let ffmpeg = std::process::Command::new(ffmpeg::ffmpeg_path())
-            .arg("-version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).lines().next().map(str::to_string));
+        static FFMPEG: OnceLock<Option<String>> = OnceLock::new();
+        let ffmpeg = FFMPEG
+            .get_or_init(|| {
+                let mut c = std::process::Command::new(ffmpeg::ffmpeg_path());
+                c.arg("-version");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    c.creation_flags(0x0800_0000);
+                }
+                c.output().ok().filter(|o| o.status.success()).and_then(|o| String::from_utf8_lossy(&o.stdout).lines().next().map(str::to_string))
+            })
+            .clone();
         let mut models = BTreeMap::new();
         models.insert("panns_sed.onnx".to_string(), self.cfg.models_dir.join("panns_sed.onnx").is_file());
         models.insert("panns_labels.json".to_string(), self.cfg.models_dir.join("panns_labels.json").is_file());
@@ -693,7 +728,7 @@ impl Engine {
             prefer_cpu: self.cfg.prefer_cpu,
             gpu: self.gpu_info(),
             keep_awake: self.keep_awake.load(Ordering::Relaxed),
-            cookies: self.cookies.lock().unwrap().status(),
+            cookies: self.cookies.lk().status(),
         }
     }
 
@@ -715,7 +750,7 @@ impl Engine {
     pub async fn probe_gpu(self: &Arc<Self>) -> ApiResult<SystemInfo> {
         let eng = self.clone();
         let r = tokio::task::spawn_blocking(move || -> ApiResult<()> {
-            let mut slot = eng.tagger.lock().unwrap();
+            let mut slot = eng.tagger.lk();
             eng.tagger(&mut slot)?;
             Ok(())
         })
@@ -729,19 +764,19 @@ impl Engine {
     /// Login cookies used for resolving (e.g. chzzk `NID_AUT`/`NID_SES`);
     /// persisted (encrypted with DPAPI on Windows). None clears them.
     pub fn set_cookies(&self, cookies: Option<BTreeMap<String, String>>) -> ApiResult<CookieStatus> {
-        let mut jar = self.cookies.lock().unwrap();
+        let mut jar = self.cookies.lk();
         jar.set(cookies)?;
         Ok(jar.status())
     }
 
     pub fn cookies_status(&self) -> CookieStatus {
-        self.cookies.lock().unwrap().status()
+        self.cookies.lk().status()
     }
 
     /// Ask the platform whether the stored cookies are still logged in.
     /// chzzk is checked; SOOP can't be checked without a VOD (valid stays null).
     pub async fn check_cookies(&self) -> ApiResult<CookieStatus> {
-        let cookies = self.cookies.lock().unwrap().get();
+        let cookies = self.cookies.lk().get();
         let Some(c) = cookies else {
             return Ok(self.cookies_status());
         };
@@ -752,7 +787,7 @@ impl Engine {
             let (ok, nick) = crate::platforms::chzzk::check_login(&chzzk).await.map_err(|e| ApiError::new("NETWORK", e))?;
             (Some(ok), nick)
         };
-        let mut jar = self.cookies.lock().unwrap();
+        let mut jar = self.cookies.lk();
         jar.record_check(valid, account);
         Ok(jar.status())
     }
@@ -767,11 +802,11 @@ impl Engine {
     // ── jobs ────────────────────────────────────────────────────────────
 
     pub fn jobs(&self) -> Vec<JobInfo> {
-        self.jobs.lock().unwrap().values().map(|j| j.info.clone()).collect()
+        self.jobs.lk().values().map(|j| j.info.clone()).collect()
     }
 
     pub fn cancel(&self, job_id: &str) -> bool {
-        match self.jobs.lock().unwrap().get(job_id) {
+        match self.jobs.lk().get(job_id) {
             Some(j) => {
                 j.cancel.cancel();
                 true
@@ -789,9 +824,9 @@ impl Engine {
         let job_id = project::new_id("j");
         let cancel = CancellationToken::new();
         {
-            let mut jobs = self.jobs.lock().unwrap();
-            if jobs.values().any(|j| j.info.kind == kind && j.info.project_id == project_id) {
-                return Err(ApiError::new("BUSY", format!("{kind} is already running for {project_id}")));
+            let mut jobs = self.jobs.lk();
+            if let Some(j) = jobs.values().find(|j| j.info.project_id == project_id && (j.info.kind == kind || conflicts(&j.info.kind, kind))) {
+                return Err(ApiError::new("BUSY", format!("{} is running for {project_id}", j.info.kind)));
             }
             let info = JobInfo { job_id: job_id.clone(), kind: kind.into(), project_id: project_id.into(), started_at: project::now() };
             jobs.insert(job_id.clone(), JobEntry { info, cancel: cancel.clone() });
@@ -806,7 +841,7 @@ impl Engine {
             let items = Arc::new(items.clone());
             Arc::new(move |mut p: Progress| {
                 if !p.is_note() {
-                    let mut st = stage.lock().unwrap();
+                    let mut st = stage.lk();
                     if st.0 != p.stage || st.1 != p.item || p.done < st.3 {
                         *st = (p.stage.clone(), p.item.clone(), Instant::now(), p.done);
                     }
@@ -821,7 +856,7 @@ impl Engine {
                         p.item_index = p.item.as_ref().and_then(|it| items.iter().position(|x| x == it)).map(|i| i as u64);
                     }
                 }
-                let mut l = last.lock().unwrap();
+                let mut l = last.lk();
                 if !p.is_note() && p.peaks_until.is_none() && p.done != p.total && l.elapsed() < Duration::from_millis(100) {
                     return;
                 }
@@ -836,15 +871,24 @@ impl Engine {
         let eng = self.clone();
         let jid = job_id.clone();
         tokio::spawn(async move {
-            let res = f(eng.clone(), ctx).await;
-            eng.jobs.lock().unwrap().remove(&jid);
+            use futures::FutureExt;
+            // a panic must not leave the job BUSY forever or hang wait_job
+            let res = std::panic::AssertUnwindSafe(f(eng.clone(), ctx))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|p| Err(ApiError::new("INTERNAL", format!("job panicked: {}", panic_message(p)))));
             {
-                // remember the outcome for wait_job (bounded)
-                let mut f = eng.finished.lock().unwrap();
-                if f.len() > 256 {
-                    f.clear();
+                // remember the outcome for wait_job (bounded, oldest evicted first),
+                // then retire the job — in this order, under the `finished` lock
+                let mut f = eng.finished.lk();
+                f.0.insert(jid.clone(), res.clone());
+                f.1.push_back(jid.clone());
+                while f.1.len() > 256 {
+                    if let Some(old) = f.1.pop_front() {
+                        f.0.remove(&old);
+                    }
                 }
-                f.insert(jid.clone(), res.clone());
+                eng.jobs.lk().remove(&jid);
             }
             eng.job_finished.notify_waiters();
             eng.record_outcome(&pid, &kind_s, &res).await;
@@ -879,7 +923,7 @@ impl Engine {
     // ── projects ────────────────────────────────────────────────────────
 
     fn lock_for(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.locks.lock().unwrap().entry(id.to_string()).or_default().clone()
+        self.locks.lk().entry(id.to_string()).or_default().clone()
     }
 
     /// Load → `f` → save → `ProjectChanged`.
@@ -900,10 +944,26 @@ impl Engine {
         Ok(self.store.load(id)?)
     }
 
+    pub async fn list_async(&self) -> ApiResult<Vec<ProjectSummary>> {
+        let store = self.store.clone();
+        Ok(tokio::task::spawn_blocking(move || summarize(store.list())).await?)
+    }
+
     pub fn list(&self) -> Vec<ProjectSummary> {
-        self.store
-            .list()
-            .into_iter()
+        summarize(self.store.list())
+    }
+
+    /// Cancel every running job (shutdown).
+    pub fn cancel_all(&self) {
+        for j in self.jobs.lk().values() {
+            j.cancel.cancel();
+        }
+    }
+}
+
+fn summarize(projects: Vec<Project>) -> Vec<ProjectSummary> {
+    projects
+        .into_iter()
             .map(|p| ProjectSummary {
                 id: p.id.clone(),
                 title: p.source.as_ref().map(|s| s.title.clone()),
@@ -927,10 +987,11 @@ impl Engine {
                 updated_at: p.updated_at,
             })
             .collect()
-    }
+}
 
+impl Engine {
     pub fn delete(&self, id: &str) -> ApiResult<()> {
-        if self.jobs.lock().unwrap().values().any(|j| j.info.project_id == id) {
+        if self.jobs.lk().values().any(|j| j.info.project_id == id) {
             return Err(ApiError::new("BUSY", "project has running jobs"));
         }
         Ok(self.store.delete(id)?)
@@ -940,7 +1001,19 @@ impl Engine {
     pub async fn create(&self, input: &str) -> ApiResult<Project> {
         if crate::local::is_local(input) {
             let path = crate::local::normalize(input);
-            let id = crate::local::project_id(&path);
+            // an existing project of this file keeps its id (ids from older
+            // versions were hashed differently)
+            let key = path.to_string_lossy().to_lowercase();
+            let store = self.store.clone();
+            let existing = tokio::task::spawn_blocking(move || {
+                store
+                    .list()
+                    .into_iter()
+                    .find(|p| p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local && s.url.to_lowercase() == key))
+                    .map(|p| p.id)
+            })
+            .await?;
+            let id = existing.unwrap_or_else(|| crate::local::project_id(&path));
             if self.store.exists(&id) {
                 let p = self.get(&id)?;
                 if p.source.as_ref().is_some_and(|s| s.audio_tracks.is_empty()) {
@@ -980,7 +1053,7 @@ impl Engine {
     }
 
     async fn resolve_fresh(&self, input: &str) -> ApiResult<Source> {
-        let cookies = self.cookies.lock().unwrap().get();
+        let cookies = self.cookies.lk().get();
         Ok(crate::platforms::resolve(input, cookies.as_ref()).await?)
     }
 
@@ -1028,7 +1101,7 @@ impl Engine {
         for s in songs.iter_mut() {
             validate_song(s)?;
         }
-        songs.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+        songs.sort_by(|a, b| a.start.total_cmp(&b.start));
         self.mutate(id, |p| {
             check_revision(p, base_revision)?;
             p.songs = songs;
@@ -1116,7 +1189,7 @@ impl Engine {
                     Some(m) => *m = mute,
                     None => s.mutes.push(mute),
                 }
-                s.mutes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+                s.mutes.sort_by(|a, b| a.start.total_cmp(&b.start));
                 Ok(())
             })
             .await?;
@@ -1183,7 +1256,7 @@ impl Engine {
         if !(start.is_finite() && end.is_finite()) || end <= start || start < 0.0 {
             return Err(invalid("bad clip range"));
         }
-        if self.jobs.lock().unwrap().values().any(|j| j.info.project_id == id && (j.info.kind == "clips.fetch" || j.info.kind == "export.run")) {
+        if self.jobs.lk().values().any(|j| j.info.project_id == id && (j.info.kind == "clips.fetch" || j.info.kind == "export.run")) {
             return Err(ApiError::new("BUSY", "clips are being fetched or exported"));
         }
         let dir = self.store.dir(id).join(format!("clips/{clip_id}"));
@@ -1211,7 +1284,7 @@ impl Engine {
     /// space. Songs, mutes and edits stay; `clips.fetch` downloads again.
     /// Returns the project and the bytes freed.
     pub async fn drop_media(&self, id: &str, clip_id: Option<&str>) -> ApiResult<(Project, u64)> {
-        if self.jobs.lock().unwrap().values().any(|j| j.info.project_id == id && (j.info.kind == "clips.fetch" || j.info.kind == "export.run")) {
+        if self.jobs.lk().values().any(|j| j.info.project_id == id && (j.info.kind == "clips.fetch" || j.info.kind == "export.run")) {
             return Err(ApiError::new("BUSY", "clips are being fetched or exported"));
         }
         let mut dirs = Vec::new();
@@ -1233,12 +1306,16 @@ impl Engine {
             })
             .await?;
         let root = self.store.dir(id);
-        let mut freed = 0u64;
-        for d in dirs {
-            let d = root.join(d);
-            freed += dir_size(&d);
-            let _ = std::fs::remove_dir_all(&d);
-        }
+        let freed = tokio::task::spawn_blocking(move || {
+            let mut freed = 0u64;
+            for d in dirs {
+                let d = root.join(d);
+                freed += dir_size(&d);
+                let _ = std::fs::remove_dir_all(&d);
+            }
+            freed
+        })
+        .await?;
         Ok((p, freed))
     }
 
@@ -1249,6 +1326,9 @@ impl Engine {
     pub async fn audio_window(self: &Arc<Self>, id: &str, start: f64, duration: f64, sample_rate: Option<u32>, channels: Option<u32>) -> ApiResult<Value> {
         let p = self.get(id)?;
         p.audio.as_ref().ok_or_else(|| precondition("fetch the audio first"))?;
+        if self.jobs.lk().values().any(|j| j.info.project_id == id && j.info.kind == "audio.fetch") {
+            return Err(ApiError::new("BUSY", "the audio is being fetched"));
+        }
         if !(start.is_finite() && duration.is_finite()) || start < 0.0 || duration <= 0.0 || duration > 3600.0 {
             return Err(invalid("bad window"));
         }
@@ -1286,12 +1366,12 @@ impl Engine {
             None
         } else {
             let len = std::fs::metadata(&path)?.len();
-            let cached = self.frame_index.lock().unwrap().get(&p.id).filter(|(l, _)| *l == len).map(|(_, i)| i.clone());
+            let cached = self.frame_index.lk().get(&p.id).filter(|(l, _)| *l == len).map(|(_, i)| i.clone());
             Some(match cached {
                 Some(i) => i,
                 None => {
                     let idx = Arc::new(adts_index(&path)?);
-                    self.frame_index.lock().unwrap().insert(p.id.clone(), (len, idx.clone()));
+                    self.frame_index.lk().insert(p.id.clone(), (len, idx.clone()));
                     idx
                 }
             })
@@ -1311,7 +1391,7 @@ impl Engine {
         self.spawn_job("audio.fetch", id, Vec::new(), move |eng, ctx| async move {
             // the old probabilities / frame index describe the old audio
             let _ = std::fs::remove_file(eng.store.path(&p.id, "probs.bin"));
-            eng.frame_index.lock().unwrap().remove(&p.id);
+            eng.frame_index.lk().remove(&p.id);
             if is_local(&p) {
                 let path = PathBuf::from(&p.source.as_ref().unwrap().url);
                 let (file, track) = ("audio.mka", p.settings.audio_track);
@@ -1378,10 +1458,11 @@ impl Engine {
             // overview waveform fills in while the audio downloads
             let follower = PeaksFollower::start(out.clone(), eng.store.path(&p.id, "overview.peaks"));
             let progress: ProgressFn = {
-                let (inner, until) = (ctx.progress.clone(), follower.until_ms.clone());
+                let (inner, until, sent) = (ctx.progress.clone(), follower.until_ms.clone(), Arc::new(AtomicU64::new(0)));
                 Arc::new(move |mut pr: Progress| {
                     let u = until.load(Ordering::Relaxed);
-                    if u > 0 {
+                    if u > sent.load(Ordering::Relaxed) {
+                        sent.store(u, Ordering::Relaxed);
                         pr.peaks_until = Some(u as f64 / 1000.0);
                     }
                     inner(pr)
@@ -1435,7 +1516,7 @@ impl Engine {
                     let peaks_path = eng.store.path(&p.id, "overview.peaks");
                     let total = (audio.duration * panns::SAMPLE_RATE as f64) as u64;
                     tokio::task::spawn_blocking(move || -> ApiResult<(Probs, runtime::Device)> {
-                        let mut slot = eng2.tagger.lock().unwrap();
+                        let mut slot = eng2.tagger.lk();
                         let tagger = eng2.tagger(&mut slot)?;
                         let mut rd = ffmpeg::decode(&input, panns::SAMPLE_RATE, 1, None, None)?;
                         let mut pk = peaks::PeakBuilder::new(panns::SAMPLE_RATE, 20);
@@ -1456,8 +1537,11 @@ impl Engine {
                     .await??
                 }
             };
-            let params = params.unwrap_or_else(|| p.detection.as_ref().map(|d| d.params.clone()).unwrap_or_default());
-            let a = detect::analyze(&probs, &params);
+            let params = params.unwrap_or_else(|| p.detection.as_ref().map(|d| d.params.clone()).unwrap_or_default()).sanitized();
+            let a = {
+                let params = params.clone();
+                tokio::task::spawn_blocking(move || detect::analyze(&probs, &params)).await?
+            };
             let segs = a.segments.clone();
             let p = eng
                 .mutate(&p.id, |p| {
@@ -1482,11 +1566,13 @@ impl Engine {
         if self.get(id)?.detection.is_none() {
             return Err(precondition("run detection first"));
         }
-        let probs = std::fs::read(self.store.path(id, "probs.bin"))
-            .ok()
-            .and_then(|b| Probs::from_bytes(&b))
-            .ok_or_else(|| precondition("run detection first"))?;
-        let a = detect::analyze(&probs, &params);
+        let params = params.sanitized();
+        let (path, pc) = (self.store.path(id, "probs.bin"), params.clone());
+        let a = tokio::task::spawn_blocking(move || {
+            std::fs::read(path).ok().and_then(|b| Probs::from_bytes(&b)).map(|probs| detect::analyze(&probs, &pc))
+        })
+        .await?
+        .ok_or_else(|| precondition("run detection first"))?;
         self.mutate(id, |p| {
             let device = p.detection.as_ref().map(|d| d.device).unwrap_or(runtime::Device::Cpu);
             p.detection = Some(Detection {
@@ -1519,7 +1605,7 @@ impl Engine {
         }
         if exact
             && let Some(ids) = &song_ids {
-                if self.jobs.lock().unwrap().values().any(|j| j.info.project_id == id && j.info.kind == "clips.fetch") {
+                if self.jobs.lk().values().any(|j| j.info.project_id == id && j.info.kind == "clips.fetch") {
                     return Err(ApiError::new("BUSY", format!("clips.fetch is already running for {id}")));
                 }
                 p = self
@@ -1619,8 +1705,13 @@ impl Engine {
         let clip = if clip.video.is_none() || !mp4.is_file() {
             let v = if is_local(&p) {
                 (ctx.progress)(Progress::note("video.fetch", "cut_recording", "cutting the recording"));
-                let (path, track, mp4c, (a, b)) = (PathBuf::from(&p.source.as_ref().unwrap().url), p.settings.audio_track, mp4.clone(), (clip.start, clip.end));
-                tokio::task::spawn_blocking(move || crate::local::cut_clip(&path, a, b, track, &mp4c)).await??
+                let (path, track, mp4c, (a, b), cancel) =
+                    (PathBuf::from(&p.source.as_ref().unwrap().url), p.settings.audio_track, mp4.clone(), (clip.start, clip.end), ctx.cancel.clone());
+                let r = tokio::task::spawn_blocking(move || crate::local::cut_clip(&path, a, b, track, &mp4c, &cancel)).await?;
+                if ctx.cancel.is_cancelled() {
+                    return Err(ApiError::new("CANCELLED", "cancelled"));
+                }
+                r?
             } else {
                 let src = self.source(&p).await?;
                 let opts = VideoOptions { height: p.settings.video_height, workers: None };
@@ -1702,7 +1793,7 @@ impl Engine {
             .collect();
         let (eng, cancel) = (self.clone(), ctx.cancel.clone());
         let regions = tokio::task::spawn_blocking(move || -> ApiResult<Vec<(f64, f64)>> {
-            let mut slot = eng.tagger.lock().unwrap();
+            let mut slot = eng.tagger.lk();
             let tagger = eng.tagger(&mut slot)?;
             let v = talk::probs_of_file(tagger, &stems.vocals, &cancel)?;
             let m = talk::probs_of_file(tagger, &stems.orig, &cancel)?;

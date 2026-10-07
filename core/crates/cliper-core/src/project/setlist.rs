@@ -101,7 +101,7 @@ pub fn match_songs(entries: &mut [SetlistEntry], songs: &[&Song], tolerance: f64
             }
         }
     }
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut used = vec![false; songs.len()];
     for (_, i, j) in pairs {
         if entries[i].song_id.is_none() && !used[j] {
@@ -125,7 +125,7 @@ pub fn match_songs(entries: &mut [SetlistEntry], songs: &[&Song], tolerance: f64
 pub fn apply(p: &mut Project, text: &str, tolerance: f64, apply: bool, overwrite: bool) -> SetlistMatch {
     let mut entries = parse(text);
     let mut songs: Vec<&Song> = p.songs.iter().filter(|s| s.enabled).collect();
-    songs.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    songs.sort_by(|a, b| a.start.total_cmp(&b.start));
     match_songs(&mut entries, &songs, tolerance);
     let mut applied = 0;
     if apply {

@@ -1,4 +1,5 @@
-//! `cliper` — Cliper engine binary (debug CLI; `serve` IPC mode comes later).
+//! `cliper` — Cliper engine binary: `cliper serve` (JSON-RPC for the UI),
+//! `cliper process` (headless batch) and step-by-step debug commands.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -173,8 +174,53 @@ fn load_cookies(p: &Option<PathBuf>) -> Result<Option<std::collections::BTreeMap
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    kill_children_with_us();
+    // DLL search path for ONNX Runtime before any worker thread exists
+    cliper_core::ml::runtime::init();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let r = rt.block_on(run());
+    // don't wait forever for blocking work (a separation, an encode) that
+    // nobody is listening to any more
+    rt.shutdown_timeout(std::time::Duration::from_secs(3));
+    r
+}
+
+/// Put this process in a Job Object that kills every process in it when the
+/// last handle closes — i.e. when cliper exits or is killed, its ffmpeg
+/// children go too (they inherit the job).
+#[cfg(windows)]
+fn kill_children_with_us() {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: plain Win32 calls; `info` lives across the call; the job handle is
+    // intentionally leaked (closing it is what kills the children, at exit).
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if ok != 0 {
+            AssignProcessToJobObject(job, GetCurrentProcess());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn kill_children_with_us() {}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
