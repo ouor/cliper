@@ -1,0 +1,166 @@
+/* Cliper design tokens. Dark is the default (editing-tool convention, waveforms read best). */
+:root {
+  /* type */
+  --font-ui: "Pretendard Variable", Pretendard, "Malgun Gothic", "Yu Gothic UI", "Meiryo", "Noto Sans CJK KR", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, "D2Coding", monospace;
+  --fs-2xs: 10px;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 24px;
+  --fs-3xl: 30px;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* space (4px grid) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* radius */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-full: 999px;
+
+  /* motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 90ms;
+  --dur: 160ms;
+
+  /* layout */
+  --topbar-h: 48px;
+  --stepbar-h: 40px;
+  --statusbar-h: 28px;
+  --transport-h: 44px;
+  --songlist-w: 340px;
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-0: #0b0d11;
+  --bg-1: #111318;
+  --bg-2: #171a20;
+  --bg-3: #1e222a;
+  --bg-4: #272c36;
+  --bg-overlay: rgba(6, 8, 11, 0.62);
+  --line-1: #1f232b;
+  --line-2: #2b303a;
+  --line-3: #3a414e;
+  --text-1: #e9ecf2;
+  --text-2: #aab2c0;
+  --text-3: #727b8b;
+  --text-4: #515967;
+  --text-inv: #0b0d11;
+
+  --accent: #2fd3b5;
+  --accent-hover: #4be0c4;
+  --accent-press: #22b89d;
+  --accent-soft: rgba(47, 211, 181, 0.13);
+  --accent-line: rgba(47, 211, 181, 0.45);
+
+  --doubt: #f5a524;
+  --doubt-soft: rgba(245, 165, 36, 0.14);
+  --danger: #f25f5c;
+  --danger-soft: rgba(242, 95, 92, 0.14);
+  --success: #3ccf86;
+  --success-soft: rgba(60, 207, 134, 0.13);
+  --info: #6fa8ff;
+  --info-soft: rgba(111, 168, 255, 0.14);
+
+  --mute: #4c8dff;
+  --mute-soft: rgba(76, 141, 255, 0.28);
+  --suggest: #f2c94c;
+  --suggest-soft: rgba(242, 201, 76, 0.18);
+
+  --wave: #6d7891;
+  --wave-strong: #9aa6bf;
+  --wave-vocal: #b08cff;
+  --wave-vocal-soft: rgba(176, 140, 255, 0.35);
+  --prob: #2fd3b5;
+  --prob-fill: rgba(47, 211, 181, 0.16);
+  --lane-music: #6fa8ff;
+  --lane-speech: #f2994a;
+  --lane-sing: #e86ad8;
+  --candidate: #8c95a6;
+  --excluded: #4a505d;
+  --clipband: #3d7a6e;
+  --playhead: #ff5470;
+  --grid: rgba(255, 255, 255, 0.05);
+  --grid-strong: rgba(255, 255, 255, 0.1);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --focus: 0 0 0 2px var(--bg-1), 0 0 0 4px var(--accent-line);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg-0: #eceef2;
+  --bg-1: #f6f7f9;
+  --bg-2: #ffffff;
+  --bg-3: #eef0f4;
+  --bg-4: #e2e5eb;
+  --bg-overlay: rgba(20, 24, 32, 0.32);
+  --line-1: #e4e7ec;
+  --line-2: #d6dae2;
+  --line-3: #bcc2cd;
+  --text-1: #171a21;
+  --text-2: #4a5161;
+  --text-3: #79818f;
+  --text-4: #a3a9b4;
+  --text-inv: #ffffff;
+
+  --accent: #0e9f86;
+  --accent-hover: #0b8a74;
+  --accent-press: #097563;
+  --accent-soft: rgba(14, 159, 134, 0.12);
+  --accent-line: rgba(14, 159, 134, 0.45);
+
+  --doubt: #c97a00;
+  --doubt-soft: rgba(201, 122, 0, 0.12);
+  --danger: #d43c3a;
+  --danger-soft: rgba(212, 60, 58, 0.1);
+  --success: #1f9d61;
+  --success-soft: rgba(31, 157, 97, 0.1);
+  --info: #2f6fdb;
+  --info-soft: rgba(47, 111, 219, 0.1);
+
+  --mute: #2f6fdb;
+  --mute-soft: rgba(47, 111, 219, 0.22);
+  --suggest: #c99a00;
+  --suggest-soft: rgba(201, 154, 0, 0.16);
+
+  --wave: #8a93a6;
+  --wave-strong: #5d677c;
+  --wave-vocal: #7b52e0;
+  --wave-vocal-soft: rgba(123, 82, 224, 0.28);
+  --prob: #0e9f86;
+  --prob-fill: rgba(14, 159, 134, 0.14);
+  --lane-music: #2f6fdb;
+  --lane-speech: #d9731f;
+  --lane-sing: #c03cb2;
+  --candidate: #8a93a3;
+  --excluded: #b5bbc6;
+  --clipband: #6cb3a5;
+  --playhead: #e5304f;
+  --grid: rgba(0, 0, 0, 0.05);
+  --grid-strong: rgba(0, 0, 0, 0.1);
+
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.08);
+  --shadow-2: 0 8px 24px rgba(16, 24, 40, 0.12), 0 2px 6px rgba(16, 24, 40, 0.06);
+  --shadow-3: 0 24px 64px rgba(16, 24, 40, 0.18), 0 4px 12px rgba(16, 24, 40, 0.08);
+}

@@ -1,0 +1,395 @@
+// S4 멘트 다듬기.
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Check, Download, Hand, Info, Plus, Repeat, Scissors, SkipForward, Trash2, Wand2, Zap } from "lucide-react";
+import type { Project } from "@ipc/generated/Project";
+import type { Song } from "@ipc/generated/Song";
+import type { Mute } from "@ipc/generated/Mute";
+import { useWs } from "@/state/ws";
+import { useApp } from "@/state/app";
+import { projectUi, setProjectUi, useProjects, editSong } from "@/state/projects";
+import { songProgress, useJobs } from "@/state/jobs";
+import { player, usePlayer, LISTEN_KEY, LISTEN_LABEL, type ListenMode } from "@/audio/player";
+import { clipCovered, hostClip, muteOutsideClip, mutePosition, singOverlap, songNumbers, songTitle, unconfirmedMutes, videoState } from "@/lib/song";
+import { loadPeaks, mediaUrl, type Peaks } from "@/lib/peaks";
+import { fmtTime } from "@/lib/format";
+import { fetchSongs } from "@/lib/pipeline";
+import { addMute, deleteMute, endSongHere, splitMute, updateMute } from "@/lib/edits";
+import { DetailTimeline, selectMuteAndLoop } from "./DetailTimeline";
+import { useMapData } from "./OverviewMap";
+import { Progress } from "@/components/common";
+
+const MODE_TIP = [
+  "방송 그대로 (기준)",
+  "내보낼 소리 · 멘트 구간만 목소리 제거\n확인 전 제안도 적용된 것처럼 들려요",
+  "멘트 구간 안에서 빠지는 소리만 (구간 밖은 무음)\n여기서 노래 멜로디가 들리면 과하게 지운 거예요",
+  "분리된 반주 전체 (참고용)",
+];
+
+const STRENGTHS: { label: string; v: number | null }[] = [
+  { label: "완전 제거", v: null },
+  { label: "-30dB", v: -30 },
+  { label: "-24dB", v: -24 },
+  { label: "-18dB", v: -18 },
+  { label: "-12dB", v: -12 },
+  { label: "-6dB", v: -6 },
+];
+
+function MsField({ value, onCommit, label }: { value: number; onCommit: (v: number) => void; label: string }) {
+  const [text, setText] = useState<string | null>(null);
+  return (
+    <label className="ms-field">
+      <span className="faint">{label}</span>
+      <input
+        className="input sm mono"
+        value={text ?? String(Math.round(value * 1000))}
+        onFocus={(e) => {
+          setText(String(Math.round(value * 1000)));
+          requestAnimationFrame(() => e.target.select());
+        }}
+        onChange={(e) => setText(e.target.value.replace(/[^\d]/g, ""))}
+        onBlur={() => {
+          const v = Number(text);
+          if (text !== null && v >= 5 && v <= 2000 && Math.abs(v / 1000 - value) > 0.0005) onCommit(v / 1000);
+          setText(null);
+        }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") {
+            setText(null);
+            requestAnimationFrame(() => (e.target as HTMLInputElement).blur());
+          }
+        }}
+      />
+      <span className="faint">ms</span>
+    </label>
+  );
+}
+
+function MuteRow({ p, s, m, selected, warn }: { p: Project; s: Song; m: Mute; selected: boolean; warn: string[] }) {
+  return (
+    <button className={`mute-row${selected ? " selected" : ""}${m.confirmed ? " confirmed" : " suggested"}`} onClick={() => selectMuteAndLoop(m, usePlayer.getState().playing)}>
+      <span className={`mute-dot${m.confirmed ? " on" : ""}`} />
+      <span className="mr-pos">{mutePosition(m, s)}</span>
+      <span className="mono mr-time">
+        {fmtTime(m.start - s.start, 1)}~{fmtTime(m.end - s.start, 1)}
+      </span>
+      <span className="spacer" />
+      {m.origin === "manual" && <Hand size={12} className="faint" aria-label="직접 만듦" />}
+      {m.gain_db !== null && <span className="tag outline">{m.gain_db}dB</span>}
+      {warn.length > 0 && <AlertTriangle size={13} color="var(--doubt)" aria-label={warn.join(", ")} />}
+      <span className={`tag ${m.confirmed ? "mute" : "suggest"}`}>{m.confirmed ? (m.origin === "manual" ? "직접 만듦" : "확인함") : "제안 · 확인 전"}</span>
+      {void p}
+    </button>
+  );
+}
+
+export function TalkEditor({ p }: { p: Project }) {
+  const ws = useWs();
+  const settings = useApp((s) => s.settings);
+  const mode = usePlayer((s) => s.mode);
+  const loopOn = usePlayer((s) => s.loopOn);
+  const stems = usePlayer((s) => s.stems);
+  const playing = usePlayer((s) => s.playing);
+  const jobs = useJobs();
+  const ui = useProjects((s) => s.ui[p.id]) ?? projectUi(p.id);
+  const { probs } = useMapData(p);
+  const s = p.songs.find((x) => x.id === ws.selected);
+  const clip = s ? hostClip(p, s) : null;
+  const vs = s ? videoState(p, s) : "none";
+  const muteOn = s ? !ui.muteOff.includes(s.id) : true;
+  const [peaks, setPeaks] = useState<{ orig: Peaks | null; voc: Peaks | null }>({ orig: null, voc: null });
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [notesOpen, setNotesOpen] = useState(false);
+
+  // pick a song with video when entering with nothing useful selected
+  useEffect(() => {
+    if (s && s.enabled) return;
+    const withVideo = [...p.songs].filter((x) => x.enabled && hostClip(p, x)?.stems).sort((a, b) => a.start - b.start);
+    const first = withVideo.find((x) => unconfirmedMutes(x) > 0) ?? withVideo[0];
+    if (first) useWs.setState({ selected: first.id, selectedMute: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // first visit: open the "할 수 없는 것" notes once (coach mark)
+  useEffect(() => {
+    void window.cliper.getState<boolean>("talkCoachSeen").then((seen) => {
+      if (!seen) {
+        setNotesOpen(true);
+        void window.cliper.setState("talkCoachSeen", true);
+      }
+    });
+  }, []);
+
+  // stems window + peaks
+  useEffect(() => {
+    if (!s || !clip?.stems || !clip.video) return;
+    const cov = clipCovered(clip)!;
+    const a = Math.max(cov[0], s.start - p.settings.margin_before);
+    const b = Math.min(cov[1], s.end + p.settings.margin_after);
+    void player.useStems(p.id, clip.id, clip.video.vod_start + clip.offset, clip.stems.frames, a, b, clip.stems.model + clip.stems.elapsed_sec);
+    let alive = true;
+    const bust = String(clip.stems.elapsed_sec);
+    void Promise.all([loadPeaks(mediaUrl(p.id, `clips/${clip.id}/orig.peaks`, bust)).catch(() => null), loadPeaks(mediaUrl(p.id, `clips/${clip.id}/vocals.peaks`, bust)).catch(() => null)]).then(([orig, voc]) => alive && setPeaks({ orig, voc }));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s?.id, s?.start, s?.end, clip?.id, clip?.stems?.elapsed_sec]);
+
+  // mutes → worklet
+  useEffect(() => {
+    if (s) player.setMutes(s.mutes, muteOn);
+  }, [s, muteOn]);
+
+  // video
+  useEffect(() => {
+    if (!clip?.video) {
+      player.attachVideo(null);
+      return;
+    }
+    player.attachVideo(videoRef.current, clip.video.vod_start + clip.offset, clip.video.duration);
+    return () => player.attachVideo(null);
+  }, [clip?.id, clip?.video, clip?.offset]);
+
+  // "listened" (export pre-check): result mode played for a while on this song
+  const listenAcc = useRef(0);
+  useEffect(() => {
+    if (!s || !playing || mode !== 1) return;
+    const t = setInterval(() => {
+      listenAcc.current += 1;
+      if (listenAcc.current >= 3 && !projectUi(p.id).listened.includes(s.id)) setProjectUi(p.id, { listened: [...projectUi(p.id).listened, s.id] });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [s?.id, playing, mode, p.id, s]);
+
+  const warnings = useMemo(() => {
+    const out = new Map<string, string[]>();
+    if (!s) return out;
+    for (const m of s.mutes) {
+      const w: string[] = [];
+      if (singOverlap(m, probs) >= 0.3) w.push("노래 겹침");
+      if (muteOutsideClip(m, clip)) w.push("받은 영상 밖");
+      if (m.end <= s.start || m.start >= s.end) w.push("곡 밖");
+      out.set(m.id, w);
+    }
+    return out;
+  }, [s, probs, clip]);
+
+  if (!s) {
+    return (
+      <div className="talk-empty">
+        <p>멘트를 다듬을 곡을 목록에서 골라 주세요.</p>
+        <p className="faint">영상을 받은 곡만 멘트 다듬기를 할 수 있어요.</p>
+      </div>
+    );
+  }
+  const prog = songProgress(jobs, p.id).get(s.id);
+  const n = songNumbers(p).get(s.id);
+  if (!clip?.stems || !clip.video) {
+    return (
+      <div className="talk-empty">
+        <div className="te-title">
+          {n ? String(n).padStart(2, "0") + " " : ""}
+          {songTitle(s)}
+        </div>
+        {prog ? (
+          <div className="te-progress">
+            <div className="row">
+              <Download size={15} /> {prog.label}
+              {prog.fraction !== null ? ` · ${Math.floor(prog.fraction * 100)}%` : ""}
+            </div>
+            <Progress value={prog.fraction} />
+            <div className="faint">{prog.waiting ? "앞 작업이 끝나면 시작해요. 다른 곡을 먼저 확인해도 돼요." : "목소리와 반주를 나누는 데 GPU에서 5분 곡 약 8초 걸려요. 다른 곡을 먼저 확인해도 돼요."}</div>
+          </div>
+        ) : vs === "refetch" ? (
+          <>
+            <p>곡 범위를 앞뒤 여유({p.settings.margin_before}초) 밖으로 늘려서 이 곡의 영상을 다시 받아야 해요 (약 10초).</p>
+            <button className="btn primary" onClick={() => void fetchSongs(p.id, [s.id], "영상 다시 받기")}>
+              <Zap size={14} /> 지금 받기 <kbd>Ctrl+Shift+E</kbd>
+            </button>
+          </>
+        ) : !s.enabled ? (
+          <p className="muted">제외한 곡이에요. 곡 검수 화면에서 복원할 수 있어요.</p>
+        ) : (
+          <>
+            <p>이 곡의 영상을 아직 받지 않았어요. 멘트 다듬기는 영상을 받은 뒤에 할 수 있어요.</p>
+            <button className="btn primary" onClick={() => void fetchSongs(p.id, [s.id])}>
+              <Zap size={14} /> 이 곡 받기 <kbd>Ctrl+Shift+E</kbd>
+            </button>
+            <p className="faint">영상 받기 → 목소리와 반주 나누기 → 멘트 제안을 한 번에 해요. 1080p 5분 곡 기준 약 15~20초.</p>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  const mutes = [...s.mutes].sort((a, b) => a.start - b.start);
+  const sel = mutes.find((m) => m.id === ws.selectedMute) ?? null;
+  const unconf = unconfirmedMutes(s);
+  const selWarn = sel ? warnings.get(sel.id) ?? [] : [];
+  const loadingStems = stems && stems.clipId === clip.id && stems.progress < 1 && !stems.error;
+
+  return (
+    <div className="talk">
+      <div className="talk-top">
+        <div className="talk-video">
+          <div className="video-box">
+            <video ref={videoRef} src={mediaUrl(p.id, `clips/${clip.id}/source.mp4`)} muted playsInline preload="auto" />
+            {loadingStems && (
+              <div className="video-loading">
+                <span className="spinner" /> 소리 불러오는 중 {Math.floor((stems?.progress ?? 0) * 100)}%
+              </div>
+            )}
+            {stems?.error && <div className="video-loading err">소리를 불러오지 못했어요 · {stems.error}</div>}
+          </div>
+        </div>
+        <div className="mute-panel">
+          <div className="mp-head">
+            <div className="grow">
+              <div className="mp-song ellipsis">
+                <span className="mono faint">{n ? String(n).padStart(2, "0") : "–"}</span> {songTitle(s)}
+              </div>
+              <div className="faint mp-sub">
+                멘트 구간 {mutes.length}개{unconf ? ` · 확인 전 ${unconf}개` : mutes.length ? " · 모두 확인함" : ""}
+              </div>
+            </div>
+            <button
+              className="btn xs subtle"
+              onClick={() => {
+                const t = player.now();
+                void addMute(p.id, s.id, t, t + 2);
+              }}
+              data-tip="재생 위치에 2초 구간 추가 (또는 목소리 줄을 드래그)"
+              data-tip-pos="left"
+            >
+              <Plus size={13} />
+            </button>
+          </div>
+          <label className="mute-toggle">
+            <input type="checkbox" className="switch" checked={muteOn} onChange={(e) => setProjectUi(p.id, { muteOff: e.target.checked ? ui.muteOff.filter((x) => x !== s.id) : [...ui.muteOff, s.id] })} />
+            <span className="grow">멘트 지우기 사용</span>
+            <span className="faint">{muteOn ? "확인한 구간만 내보내요" : "원본 소리로 내보내요"}</span>
+          </label>
+          <div className="mp-list">
+            {mutes.length === 0 && <div className="mp-empty">멘트가 겹친 부분을 찾지 못했어요. 필요하면 목소리 줄을 드래그해서 직접 추가하세요.</div>}
+            {mutes.map((m) => (
+              <MuteRow key={m.id} p={p} s={s} m={m} selected={m.id === ws.selectedMute} warn={warnings.get(m.id) ?? []} />
+            ))}
+          </div>
+          {unconf > 1 && (
+            <button
+              className="btn sm subtle mp-all"
+              onClick={() =>
+                void editSong(p.id, s.id, "제안 모두 확정", (x) => {
+                  for (const m of x.mutes) m.confirmed = true;
+                })
+              }
+            >
+              <Check size={13} /> 제안 {unconf}개 모두 확정
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="listen-bar">
+        <span className="label">듣기</span>
+        <div className="seg listen-seg">
+          {LISTEN_LABEL.map((l, i) => (
+            <button key={l} className={`${mode === i ? "on" : ""} m${i}`} onClick={() => player.setMode(i as ListenMode)} data-tip={MODE_TIP[i]} data-tip-pos="top">
+              <kbd>{LISTEN_KEY[i]}</kbd> {l}
+            </button>
+          ))}
+        </div>
+        <button className={`btn sm ${loopOn ? "active" : "ghost"}`} onClick={() => player.toggleLoop()}>
+          <Repeat size={13} /> 구간 반복 {loopOn ? "켬" : "끔"} <kbd>Ctrl+L</kbd>
+        </button>
+        <span className="spacer" />
+        <span className="faint lb-hint">
+          <kbd>Tab</kbd> 다음 구간 · 목소리 줄 드래그 = 새 구간 · <kbd>Alt</kbd> 스냅 끄기 · <kbd>Ctrl</kbd>+휠 확대
+        </span>
+      </div>
+
+      <DetailTimeline p={p} s={s} clip={clip} orig={peaks.orig} voc={peaks.voc} probs={probs} muteOn={muteOn} />
+
+      <div className="mute-inspector">
+        {sel ? (
+          <>
+            <div className="mi-row">
+              <span className="mi-name">
+                선택: {mutePosition(sel, s)} <span className="mono">{fmtTime(sel.start - s.start, 2)} ~ {fmtTime(sel.end - s.start, 2)}</span>
+                <span className="faint"> ({(sel.end - sel.start).toFixed(2)}초)</span>
+              </span>
+              <MsField label="페이드 앞" value={sel.fade_in} onCommit={(v) => void updateMute(p.id, s.id, sel.id, "페이드 길이", (m) => void (m.fade_in = v))} />
+              <MsField label="뒤" value={sel.fade_out} onCommit={(v) => void updateMute(p.id, s.id, sel.id, "페이드 길이", (m) => void (m.fade_out = v))} />
+              <label className="ms-field">
+                <span className="faint">강도</span>
+                <select
+                  className="select sm"
+                  value={sel.gain_db === null ? "" : String(sel.gain_db)}
+                  onChange={(e) => {
+                    const v = e.target.value === "" ? null : Number(e.target.value);
+                    void updateMute(p.id, s.id, sel.id, "제거 강도", (m) => void (m.gain_db = v));
+                  }}
+                >
+                  {STRENGTHS.map((x) => (
+                    <option key={x.label} value={x.v === null ? "" : String(x.v)}>
+                      {x.v === null ? "완전 제거" : `줄이기 ${x.label}`}
+                    </option>
+                  ))}
+                  {sel.gain_db !== null && !STRENGTHS.some((x) => x.v === sel.gain_db) && <option value={String(sel.gain_db)}>{sel.gain_db}dB</option>}
+                </select>
+              </label>
+              <span className="spacer" />
+              {!sel.confirmed ? (
+                <button className="btn sm primary" onClick={() => void updateMute(p.id, s.id, sel.id, "적용 확정", (m) => void (m.confirmed = true))}>
+                  <Check size={13} /> 적용 확정 <kbd>↵</kbd>
+                </button>
+              ) : (
+                <button className="btn sm subtle" onClick={() => void updateMute(p.id, s.id, sel.id, "확정 취소", (m) => void (m.confirmed = false))} disabled={sel.origin === "manual"} data-tip={sel.origin === "manual" ? "직접 만든 구간은 항상 확정이에요" : "확인 전으로 되돌려요"} data-tip-pos="top">
+                  확정 취소
+                </button>
+              )}
+              <button className="btn sm subtle" onClick={() => void deleteMute(p.id, s.id, sel.id)}>
+                <Trash2 size={13} /> 삭제 <kbd>Del</kbd>
+              </button>
+              <button className="btn sm subtle" onClick={() => void splitMute(p.id, s.id, sel.id, player.now())}>
+                <Scissors size={13} /> 나누기 <kbd>/</kbd>
+              </button>
+              <button className="btn sm subtle" onClick={() => void endSongHere(p.id, s.id, sel.id)} data-tip={"곡 끝을 이 구간 시작으로 옮기고\n페이드 아웃해요 (되돌리기 가능)"} data-tip-pos="top">
+                <SkipForward size={13} /> 여기서 곡 끝내기 <kbd>F</kbd>
+              </button>
+            </div>
+            {selWarn.includes("노래 겹침") && (
+              <div className="banner warn mi-warn">
+                <AlertTriangle size={14} />
+                <span>이 구간에는 노래가 일부 포함되어 있어요. 노래도 함께 빠질 수 있어요. <b>E 지운 목소리</b>로 들어 보세요.</span>
+              </div>
+            )}
+            {selWarn.includes("받은 영상 밖") && (
+              <div className="banner warn mi-warn">
+                <AlertTriangle size={14} />
+                <span>구간이 받은 영상 범위를 벗어났어요. 내보낼 때 문제가 될 수 있어요.</span>
+              </div>
+            )}
+            {selWarn.includes("곡 밖") && <div className="hint">곡 범위 밖의 구간은 내보내는 파일에 들어가지 않아요.</div>}
+          </>
+        ) : (
+          <div className="mi-row faint">
+            <Wand2 size={14} /> 구간을 고르면 앞 {settings.loopPad}초부터 뒤 {settings.loopPad}초까지 반복해서 들려줘요. <kbd>Tab</kbd>으로 다음 구간, <kbd>B</kbd>로 재생 위치에 새 구간을 시작해요.
+          </div>
+        )}
+        <details className="honest" open={notesOpen} onToggle={(e) => setNotesOpen((e.target as HTMLDetailsElement).open)}>
+          <summary>
+            <Info size={11} /> 멘트 지우기로 할 수 없는 것
+          </summary>
+          <ul>
+            <li>후원 알림음 같은 효과음은 반주로 남아요. 지울 수 없어요.</li>
+            <li>노래와 말이 겹친 부분은 노래도 함께 빠져요.</li>
+            <li>반주가 조용한 부분(피아노만 있는 전주 등)에서는 지운 흔적이 들릴 수 있어요. 이럴 땐 구간을 짧게 하거나 페이드를 길게, 또는 강도를 '줄이기'로 바꿔 보세요.</li>
+          </ul>
+        </details>
+      </div>
+    </div>
+  );
+}

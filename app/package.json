@@ -1,0 +1,33 @@
+{
+  "name": "cliper-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cliper desktop app (Electron UI for the Rust engine)",
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.6.0",
+    "electron-vite": "^5.0.0",
+    "playwright-core": "^1.63.0",
+    "typescript": "5.9",
+    "vite": "^7.3.7"
+  },
+  "dependencies": {
+    "lucide-react": "^1.52.0",
+    "pretendard": "^1.3.9",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zustand": "^5.0.15"
+  }
+}

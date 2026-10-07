@@ -19,6 +19,8 @@ dist/
 *.mp3
 *.mp4
 *.ts
+# …but TypeScript sources of the desktop app are code, not MPEG-TS
+!/app/**/*.ts
 *.wav
 *.f32
 
@@ -29,3 +31,4 @@ __pycache__/
 
 # CUDA/cuDNN runtime DLLs (fetched, not committed)
 /runtime/
+/app/out/
