@@ -106,7 +106,8 @@ http
           return send(200, { ok: true });
         }
         case "/resize":
-          await app.evaluate(({ BrowserWindow }, [w, h]) => BrowserWindow.getAllWindows()[0].setSize(w, h), [b.width, b.height]);
+          // content: true sizes the page area exactly (README screenshots)
+          await app.evaluate(({ BrowserWindow }, [w, h, c]) => (c ? BrowserWindow.getAllWindows()[0].setContentSize(w, h) : BrowserWindow.getAllWindows()[0].setSize(w, h)), [b.width, b.height, !!b.content]);
           return send(200, { ok: true });
         case "/close": // like clicking the window's X (preventable close event)
           await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());

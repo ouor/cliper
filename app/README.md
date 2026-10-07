@@ -107,10 +107,10 @@ app/
 ```sh
 npm run pack:win         # dist/win-unpacked (설치 파일 없이 빠른 확인)
 npm run dist:win         # dist/cliper-v0.1.0-amd64.exe (포터블) + dist/cliper-v0.1.0-amd64-installer.exe (NSIS)
-npm run pack:cuda-addon  # dist/cliper-cuda-addon-v1-amd64.zip + .json (크기, sha256) — GPU 가속 구성요소
+npm run pack:cuda-addon  # ../var/release의 정본 애드온 zip을 엔진에 고정된 크기·sha256으로 확인하고 dist/로 복사
 ```
 
-릴리스 빌드는 **CPU 전용**입니다(각 약 605MB). CUDA 런타임(압축 약 965MB)은 v0.1.0 GitHub 릴리스에 `cliper-cuda-addon-v1-amd64.zip`으로 따로 올리고, NVIDIA 그래픽카드가 있는데 CUDA 런타임이 없는 PC에서는 앱이 자동으로 받아 설치합니다. 엔진 job은 `addon.install_cuda`이고, 받은 뒤 SHA-256을 확인해 `%LOCALAPPDATA%\Cliperddons\cuda-v1`에 풀며, 앱이 엔진을 다시 시작합니다. 이후 버전도 v1 애드온을 그대로 씁니다. zip 안에는 DLL만 루트에 있습니다. 애드온 URL·크기·sha256은 엔진이 `system.info.cuda_addon`으로 알려 줍니다. 그러니 zip을 다시 만들면 엔진 쪽 값도 같이 바꿔야 합니다.
+릴리스 빌드는 **CPU 전용**입니다(각 약 605MB). CUDA 런타임은 v0.1.0 GitHub 릴리스에 `cliper-cuda-addon-v1-amd64.zip`(1,012,083,860바이트)으로 따로 올립니다. NVIDIA 그래픽카드가 있는데 CUDA 런타임이 없는 PC에서는 앱이 자동으로 받아 설치합니다. 엔진 job은 `addon.install_cuda`이고, 받은 뒤 SHA-256을 확인해 `%LOCALAPPDATA%\Cliper\addons\cuda-v1`에 풀며, 앱이 엔진을 다시 시작합니다. 엔진이 이 zip의 크기와 SHA-256을 고정해 두었기 때문에 **zip을 새로 만들면 안 됩니다**(다시 만든 zip은 해시가 달라 거부돼요). `pack:cuda-addon`은 정본 파일을 확인해 복사만 합니다. QA: `CLIPER_CUDA_ADDON_URL`(받을 주소, 해시는 그대로 고정)과 `CLIPER_ADDON_DIR`(설치 위치)로 로컬 서버에서 시험할 수 있습니다. 창·작업 표시줄 아이콘은 `resources/icon.png`(asar 안), 설치 파일 아이콘은 `build/icon.ico`입니다.
 
 패키저가 기대하는 것(모두 git 밖에 있고, 빌드할 때 `resources/`로 복사됩니다):
 

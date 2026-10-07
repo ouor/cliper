@@ -143,6 +143,8 @@ function createWindow() {
     minHeight: 720,
     backgroundColor: settings.theme === "light" ? "#f5f6f8" : "#0e1014",
     title: "Cliper",
+    // window / taskbar icon (the exe's own icon needs resource editing, which the build skips)
+    icon: join(appRoot, "resources", "icon.png"),
     autoHideMenuBar: true,
     show: false,
     webPreferences: {

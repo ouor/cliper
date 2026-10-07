@@ -1,47 +1,38 @@
-// Builds the CUDA runtime add-on that the app installs on PCs with an NVIDIA GPU
-// (engine job `addon.install_cuda`; release builds don't bundle CUDA).
+// CUDA runtime add-on for the release (engine job `addon.install_cuda`; release builds don't bundle CUDA).
 //
-//   node scripts/pack-cuda-addon.mjs            → dist/cliper-cuda-addon-v1-amd64.zip (+ .json manifest)
-//   env: CLIPER_PACK_CUDA_DIR (default ../runtime/cuda), CLIPER_CUDA_ADDON_VERSION (default 1)
+// The engine pins the add-on's size and SHA-256, so the release must carry exactly the canonical
+// zip (../var/release/cliper-cuda-addon-v1-amd64.zip). Rebuilding the zip never reproduces the
+// pinned hash, so this script does not build one: it verifies the canonical file against the pins
+// and copies it next to the app artifacts.
 //
-// Layout: the DLLs at the zip root (the engine extracts into %LOCALAPPDATA%\Cliper\addons\cuda-v<N>).
-// Uses Windows' built-in tar.exe (bsdtar) to write the zip; no extra packages.
+//   node scripts/pack-cuda-addon.mjs   → dist/cliper-cuda-addon-v1-amd64.zip (verified copy)
+//   env: CLIPER_CUDA_ADDON_ZIP (default ../var/release/cliper-cuda-addon-v1-amd64.zip)
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
+import { copyFileSync, createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// keep in sync with the engine's pinned values (core: CUDA add-on)
+const PINNED = {
+  name: "cliper-cuda-addon-v1-amd64.zip",
+  size: 1_012_083_860,
+  sha256: "e73b28d19705de569c50808998274cf9046c0d16e64e25a010b7e8eb2a422ba6",
+};
+
 const here = dirname(dirname(fileURLToPath(import.meta.url)));
-const src = resolve(here, process.env.CLIPER_PACK_CUDA_DIR || "../runtime/cuda");
-const version = process.env.CLIPER_CUDA_ADDON_VERSION || "1";
-const outDir = join(here, "dist");
-const name = `cliper-cuda-addon-v${version}-amd64.zip`;
-const out = join(outDir, name);
+const src = resolve(here, process.env.CLIPER_CUDA_ADDON_ZIP || `../var/release/${PINNED.name}`);
+if (!existsSync(src)) throw new Error(`[cuda-addon] canonical zip not found: ${src}`);
+if (basename(src) !== PINNED.name) throw new Error(`[cuda-addon] expected ${PINNED.name}, got ${basename(src)}`);
 
-const files = readdirSync(src).filter((f) => /\.dll$/i.test(f)).sort();
-for (const need of ["cudart64_13.dll", "cublas64_13.dll", "cublasLt64_13.dll", "cufft64_12.dll", "cudnn64_9.dll"])
-  if (!files.includes(need)) throw new Error(`[cuda-addon] ${join(src, need)} not found`);
-
-mkdirSync(outDir, { recursive: true });
-rmSync(out, { force: true });
-const tar = join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
-if (!existsSync(tar)) throw new Error("[cuda-addon] tar.exe not found (Windows 10 1803+)");
-console.log(`[cuda-addon] ${files.length} DLLs from ${src} → ${out}`);
-execFileSync(tar, ["-a", "-c", "-f", out, "-C", src, ...files], { stdio: "inherit" });
-
+const size = statSync(src).size;
+if (size !== PINNED.size) throw new Error(`[cuda-addon] size ${size} ≠ pinned ${PINNED.size}`);
 const sha256 = await new Promise((ok, fail) => {
   const h = createHash("sha256");
-  createReadStream(out).on("data", (d) => h.update(d)).on("end", () => ok(h.digest("hex"))).on("error", fail);
+  createReadStream(src).on("data", (d) => h.update(d)).on("end", () => ok(h.digest("hex"))).on("error", fail);
 });
-const size = statSync(out).size;
-const manifest = {
-  name,
-  version: Number(version),
-  size,
-  sha256,
-  unpacked: files.reduce((n, f) => n + statSync(join(src, f)).size, 0),
-  files,
-};
-writeFileSync(out.replace(/\.zip$/, ".json"), JSON.stringify(manifest, null, 2) + "\n");
-console.log(`[cuda-addon] ${(size / 1024 / 1024).toFixed(1)} MB  sha256 ${sha256}`);
+if (sha256 !== PINNED.sha256) throw new Error(`[cuda-addon] sha256 ${sha256} ≠ pinned ${PINNED.sha256}`);
+
+const out = join(here, "dist", PINNED.name);
+mkdirSync(dirname(out), { recursive: true });
+copyFileSync(src, out);
+console.log(`[cuda-addon] verified ${size} bytes sha256 ${sha256}\n[cuda-addon] → ${out} (upload this file to the release as-is)`);

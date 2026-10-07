@@ -41,7 +41,7 @@ module.exports = {
   productName: "Cliper",
   directories: { output: "dist", buildResources: "build" },
   // the renderer and main are bundled by electron-vite; nothing from node_modules is needed at runtime
-  files: ["out/**/*", "package.json", "!**/*.map"],
+  files: ["out/**/*", "resources/icon.png", "package.json", "!**/*.map"],
   asar: true,
   // use the Electron that npm installed (no download)
   electronDist: join(here, "node_modules", "electron", "dist"),
@@ -81,6 +81,8 @@ module.exports = {
   },
   nsis: {
     artifactName: "cliper-v${version}-amd64-installer.${ext}",
+    installerIcon: "build/icon.ico",
+    uninstallerIcon: "build/icon.ico",
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,
