@@ -41,9 +41,23 @@ song_fade_in: number, song_fade_out: number,
  */
 video_codec: string, 
 /**
- * export quality (CQ for nvenc, CRF for x264)
+ * export quality (CQ for nvenc, CRF for x264); unused when `video_bitrate_k` is set
  */
-video_quality: number, audio_bitrate_k: number, 
+video_quality: number, 
+/**
+ * export height, e.g. 1080 / 720 / 480 / 360 (aspect kept, never
+ * upscaled); None = the fetched video's size. Ignored with "copy".
+ */
+export_height: number | null, 
+/**
+ * export video bitrate in kbps (e.g. 4000); None = constant quality.
+ * Ignored with "copy".
+ */
+video_bitrate_k: number | null, 
+/**
+ * mp4 AAC bitrate
+ */
+audio_bitrate_k: number, 
 /**
  * loudness normalisation of exported songs (None = keep the original level)
  */

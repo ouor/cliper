@@ -203,7 +203,7 @@ See `protocol.ts` for exact shapes.
 | `audio.fetch` | job | |
 | `detect.run` | job | `{params?, retag?}` |
 | `clips.fetch` | job | `{clip_ids?, song_ids?, exact?}` default: clips missing video or stems. `exact` + `song_ids`: plan clips covering only those songs (± margins) so close neighbours aren't fetched along (such clips are `pinned`). Edits while it runs are fine: it re-reads the plan between clips, pins the clip it works on, and skips clips re-planned away |
-| `export.run` | job | `ExportOptions`: `song_ids?`, `format?` (mp4/wav/flac/mp3), `video_codec?` ("copy" = fast), `include_unconfirmed?`, `apply_mutes?` (false = original audio for this run only), `stems?` + `also_render?`, `handles?`, `reference_video?`, `audio_overrides?` (song id → audio file aligned to clip start) |
+| `export.run` | job | `ExportOptions`: `song_ids?`, `format?` (mp4/wav/flac/mp3), `video_codec?` ("copy" = fast), `export_height?` / `video_bitrate_k?` / `audio_bitrate_k?` (per-run overrides of the settings below), `include_unconfirmed?`, `apply_mutes?` (false = original audio for this run only), `stems?` + `also_render?`, `handles?`, `reference_video?`, `audio_overrides?` (song id → audio file aligned to clip start) |
 | `songs.match_setlist` | request | `{text, tolerance?=150, apply?, overwrite?}` → `SetlistMatch` |
 | `project.export_metadata` | request | `{format: csv/json/chapters/timestamps, include_disabled?, path?}` → `{text, path}` |
 | `queue.add` / `list` / `cancel` / `clear` | request | batch of inputs; `through`: `detect` (default) or `clips`; progress via `queue.changed` + the entry's `job_id` |
@@ -215,6 +215,12 @@ Only one job **per kind per project** runs at a time, and `audio.fetch` excludes
 otherwise; the message names the running job). `clip.extend` / `drop_media` are
 `BUSY` while clips are fetched or exported. Settings are validated
 (`INVALID_PARAMS`: ranges, `video_codec` ∈ `h264_nvenc` / `libx264` / `copy`).
+Export size and rate: `settings.export_height` (144–4320, e.g. 1080/720/480/360;
+aspect kept, even width, never upscaled; null = fetched size) and
+`settings.video_bitrate_k` (100–100000 kbps; VBR with maxrate 1.5× and bufsize
+2×; null = constant quality `video_quality`). Both are ignored with `copy`.
+`audio_bitrate_k` (32–512) is the mp4 AAC rate. Typical presets:
+1080p 4000/128, 720p 2000/128, 480p 1000/96, 360p 600/96.
 Project ids are plain names (no path separators).
 
 ## Notifications

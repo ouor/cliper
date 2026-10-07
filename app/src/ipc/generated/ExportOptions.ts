@@ -18,6 +18,18 @@ format: OutputFormat | null,
  */
 video_codec: string | null, 
 /**
+ * override settings.export_height for this run (e.g. 720)
+ */
+export_height: number | null, 
+/**
+ * override settings.video_bitrate_k for this run (e.g. 2000)
+ */
+video_bitrate_k: number | null, 
+/**
+ * override settings.audio_bitrate_k for this run (e.g. 128)
+ */
+audio_bitrate_k: number | null, 
+/**
  * apply unconfirmed mute suggestions too (default false: only confirmed)
  */
 include_unconfirmed: boolean, 

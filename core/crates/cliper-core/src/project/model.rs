@@ -115,8 +115,15 @@ pub struct Settings {
     pub song_fade_out: f64,
     /// export: "h264_nvenc" | "libx264" | "copy"
     pub video_codec: String,
-    /// export quality (CQ for nvenc, CRF for x264)
+    /// export quality (CQ for nvenc, CRF for x264); unused when `video_bitrate_k` is set
     pub video_quality: u32,
+    /// export height, e.g. 1080 / 720 / 480 / 360 (aspect kept, never
+    /// upscaled); None = the fetched video's size. Ignored with "copy".
+    pub export_height: Option<u32>,
+    /// export video bitrate in kbps (e.g. 4000); None = constant quality.
+    /// Ignored with "copy".
+    pub video_bitrate_k: Option<u32>,
+    /// mp4 AAC bitrate
     pub audio_bitrate_k: u32,
     /// loudness normalisation of exported songs (None = keep the original level)
     pub loudness: Option<Loudness>,
@@ -142,6 +149,8 @@ impl Default for Settings {
             song_fade_out: 1.5,
             video_codec: "h264_nvenc".into(),
             video_quality: 23,
+            export_height: None,
+            video_bitrate_k: None,
             audio_bitrate_k: 320,
             loudness: None,
             output_dir: None,

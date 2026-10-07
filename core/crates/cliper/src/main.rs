@@ -132,6 +132,15 @@ enum Cmd {
         output: PathBuf,
         #[arg(long, default_value = "h264_nvenc")]
         codec: String,
+        /// output height, e.g. 720 (aspect kept, never upscaled)
+        #[arg(long)]
+        height: Option<u32>,
+        /// video bitrate in kbps, e.g. 2000 (default: constant quality)
+        #[arg(long)]
+        vbitrate: Option<u32>,
+        /// AAC bitrate in kbps
+        #[arg(long, default_value_t = 320)]
+        abitrate: u32,
     },
     /// Detect song sections in an audio/video file (PANNs + v6 segmenter)
     Detect {
@@ -373,7 +382,7 @@ async fn run() -> Result<()> {
             }
             println!("{}", serde_json::to_string(&regs)?);
         }
-        Cmd::Export { clip_dir, video, in_t, out_t, mute, fade, output, codec } => {
+        Cmd::Export { clip_dir, video, in_t, out_t, mute, fade, output, codec, height, vbitrate, abitrate } => {
             use cliper_core::export::{ExportSpec, export_song};
             use cliper_core::render::MuteSpan;
             let mutes = mute
@@ -399,7 +408,9 @@ async fn run() -> Result<()> {
                 format,
                 video_codec: codec,
                 video_quality: 23,
-                audio_bitrate_k: 320,
+                scale_height: height,
+                video_bitrate_k: vbitrate,
+                audio_bitrate_k: abitrate,
                 fade_in: 0.3,
                 fade_out: 1.5,
                 loudness: None,

@@ -363,6 +363,22 @@ fn gpu_name() -> Option<(String, u64)> {
 /// Encoders `export.run` understands.
 const VIDEO_CODECS: [&str; 3] = ["h264_nvenc", "libx264", "copy"];
 
+fn validate_encode(height: Option<u32>, video_k: Option<u32>, audio_k: Option<u32>) -> ApiResult<()> {
+    let range = |v: f64, lo: f64, hi: f64, what: &str| -> ApiResult<()> {
+        if (lo..=hi).contains(&v) { Ok(()) } else { Err(invalid(format!("{what} must be within {lo}..{hi}"))) }
+    };
+    if let Some(h) = height {
+        range(h as f64, 144.0, 4320.0, "export_height")?;
+    }
+    if let Some(k) = video_k {
+        range(k as f64, 100.0, 100_000.0, "video_bitrate_k")?;
+    }
+    if let Some(k) = audio_k {
+        range(k as f64, 32.0, 512.0, "audio_bitrate_k")?;
+    }
+    Ok(())
+}
+
 fn validate_settings(s: &Settings) -> ApiResult<()> {
     let range = |v: f64, lo: f64, hi: f64, what: &str| -> ApiResult<()> {
         if v.is_finite() && (lo..=hi).contains(&v) { Ok(()) } else { Err(invalid(format!("{what} must be within {lo}..{hi}"))) }
@@ -379,7 +395,7 @@ fn validate_settings(s: &Settings) -> ApiResult<()> {
         return Err(invalid(format!("video_codec must be one of {VIDEO_CODECS:?}")));
     }
     range(s.video_quality as f64, 0.0, 51.0, "video_quality")?;
-    range(s.audio_bitrate_k as f64, 32.0, 512.0, "audio_bitrate_k")?;
+    validate_encode(s.export_height, s.video_bitrate_k, Some(s.audio_bitrate_k))?;
     if let Some(l) = s.loudness {
         range(l.target_lufs, -70.0, 0.0, "loudness.target_lufs")?;
         range(l.true_peak, -9.0, 0.0, "loudness.true_peak")?;
@@ -2047,6 +2063,7 @@ impl Engine {
             && !VIDEO_CODECS.contains(&c.as_str()) {
                 return Err(invalid(format!("video_codec must be one of {VIDEO_CODECS:?}")));
             }
+        validate_encode(opts.export_height, opts.video_bitrate_k, opts.audio_bitrate_k)?;
         let no_video = p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local && s.variants.first().is_none_or(|v| v.height == 0));
         if no_video && opts.format.unwrap_or_default().has_video() && (!opts.stems || opts.also_render) {
             return Err(precondition("this recording has no video; export as wav / flac / mp3"));
@@ -2140,7 +2157,9 @@ impl Engine {
                     format,
                     video_codec: opts.video_codec.clone().unwrap_or_else(|| p.settings.video_codec.clone()),
                     video_quality: p.settings.video_quality,
-                    audio_bitrate_k: p.settings.audio_bitrate_k,
+                    scale_height: opts.export_height.or(p.settings.export_height),
+                    video_bitrate_k: opts.video_bitrate_k.or(p.settings.video_bitrate_k),
+                    audio_bitrate_k: opts.audio_bitrate_k.unwrap_or(p.settings.audio_bitrate_k),
                     fade_in: s.fade_in.unwrap_or(p.settings.song_fade_in),
                     fade_out: s.fade_out.unwrap_or(p.settings.song_fade_out),
                     loudness: p.settings.loudness,
@@ -2175,6 +2194,12 @@ pub struct ExportOptions {
     pub format: Option<OutputFormat>,
     /// override settings.video_codec for this run ("copy" = fast, lossless video)
     pub video_codec: Option<String>,
+    /// override settings.export_height for this run (e.g. 720)
+    pub export_height: Option<u32>,
+    /// override settings.video_bitrate_k for this run (e.g. 2000)
+    pub video_bitrate_k: Option<u32>,
+    /// override settings.audio_bitrate_k for this run (e.g. 128)
+    pub audio_bitrate_k: Option<u32>,
     /// apply unconfirmed mute suggestions too (default false: only confirmed)
     pub include_unconfirmed: bool,
     /// false = export the original audio for this run (songs' `mute_enabled`

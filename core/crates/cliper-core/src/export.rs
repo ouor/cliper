@@ -65,6 +65,10 @@ pub struct ExportSpec {
     /// "h264_nvenc" | "libx264" | "copy" (mp4 only)
     pub video_codec: String,
     pub video_quality: u32,
+    /// output height (aspect kept, never upscaled); None = source size
+    pub scale_height: Option<u32>,
+    /// target video bitrate (kbps); None = constant quality (`video_quality`)
+    pub video_bitrate_k: Option<u32>,
     pub audio_bitrate_k: u32,
     pub fade_in: f64,
     pub fade_out: f64,
@@ -309,15 +313,32 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
         if let Some(f) = &audio_filter {
             c.args(["-af", f]);
         }
+        if spec.format == OutputFormat::Mp4
+            && codec != "copy"
+            && let Some(h) = spec.scale_height
+        {
+            // keep the aspect ratio (even width), never upscale
+            c.args(["-vf", &format!("scale=-2:'min({h},ih)':flags=lanczos")]);
+        }
+        // bitrate mode: VBR around the target with a 1.5x peak cap
+        let rate = spec.video_bitrate_k.map(|k| [format!("{k}k"), format!("{}k", k * 3 / 2), format!("{}k", k * 2)]);
         match (spec.format, codec) {
             (OutputFormat::Mp4, "copy") => {
                 c.args(["-c:v", "copy"]);
             }
             (OutputFormat::Mp4, "h264_nvenc") => {
-                c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", &spec.video_quality.to_string(), "-b:v", "0"]);
+                c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr"]);
+                match &rate {
+                    Some([b, max, buf]) => c.args(["-b:v", b, "-maxrate", max, "-bufsize", buf]),
+                    None => c.args(["-cq", &spec.video_quality.to_string(), "-b:v", "0"]),
+                };
             }
             (OutputFormat::Mp4, _) => {
-                c.args(["-c:v", "libx264", "-preset", "medium", "-crf", &spec.video_quality.to_string()]);
+                c.args(["-c:v", "libx264", "-preset", "medium"]);
+                match &rate {
+                    Some([b, max, buf]) => c.args(["-b:v", b, "-maxrate", max, "-bufsize", buf]),
+                    None => c.args(["-crf", &spec.video_quality.to_string()]),
+                };
             }
             _ => {}
         }
