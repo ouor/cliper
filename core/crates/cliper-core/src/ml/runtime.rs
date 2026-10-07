@@ -41,6 +41,8 @@ fn candidate_dirs() -> Vec<PathBuf> {
                 }
             }
         }
+    // the CUDA add-on the app installs on first run
+    out.push(crate::addon::cuda_addon_dir());
     if let Some(cp) = std::env::var_os("CUDA_PATH") {
         let cp = PathBuf::from(cp);
         out.push(cp.join("bin").join("x64"));

@@ -179,7 +179,9 @@ See `protocol.ts` for exact shapes.
 
 | method | kind | notes |
 |--------|------|-------|
-| `system.info` | request | versions, ffmpeg, CUDA dirs, model presence, `gpu` (`{name, vram_mb, cuda_ok, reason}`; `cuda_ok: null` until tried), `keep_awake`, `cookies` |
+| `system.info` | request | versions, ffmpeg, CUDA dirs, model presence, `gpu` (`{name, vram_mb, cuda_ok, reason}`; `cuda_ok: null` until tried), `keep_awake`, `cookies`, `cuda_addon` (`{version, url, size, sha256, dir, installed, needed}` — `needed`: an NVIDIA GPU is present and no CUDA runtime was found → run `addon.install_cuda`) |
+| `addon.install_cuda` | job | project `_system`. Downloads the CUDA runtime add-on (≈ 1 GB, pinned SHA-256, resumes dropped connections) from the v0.1.0 release and unpacks it to `%LOCALAPPDATA%\Cliperddons\cuda-v1`. Progress stages `addon.download` (bytes) → `addon.extract`. Result `{dir, restart_required: true}`: restart the engine, then `system.probe_gpu`. Errors: `NETWORK`, `ADDON` (checksum / archive) |
+| `addon.remove_cuda` | request | delete the installed add-on (effective at the next start) |
 | `system.probe_gpu` | request | starts the CUDA provider now (loads the detection model, a few s) → `SystemInfo` with `gpu.cuda_ok` known |
 | `system.set_cookies` | request | `{cookies: {NID_AUT, NID_SES, …} \| null}` for private/membership VODs → `CookieStatus`. Stored encrypted for the Windows user (DPAPI); survive restarts |
 | `system.cookies_status` | request | → `CookieStatus` (`set, names, platforms, saved_at, encrypted, valid, checked_at, account`) — values are never returned |

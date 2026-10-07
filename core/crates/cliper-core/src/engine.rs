@@ -66,7 +66,7 @@ pub struct EngineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ApiError {
-    /// INVALID_PARAMS | NOT_FOUND | BUSY | CONFLICT | UNRECOGNIZED_INPUT | AUTH_REQUIRED | VOD_NOT_FOUND |
+    /// INVALID_PARAMS | NOT_FOUND | BUSY | CONFLICT | ADDON | UNRECOGNIZED_INPUT | AUTH_REQUIRED | VOD_NOT_FOUND |
     /// NETWORK | CDN_TRUNCATED | FORMAT | FFMPEG_MISSING | FFMPEG_FAILED | MODEL_MISSING |
     /// MODEL | CANCELLED | PRECONDITION | IO | INTERNAL
     pub code: String,
@@ -219,6 +219,8 @@ pub struct SystemInfo {
     pub gpu: Option<GpuInfo>,
     pub keep_awake: bool,
     pub cookies: CookieStatus,
+    /// the CUDA runtime add-on (install it when `needed`)
+    pub cuda_addon: crate::addon::CudaAddon,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -791,6 +793,7 @@ impl Engine {
             gpu: self.gpu_info(),
             keep_awake: self.keep_awake.load(Ordering::Relaxed),
             cookies: self.cookies.lk().status(),
+            cuda_addon: crate::addon::cuda_status(gpu_name().is_some() && !self.cfg.prefer_cpu, &rt.cuda_dirs),
         }
     }
 
@@ -859,6 +862,27 @@ impl Engine {
         let mut jar = self.cookies.lk();
         jar.record_check(valid, account);
         Ok(jar.status())
+    }
+
+    /// Download + install the CUDA add-on (job on the pseudo project
+    /// `_system`). The engine must be restarted afterwards to use it.
+    pub fn job_install_cuda(self: &Arc<Self>) -> ApiResult<String> {
+        self.spawn_job("addon.install_cuda", "_system", Vec::new(), move |_eng, ctx| async move {
+            let dir = crate::addon::install_cuda(ctx.progress.clone(), ctx.cancel.clone()).await.map_err(|e| match e {
+                crate::addon::AddonError::Cancelled => ApiError::new("CANCELLED", "cancelled"),
+                crate::addon::AddonError::Net(m) => ApiError::new("NETWORK", m),
+                e => ApiError::new("ADDON", e),
+            })?;
+            Ok(json!({ "dir": dir, "restart_required": true }))
+        })
+    }
+
+    pub fn remove_cuda_addon(&self) -> ApiResult<()> {
+        if self.jobs.lk().values().any(|j| j.info.kind == "addon.install_cuda") {
+            return Err(ApiError::new("BUSY", "the CUDA add-on is being installed"));
+        }
+        crate::addon::remove_cuda()?;
+        Ok(())
     }
 
     /// Keep the PC awake while jobs run (persisted).

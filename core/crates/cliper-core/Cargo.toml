@@ -21,6 +21,8 @@ ort = { version = "=2.0.0-rc.13", features = ["cuda"] }
 ndarray = "0.17"
 realfft = "3"
 rayon = "1"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 ts-rs = { version = "12", optional = true, features = ["serde-json-impl", "no-serde-warnings"] }
 
 [target.'cfg(windows)'.dependencies]

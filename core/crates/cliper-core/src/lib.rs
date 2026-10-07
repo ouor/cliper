@@ -1,5 +1,6 @@
 //! Cliper core engine — VOD download, song detection, separation, export.
 
+pub mod addon;
 pub mod analysis;
 pub mod export;
 pub mod audio;
