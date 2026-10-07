@@ -15,7 +15,7 @@ export interface FriendlyError {
 const TABLE: Record<string, Omit<FriendlyError, "code" | "detail">> = {
   UNRECOGNIZED_INPUT: {
     title: "치지직이나 SOOP 다시보기 링크가 아닌 것 같아요.",
-    hint: "예: https://chzzk.naver.com/video/1234567 · 내 PC의 녹화 파일은 [파일 열기]로 넣을 수 있어요.",
+    hint: "예: https://chzzk.naver.com/video/1234567 · https://vod.sooplive.com/player/123456789 · 내 PC의 녹화 파일은 [녹화 파일 열기]로 넣을 수 있어요.",
     action: "none",
   },
   VOD_NOT_FOUND: { title: "이 다시보기를 찾을 수 없어요.", hint: "삭제됐거나 비공개로 바뀌었을 수 있어요. 이미 받은 곡은 계속 작업할 수 있어요.", action: "retry" },

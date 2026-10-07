@@ -184,7 +184,8 @@ export const SENSITIVITY_LABEL = ["확실한 곡만", "조금 엄격하게", "�
 export function vodLink(p: Project, sec?: number): string {
   const src = p.source;
   if (!src || src.platform === "local") return "";
-  const base = src.url;
+  // older projects may carry an older SOOP host; vod.sooplive.com is the current one
+  const base = src.platform === "soop" ? src.url.replace(/^https?:\/\/vod\.(?:sooplive\.co\.kr|afreecatv\.com)\//i, "https://vod.sooplive.com/") : src.url;
   if (sec === undefined) return base;
   const t = Math.max(0, Math.floor(sec));
   if (src.platform === "chzzk") return `${base}${base.includes("?") ? "&" : "?"}currentTime=${t}`;
@@ -197,7 +198,7 @@ export function channelLink(p: Project): string {
   const id = src?.catalog.channel.id;
   if (!src || !id) return "";
   if (src.platform === "chzzk") return `https://chzzk.naver.com/${id}`;
-  if (src.platform === "soop") return `https://ch.sooplive.co.kr/${id}`;
+  if (src.platform === "soop") return `https://www.sooplive.com/station/${id}`; // ch.sooplive.co.kr/<id> 301s here
   return "";
 }
 

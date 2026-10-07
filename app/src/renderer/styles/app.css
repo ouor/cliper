@@ -446,6 +446,12 @@
   color: var(--text-3);
   font-size: var(--fs-sm);
 }
+.link-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+}
 .thumb {
   flex: none;
   width: 96px;

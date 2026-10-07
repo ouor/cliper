@@ -13,22 +13,9 @@ import { friendly, type FriendlyError } from "@/lib/errors";
 import { fmtBytes, fmtDate, fmtDurationKo, fmtRelative, fmtTime } from "@/lib/format";
 import { platformLabel, projectTitle } from "@/lib/song";
 import { startAnalysis, applyDefaultSettings } from "@/lib/pipeline";
+import { extractInputs, inputKind } from "@/lib/links";
 
-const LINK_RE = /(https?:\/\/[^\s]+|soop:\S+|\b\d{6,10}\b)/g;
 const VIDEO_EXT = ["mp4", "mkv", "mov", "flv", "ts", "webm", "m4v", "avi", "mka", "m4a", "wav", "mp3", "aac", "flac"];
-
-function looksLikeInput(t: string): boolean {
-  const s = t.trim();
-  return /chzzk\.naver\.com\/(video|live)\//.test(s) || /(sooplive\.co\.kr|afreecatv\.com)\//.test(s) || /^soop:\S+$/.test(s) || /^\d{5,10}$/.test(s) || /^[a-zA-Z]:[\\/]/.test(s) || s.startsWith("\\\\");
-}
-
-function extractInputs(text: string): string[] {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 1 && /^[a-zA-Z]:[\\/]/.test(lines[0])) return [lines[0]];
-  const found = new Set<string>();
-  for (const m of text.matchAll(LINK_RE)) found.add(m[0].replace(/[),.]+$/, ""));
-  return [...found].filter(looksLikeInput);
-}
 
 interface Resolved {
   project: Project;
@@ -287,10 +274,8 @@ export function Home() {
     setError(null);
     setResolved(null);
     setMulti(null);
-    if (!looksLikeInput(input)) {
-      setError(friendly({ code: "UNRECOGNIZED_INPUT", message: input }));
-      return;
-    }
+    // no client-side rejection: the engine's UNRECOGNIZED_INPUT is the source of truth
+    if (!input.trim()) return;
     setLoading(true);
     const before = new Set(useProjects.getState().summaries.map((s) => s.id));
     try {
@@ -362,6 +347,9 @@ export function Home() {
     }
     useApp.setState({ jobsOpen: true });
   };
+
+  // soft, non-blocking hint while typing (links.ts mirrors the engine's patterns)
+  const softHint = !!text.trim() && !loading && !error && !resolved && !multi && extractInputs(text).every((x) => !inputKind(x));
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -472,7 +460,13 @@ export function Home() {
               )}
             </div>
             <div className="hero-sub">
-              <span>치지직 · SOOP 다시보기 링크 또는 치지직 영상 번호. 여러 개를 붙여넣으면 대기열에 넣어요.</span>
+              {softHint ? (
+                <span className="link-hint">
+                  <Info size={13} /> 치지직·SOOP 다시보기 링크 모양이 아니에요. Enter를 누르면 그래도 확인해 볼게요.
+                </span>
+              ) : (
+                <span>치지직 · SOOP 다시보기 링크 또는 치지직 영상 번호. 여러 개를 붙여넣으면 대기열에 넣어요.</span>
+              )}
               <span className="spacer" />
               <button className="btn subtle sm" onClick={() => void openFile()} disabled={!engineReady}>
                 <FolderOpen size={14} /> 녹화 파일 열기
