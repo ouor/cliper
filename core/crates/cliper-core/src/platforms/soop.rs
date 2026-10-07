@@ -172,7 +172,8 @@ pub async fn resolve(video_id: &str, cookies: Option<&BTreeMap<String, String>>)
         // The CDN cuts <1% of cold large-variant bodies (HTTP/2 RST_STREAM,
         // HTTP/1.1 EOF), at about the same rate with 8 or 16 in flight; those
         // segments are recovered byte-identically from a fallback variant.
-        default_workers: 16,
+        // Kept at 4 in flight (audio and video) to stay clear of rate limits / bans.
+        default_workers: 4,
         raw,
         http,
     })
