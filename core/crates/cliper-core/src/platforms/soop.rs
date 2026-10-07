@@ -148,8 +148,15 @@ pub async fn resolve(video_id: &str, cookies: Option<&BTreeMap<String, String>>)
         audio_fallbacks,
         token_query: None,
         head_hint: 16384,
-        // SOOP CDN drops concurrent Range requests; serial is plenty fast
-        default_workers: 1,
+        // A cold Range GET is answered with a correct 206 + full Content-Range
+        // (no chzzk-style cache poisoning), so the per-segment HEAD is skipped.
+        warm_head: false,
+        // Segments are packaged on demand: a cold one costs ~0.3 s at the edge,
+        // so serial fetching is latency-bound (~0.2 s/segment, 201 s for 2h45m).
+        // The CDN cuts <1% of cold large-variant bodies (HTTP/2 RST_STREAM,
+        // HTTP/1.1 EOF), at about the same rate with 8 or 16 in flight; those
+        // segments are recovered byte-identically from a fallback variant.
+        default_workers: 16,
         raw,
         http,
     })

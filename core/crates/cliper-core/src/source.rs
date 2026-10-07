@@ -132,6 +132,9 @@ pub struct Source {
     pub token_query: Option<String>,
     /// bytes fetched up-front per fragment (covers the moof)
     pub head_hint: u64,
+    /// HEAD each fMP4 segment before its first Range GET (see [`Http::warm`]):
+    /// needed where a cold Range GET can poison the edge cache (chzzk).
+    pub warm_head: bool,
     pub default_workers: usize,
     pub raw: serde_json::Value,
     pub http: Http,

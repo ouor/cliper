@@ -87,20 +87,21 @@ fn fmt_err(e: impl std::fmt::Display) -> ExtractError {
 
 /// Fetch only the audio runs of one fMP4 segment. Parse anomalies fall back to a
 /// full-segment read; network errors propagate so the caller can escalate.
-async fn extract_ranged(http: &Http, url: &str, tid: u32, head: u64, retries: u32) -> Result<(Vec<Vec<u8>>, u64, u64), NetError> {
-    match extract_ranged_inner(http, url, tid, head, retries).await {
+async fn extract_ranged(http: &Http, url: &str, tid: u32, head: u64, warm: bool, retries: u32) -> Result<(Vec<Vec<u8>>, u64, u64), NetError> {
+    match extract_ranged_inner(http, url, tid, head, warm, retries).await {
         Ok(Some(r)) => Ok(r),
         Ok(None) => extract_full(http, url, tid, retries).await,
         Err(e) => Err(e),
     }
 }
 
-async fn extract_ranged_inner(http: &Http, url: &str, tid: u32, head: u64, retries: u32) -> Result<Option<(Vec<Vec<u8>>, u64, u64)>, NetError> {
+async fn extract_ranged_inner(http: &Http, url: &str, tid: u32, head: u64, warm: bool, retries: u32) -> Result<Option<(Vec<Vec<u8>>, u64, u64)>, NetError> {
     let mut frames = Vec::new();
     let mut fetched = 0u64;
-    // HEAD first: warms the CDN edge with the full object (see `Http::warm`) and
-    // gives the segment size up front.
-    let mut seg_size: Option<u64> = http.warm(url, retries).await?;
+    // HEAD first where the CDN needs it: warms the edge with the full object (see
+    // `Http::warm`) and gives the segment size up front. Otherwise the size comes
+    // from the first Range response's Content-Range.
+    let mut seg_size: Option<u64> = if warm { http.warm(url, retries).await? } else { None };
     let mut base = 0u64;
     for _guard in 0..256 {
         let want_end = match seg_size {
@@ -264,6 +265,7 @@ pub async fn extract_audio(
     let workers = opts.workers.unwrap_or(src.default_workers).max(1);
     let fetched_total = Arc::new(AtomicU64::new(0));
     let head = src.head_hint;
+    let warm = src.warm_head;
 
     // (url, track id, ADTS config) per tier: primary first, then fallbacks
     let mut tiers_cfg: Vec<(u32, AudioConfig)> = vec![(tid, cfg)];
@@ -300,7 +302,7 @@ pub async fn extract_audio(
                 // fail fast on a variant with a fallback behind it (a CDN-truncated
                 // copy never heals via retry); full retry budget only on the last.
                 let retries = if tier + 1 == urls.len() { 8 } else { 1 };
-                let r = if is_ts { extract_ts(&http, u, retries).await } else { extract_ranged(&http, u, *tid, head, retries).await };
+                let r = if is_ts { extract_ts(&http, u, retries).await } else { extract_ranged(&http, u, *tid, head, warm, retries).await };
                 match r {
                     Ok((frames, fetched, seg_size)) if !frames.is_empty() || tier + 1 == urls.len() => {
                         fetched_total.fetch_add(fetched, Ordering::Relaxed);
