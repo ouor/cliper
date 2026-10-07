@@ -1794,7 +1794,10 @@ impl Engine {
             let tagger = eng.tagger(&mut slot)?;
             let v = talk::probs_of_file(tagger, &stems.vocals, &cancel)?;
             let m = talk::probs_of_file(tagger, &stems.orig, &cancel)?;
-            Ok(talk::talk_regions(&v, &m, &songs_clip, &TalkParams::default()))
+            drop(slot);
+            let tp = TalkParams::default();
+            let regs = talk::talk_regions(&v, &m, &songs_clip, &tp);
+            Ok(talk::refine_edges(&regs, &stems.vocals, &tp)?)
         })
         .await??;
         let (fade, gain_db) = (p.settings.mute_fade, p.settings.mute_gain_db);
@@ -1811,11 +1814,13 @@ impl Engine {
                     .iter()
                     .filter(|&&(a, b)| b > s.start - mb && a < s.end + ma)
                     .filter(|&&(a, b)| !kept.iter().any(|&(x, y)| a < y && x < b))
+                    // fades lie inside a mute: put them outside the speech so the
+                    // voice is fully removed from its first syllable on
                     .map(|&(a, b)| Mute {
                         id: project::new_id("m"),
-                        start: a,
-                        end: b,
-                        fade_in: fade,
+                        start: (a - fade).max(0.0),
+                        end: b + fade,
+                        fade_in: fade.min(a),
                         fade_out: fade,
                         origin: Origin::Auto,
                         confirmed: false,

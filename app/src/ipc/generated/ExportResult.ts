@@ -10,4 +10,10 @@ video_codec: string,
 /**
  * in-point actually used (differs from the request in copy mode)
  */
-in_t: number, loudness: LoudnessReport | null, elapsed_sec: number, };
+in_t: number, loudness: LoudnessReport | null, 
+/**
+ * gain (dB, negative) applied because the rendered audio would clip
+ * (orig − vocals can exceed full scale); None = untouched. Only without
+ * loudness normalisation, which has its own true-peak ceiling.
+ */
+clip_guard_db: number | null, elapsed_sec: number, };

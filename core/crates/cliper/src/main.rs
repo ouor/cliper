@@ -108,6 +108,9 @@ enum Cmd {
         song: Vec<String>,
         #[arg(long, default_value = "models/panns_sed.onnx")]
         model: PathBuf,
+        /// the original heuristic, without edge relaxation / sing veto / refinement
+        #[arg(long)]
+        legacy: bool,
     },
     /// Export one song from a separated clip
     Export {
@@ -347,7 +350,7 @@ async fn run() -> Result<()> {
             eprintln!();
             println!("{}", serde_json::to_string_pretty(&st)?);
         }
-        Cmd::Talk { clip_dir, song, model } => {
+        Cmd::Talk { clip_dir, song, model, legacy } => {
             use cliper_core::analysis::talk;
             let mut tagger = cliper_core::ml::panns::Tagger::open(&model, false)?;
             let c = CancellationToken::new();
@@ -357,7 +360,14 @@ async fn run() -> Result<()> {
                 .iter()
                 .filter_map(|s| s.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
                 .collect();
-            let regs = talk::talk_regions(&v, &m, &songs, &Default::default());
+            let regs = if legacy {
+                // the original heuristic (for comparisons)
+                let tp = talk::TalkParams { edge_sec: 0.0, sing_veto: false, ..Default::default() };
+                talk::talk_regions(&v, &m, &songs, &tp)
+            } else {
+                let tp = talk::TalkParams::default();
+                talk::refine_edges(&talk::talk_regions(&v, &m, &songs, &tp), &clip_dir.join("vocals.wav"), &tp)?
+            };
             for (a, b) in &regs {
                 eprintln!("talk {:7.2} ~ {:7.2} ({:.1}s)", a, b, b - a);
             }

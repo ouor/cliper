@@ -121,6 +121,18 @@ mod tests {
     }
 
     #[test]
+    fn suggestion_fades_sit_outside_the_speech() {
+        // a talk region [2, 4] becomes a mute [2 − f, 4 + f] (engine), so the
+        // voice is fully removed over the whole detected speech
+        let f = 0.3;
+        let m = [MuteSpan { start: 2.0 - f, end: 4.0 + f, fade_in: f, fade_out: f, gain_db: None }];
+        for t in [2.0, 3.0, 4.0] {
+            assert!(gain_at(t, &m) < 1e-6, "gain at {t}");
+        }
+        assert!(gain_at(1.0, &m) == 1.0 && gain_at(5.0, &m) == 1.0);
+    }
+
+    #[test]
     fn attenuation_floor() {
         let m = [MuteSpan { start: 1.0, end: 3.0, fade_in: 0.0, fade_out: 0.0, gain_db: Some(-20.0) }];
         assert!((gain_at(2.0, &m) - 0.1).abs() < 1e-6);

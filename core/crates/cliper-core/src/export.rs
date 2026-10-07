@@ -85,6 +85,11 @@ pub struct LoudnessReport {
     pub range: f64,
     /// target applied, if normalisation was on
     pub normalized_to: Option<f64>,
+    /// how loudnorm will treat this song: "linear" (one static gain) or
+    /// "dynamic" (its gain would push the true peak over the ceiling, so it
+    /// compresses — can pump on quiet songs with loud choruses). None when
+    /// normalisation is off.
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +103,10 @@ pub struct ExportResult {
     /// in-point actually used (differs from the request in copy mode)
     pub in_t: f64,
     pub loudness: Option<LoudnessReport>,
+    /// gain (dB, negative) applied because the rendered audio would clip
+    /// (orig − vocals can exceed full scale); None = untouched. Only without
+    /// loudness normalisation, which has its own true-peak ceiling.
+    pub clip_guard_db: Option<f64>,
     pub elapsed_sec: f64,
 }
 
@@ -237,6 +246,17 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
             (rate, out)
         }
     };
+    // over full scale (accompaniment = orig − vocals can be): scale the song
+    // down just enough instead of letting the encoder hard-clip
+    let mut audio = audio;
+    let peak = audio.iter().fold(0f32, |m, x| m.max(x.abs()));
+    let clip_guard_db = if spec.loudness.is_none() && peak > 0.999 {
+        let g = 0.999 / peak;
+        audio.iter_mut().for_each(|x| *x *= g);
+        Some(20.0 * (g as f64).log10())
+    } else {
+        None
+    };
     if let Some(dir) = spec.out.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -247,16 +267,28 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
     // loudness: always measured (shown to the user), applied only when requested
     progress(Progress::note("export.render", "measure_loudness", "measuring loudness"));
     let m = measure(&tmp_wav, spec.loudness).ok();
+    // loudnorm stays linear only if the gain keeps the true peak under the
+    // ceiling and the target LRA isn't below the measured one (so the LRA
+    // target is set to at least the measured range)
+    let mode = |l: &Loudness, m: &Measured| if m.tp + (l.target_lufs - m.i) <= l.true_peak { "linear" } else { "dynamic" };
     let report = m.as_ref().map(|m| LoudnessReport {
         integrated: m.i,
         true_peak: m.tp,
         range: m.lra,
         normalized_to: spec.loudness.map(|l| l.target_lufs),
+        mode: spec.loudness.map(|l| mode(&l, m).to_string()),
     });
     let audio_filter = match (spec.loudness, &m) {
         (Some(l), Some(m)) if m.i.is_finite() && m.i > -70.0 => Some(format!(
-            "loudnorm=I={}:TP={}:LRA=20:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:linear=true,aresample={rate}",
-            l.target_lufs, l.true_peak, m.i, m.tp, m.lra, m.thresh, m.offset
+            "loudnorm=I={}:TP={}:LRA={}:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:linear=true,aresample={rate}",
+            l.target_lufs,
+            l.true_peak,
+            m.lra.ceil().clamp(20.0, 50.0),
+            m.i,
+            m.tp,
+            m.lra,
+            m.thresh,
+            m.offset
         )),
         _ => None,
     };
@@ -331,6 +363,7 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
         video_codec: used,
         in_t,
         loudness: report,
+        clip_guard_db,
         elapsed_sec: t0.elapsed().as_secs_f64(),
     })
 }

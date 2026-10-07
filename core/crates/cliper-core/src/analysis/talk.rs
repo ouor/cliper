@@ -24,6 +24,16 @@ pub struct TalkParams {
     pub close_sec: f64,
     pub min_sec: f64,
     pub pad_sec: f64,
+    /// within this many seconds of a song's start / end the outside-song
+    /// threshold applies (detected songs include intros/outros, where
+    /// "이번 노래는…" talk happens)
+    pub edge_sec: f64,
+    /// not talk where the mix says singing at least as strongly as speech
+    pub sing_veto: bool,
+    /// edge refinement: search this far outward for where the voice ends …
+    pub refine_search_sec: f64,
+    /// … i.e. where the vocal stem falls this far (dB) below the region's peak
+    pub refine_below_db: f64,
 }
 
 impl Default for TalkParams {
@@ -36,6 +46,10 @@ impl Default for TalkParams {
             close_sec: 1.0,
             min_sec: 0.6,
             pad_sec: 0.15,
+            edge_sec: 20.0,
+            sing_veto: true,
+            refine_search_sec: 0.5,
+            refine_below_db: 30.0,
         }
     }
 }
@@ -56,15 +70,18 @@ pub fn talk_regions(vocals: &Probs, mix: &Probs, songs: &[(f64, f64)], tp: &Talk
     let w = ((tp.smooth_sec * fps) as usize).max(1);
     let vs = smooth(&vocals.speech, w);
     let ms = smooth(&mix.speech, w);
-    let n = vs.len().min(ms.len());
-    let in_song = |i: usize| {
+    let sing = smooth(&mix.sing, w);
+    let n = vs.len().min(ms.len()).min(sing.len());
+    // the stricter threshold only in a song's body, not its intro/outro edges
+    let in_song_body = |i: usize| {
         let t = i as f64 / fps;
-        songs.iter().any(|&(a, b)| a <= t && t < b)
+        songs.iter().any(|&(a, b)| a + tp.edge_sec <= t && t < b - tp.edge_sec)
     };
     let mask: Vec<bool> = (0..n)
         .map(|i| {
-            let thr = if in_song(i) { tp.mix_speech_min_in_song } else { tp.mix_speech_min };
-            vs[i] >= tp.vocal_speech_min && ms[i] >= thr
+            let thr = if in_song_body(i) { tp.mix_speech_min_in_song } else { tp.mix_speech_min };
+            let singing = tp.sing_veto && sing[i] >= ms[i];
+            vs[i] >= tp.vocal_speech_min && ms[i] >= thr && !singing
         })
         .collect();
 
@@ -89,6 +106,60 @@ pub fn talk_regions(vocals: &Probs, mix: &Probs, songs: &[(f64, f64)], tp: &Talk
         .filter(|(a, b)| b - a >= tp.min_sec)
         .map(|(a, b)| ((a - tp.pad_sec).max(0.0), (b + tp.pad_sec).min(end)))
         .collect()
+}
+
+/// Widen each region's edges to where the voice actually stops: PANNs' 10 fps,
+/// smoothed decision is only accurate to a few hundred ms, which clips the
+/// first syllable ("안…") and the tail ("…다"). Scans the vocal stem's 10 ms
+/// energy outward (at most `refine_search_sec`) until it drops
+/// `refine_below_db` under the region's peak. Never shrinks a region.
+pub fn refine_edges(regions: &[(f64, f64)], vocals: &std::path::Path, tp: &TalkParams) -> std::io::Result<Vec<(f64, f64)>> {
+    if regions.is_empty() {
+        return Ok(Vec::new());
+    }
+    const RATE: u32 = 8000;
+    const HOP: usize = 80; // 10 ms
+    let mut rd = crate::audio::ffmpeg::decode(vocals, RATE, 1, None, None).map_err(std::io::Error::other)?;
+    let mut env: Vec<f32> = Vec::new();
+    let (mut acc, mut k) = (0f64, 0usize);
+    let mut buf = vec![0f32; 1 << 15];
+    loop {
+        let n = rd.read(&mut buf).map_err(std::io::Error::other)?;
+        if n == 0 {
+            break;
+        }
+        for &x in &buf[..n] {
+            acc += (x * x) as f64;
+            k += 1;
+            if k == HOP {
+                env.push((acc / HOP as f64).sqrt() as f32);
+                acc = 0.0;
+                k = 0;
+            }
+        }
+    }
+    let fps = RATE as f64 / HOP as f64;
+    let last = env.len().saturating_sub(1);
+    let idx = |t: f64| ((t * fps) as usize).min(last);
+    let reach = (tp.refine_search_sec * fps) as usize;
+    let ratio = 10f32.powf(-(tp.refine_below_db as f32) / 20.0);
+    Ok(regions
+        .iter()
+        .map(|&(a, b)| {
+            let (ia, ib) = (idx(a), idx(b).max(idx(a)));
+            let peak = env[ia..=ib].iter().copied().fold(0f32, f32::max);
+            let thr = (peak * ratio).max(1e-4);
+            let mut s = ia;
+            while s > 0 && ia - s < reach && env[s - 1] > thr {
+                s -= 1;
+            }
+            let mut e = ib;
+            while e < last && e - ib < reach && env[e + 1] > thr {
+                e += 1;
+            }
+            ((s as f64 / fps).min(a), ((e + 1) as f64 / fps).max(b))
+        })
+        .collect())
 }
 
 /// Tag a stem file (any format ffmpeg reads) on the 10 fps grid.

@@ -19,4 +19,11 @@ range: number,
 /**
  * target applied, if normalisation was on
  */
-normalized_to: number | null, };
+normalized_to: number | null, 
+/**
+ * how loudnorm will treat this song: "linear" (one static gain) or
+ * "dynamic" (its gain would push the true peak over the ceiling, so it
+ * compresses — can pump on quiet songs with loud choruses). None when
+ * normalisation is off.
+ */
+mode: string | null, };
