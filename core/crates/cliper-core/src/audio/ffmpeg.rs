@@ -56,11 +56,34 @@ fn map_spawn(e: std::io::Error) -> FfmpegError {
     if e.kind() == std::io::ErrorKind::NotFound { FfmpegError::Missing } else { FfmpegError::Io(e) }
 }
 
-/// Streaming f32le PCM decoder over an ffmpeg child process.
+/// Streaming f32le PCM decoder over an ffmpeg child process. Reaching the end
+/// of the stream checks ffmpeg's exit status, so a decoder that dies mid-file
+/// is an error rather than a silently short result.
 pub struct PcmReader {
     child: Child,
     channels: usize,
     buf: Vec<u8>,
+    stderr: Option<std::thread::JoinHandle<String>>,
+    finished: bool,
+}
+
+/// Collect the last few KB of a child's stderr on a thread (never blocks the child).
+fn drain_stderr(child: &mut Child) -> Option<std::thread::JoinHandle<String>> {
+    let mut err = child.stderr.take()?;
+    Some(std::thread::spawn(move || {
+        let mut tail: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = err.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buf[..n]);
+            if tail.len() > 8192 {
+                tail.drain(..tail.len() - 4096);
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    }))
 }
 
 /// Decode `input` to interleaved f32 at `sample_rate`/`channels`, optionally
@@ -75,8 +98,42 @@ pub fn decode(input: &Path, sample_rate: u32, channels: u32, start: Option<f64>,
         c.args(["-t", &format!("{d:.6}")]);
     }
     c.args(["-vn", "-ac", &channels.to_string(), "-ar", &sample_rate.to_string(), "-f", "f32le", "-"]);
-    let child = c.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(map_spawn)?;
-    Ok(PcmReader { child, channels: channels as usize, buf: Vec::new() })
+    let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(map_spawn)?;
+    let stderr = drain_stderr(&mut child);
+    Ok(PcmReader { child, channels: channels as usize, buf: Vec::new(), stderr, finished: false })
+}
+
+/// Decode an in-memory stream (e.g. a slice of ADTS frames, `input_format`
+/// "aac") to interleaved f32, dropping the first `skip` seconds and keeping
+/// `duration` seconds. Blocking.
+pub fn decode_bytes(bytes: Vec<u8>, input_format: &str, sample_rate: u32, channels: u32, skip: f64, duration: f64) -> Result<Vec<f32>, FfmpegError> {
+    use std::io::Write;
+    let mut c = Command::new(ffmpeg_path());
+    c.args(["-hide_banner", "-v", "error", "-f", input_format, "-i", "pipe:0"]);
+    if skip > 0.0 {
+        c.args(["-ss", &format!("{skip:.6}")]);
+    }
+    c.args(["-t", &format!("{duration:.6}"), "-vn", "-ac", &channels.to_string(), "-ar", &sample_rate.to_string(), "-f", "f32le", "pipe:1"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(map_spawn)?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let feeder = std::thread::spawn(move || {
+        let _ = stdin.write_all(&bytes);
+    });
+    let stderr = drain_stderr(&mut child);
+    let mut out = Vec::new();
+    child.stdout.take().expect("piped").read_to_end(&mut out)?;
+    let _ = feeder.join();
+    let st = child.wait()?;
+    if !st.success() {
+        let tail = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
+        return Err(FfmpegError::Failed(format!("decoder exited with {st}: {}", tail.trim())));
+    }
+    Ok(out.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
 }
 
 impl PcmReader {
@@ -97,7 +154,21 @@ impl PcmReader {
         for (i, ch) in self.buf[..n * 4].chunks_exact(4).enumerate() {
             out[i] = f32::from_le_bytes(ch.try_into().unwrap());
         }
+        if n == 0 && !self.finished {
+            // end of stream: did the decoder finish cleanly?
+            self.finished = true;
+            self.check_exit()?;
+        }
         Ok(n)
+    }
+
+    fn check_exit(&mut self) -> Result<(), FfmpegError> {
+        let st = self.child.wait()?;
+        if !st.success() {
+            let tail = self.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default();
+            return Err(FfmpegError::Failed(format!("decoder exited with {st}: {}", tail.trim())));
+        }
+        Ok(())
     }
 
     /// Read everything (only for short inputs).
@@ -113,11 +184,11 @@ impl PcmReader {
     }
 
     pub fn finish(mut self) -> Result<(), FfmpegError> {
-        let st = self.child.wait()?;
-        if !st.success() {
-            return Err(FfmpegError::Failed(format!("decoder exited with {st}")));
+        if self.finished {
+            return Ok(());
         }
-        Ok(())
+        self.finished = true;
+        self.check_exit()
     }
 }
 

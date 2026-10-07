@@ -170,6 +170,28 @@ async fn extract_ts(http: &Http, url: &str, retries: u32) -> Result<(Vec<Vec<u8>
     Ok((frames, seg.len() as u64, total.unwrap_or(seg.len() as u64)))
 }
 
+/// One silent AAC access unit (raw, no ADTS header) for `cfg`, encoded by ffmpeg.
+fn silent_frame(cfg: &AudioConfig) -> Result<Vec<u8>, ExtractError> {
+    let mut c = crate::audio::ffmpeg::command();
+    c.args(["-f", "lavfi", "-i", &format!("anullsrc=r={}:cl=mono", cfg.sample_rate())])
+        .args(["-t", "0.5", "-ac", &cfg.channels.max(1).to_string(), "-c:a", "aac", "-f", "adts", "pipe:1"]);
+    let out = c.stderr(std::process::Stdio::null()).output().map_err(|e| fmt_err(format!("ffmpeg: {e}")))?;
+    // take a frame from the middle (the first frames carry encoder priming)
+    let mut frames = Vec::new();
+    let mut i = 0usize;
+    let b = &out.stdout;
+    while i + 7 <= b.len() && b[i] == 0xFF && b[i + 1] & 0xF0 == 0xF0 {
+        let len = (((b[i + 3] & 3) as usize) << 11) | ((b[i + 4] as usize) << 3) | ((b[i + 5] as usize) >> 5);
+        let hdr = if b[i + 1] & 1 == 0 { 9 } else { 7 };
+        if len <= hdr || i + len > b.len() {
+            break;
+        }
+        frames.push(b[i + hdr..i + len].to_vec());
+        i += len;
+    }
+    frames.get(frames.len() / 2).cloned().ok_or_else(|| fmt_err("could not encode a silent AAC frame"))
+}
+
 /// Options for [`extract_audio`].
 #[derive(Debug, Clone, Default)]
 pub struct ExtractOptions {
@@ -295,6 +317,8 @@ pub async fn extract_audio(
     });
 
     let mut stream = futures::stream::iter(tasks).buffered(workers);
+    let mut silent_au: Option<Vec<u8>> = None;
+    let mut silent_segments = 0u32;
     let mut file = tokio::io::BufWriter::with_capacity(1 << 20, tokio::fs::File::create(out).await?);
     let mut frames_per_seg = Vec::with_capacity(n);
     let (mut audio_bytes, mut fetched_bytes, mut full_bytes, mut fallbacks) = (0u64, 0u64, 0u64, 0u32);
@@ -305,7 +329,29 @@ pub async fn extract_audio(
             x = stream.next() => x,
         };
         let Some(seg) = next else { break };
-        let seg = seg?;
+        let mut seg = seg?;
+        if seg.frames.is_empty() {
+            // A segment without audio (parse failure, no AAC track) must still
+            // take its EXTINF duration on the analysis timeline, or every later
+            // time shifts: fill it with silent AAC frames.
+            let dur = pl.durations[first + frames_per_seg.len()];
+            let count = (dur * seg.cfg.sample_rate() as f64 / 1024.0).round() as usize;
+            if count > 0 {
+                if silent_au.is_none() {
+                    let c = seg.cfg;
+                    silent_au = Some(tokio::task::spawn_blocking(move || silent_frame(&c)).await.map_err(|e| fmt_err(e.to_string()))??);
+                }
+                let au = silent_au.clone().unwrap();
+                seg.frames = if is_ts {
+                    let mut f = seg.cfg.adts_header(au.len()).to_vec();
+                    f.extend_from_slice(&au);
+                    vec![f; count]
+                } else {
+                    vec![au; count]
+                };
+                silent_segments += 1;
+            }
+        }
         for fr in &seg.frames {
             if is_ts {
                 file.write_all(fr).await?;
@@ -329,6 +375,12 @@ pub async fn extract_audio(
         });
     }
     file.flush().await?;
+    if silent_segments > 0 {
+        progress(
+            Progress::note("audio.fetch", "silent_segments", format!("{silent_segments} segment(s) had no audio and were filled with silence"))
+                .arg("count", silent_segments),
+        );
+    }
     if fallbacks > 0 {
         progress(Progress::note("audio.fetch", "fallback_segments", format!("{fallbacks} segment(s) recovered via a fallback variant")).arg("count", fallbacks));
     }

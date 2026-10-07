@@ -258,10 +258,28 @@ pub struct Clip {
     /// songs assigned to this clip (maintained by clip planning)
     #[serde(default)]
     pub song_ids: Vec<String>,
-    /// planned for specific songs (`clips.fetch {exact}`): kept by re-planning
-    /// even before its video exists
+    /// planned for specific songs (`clips.fetch {exact}`) or being fetched:
+    /// kept by re-planning even before its video exists
     #[serde(default)]
     pub pinned: bool,
+    /// how `offset` was obtained (None until the video is fetched)
+    #[serde(default)]
+    pub alignment: Option<Alignment>,
+}
+
+/// Clip ↔ analysis-audio alignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Alignment {
+    /// "measured" (cross-correlation confirmed) | "predicted" (from the segment
+    /// index only — the audio didn't match; check this clip's timing)
+    pub method: String,
+    /// normalised correlation of the best window (0..1)
+    pub corr: f32,
+    /// offset predicted from the segment index (s)
+    pub predicted: f64,
+    /// false = could not be confirmed; the UI should flag the clip
+    pub ok: bool,
 }
 
 impl Clip {

@@ -22,7 +22,7 @@ use crate::analysis::talk::{self, TalkParams};
 use crate::audio::{align, ffmpeg, peaks, wav};
 use crate::export::{ExportSpec, OutputFormat, StemsSpec, export_song, export_stems};
 use crate::hls::audio_extract::{self, ExtractOptions};
-use crate::hls::video_fetch::{self, VideoOptions};
+use crate::hls::video_fetch::{self, VideoClip, VideoOptions};
 use crate::ml::panns::{self, Probs, Tagger};
 use crate::ml::runtime;
 use crate::ml::separator::ModelSpec;
@@ -30,7 +30,7 @@ use crate::progress::{CancellationToken, Progress, ProgressFn};
 use crate::project::report::{self, ReportFormat};
 use crate::project::setlist::{self, SetlistMatch};
 use crate::cookies::{CookieJar, CookieStatus};
-use crate::project::{self, Detection, JobError, naming, Mute, Origin, Project, Settings, Song, Store, plan};
+use crate::project::{self, Alignment, Detection, JobError, naming, Mute, Origin, Project, Settings, Song, Store, plan};
 use crate::render::MuteSpan;
 use crate::source::{ResolveError, Source};
 
@@ -280,6 +280,35 @@ fn keep_awake_while_busy(eng: std::sync::Weak<Engine>) {
         .ok();
 }
 
+struct AlignOutcome {
+    method: String,
+    offset: f64,
+    corr: f32,
+    predicted: f64,
+    ok: bool,
+}
+
+/// Which clips a `clips.fetch` job works on (re-evaluated as the plan changes).
+enum FetchTarget {
+    /// every clip missing video or stems
+    Missing,
+    /// clips hosting these songs
+    Songs(Vec<String>),
+    /// these clips, or — once re-planned — unfinished clips hosting their songs
+    Clips(Vec<String>, Vec<String>),
+}
+
+impl FetchTarget {
+    fn wants(&self, c: &project::Clip) -> bool {
+        let unfinished = c.video.is_none() || c.stems.is_none();
+        match self {
+            FetchTarget::Missing => unfinished,
+            FetchTarget::Songs(s) => c.song_ids.iter().any(|x| s.contains(x)),
+            FetchTarget::Clips(ids, songs) => ids.contains(&c.id) || (unfinished && c.song_ids.iter().any(|x| songs.contains(x))),
+        }
+    }
+}
+
 /// Engine preferences persisted in `<projects>/engine.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -354,26 +383,100 @@ fn sort_songs(p: &mut Project) {
     p.songs.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
 }
 
-/// Byte offset of every ADTS frame in `path`.
+/// Byte offset of every ADTS frame in `path` (streamed: only headers are
+/// inspected). The engine writes one raw data block (1024 samples) per frame;
+/// anything else is rejected so time ↔ frame mapping stays exact.
 fn adts_index(path: &Path) -> std::io::Result<Vec<u64>> {
-    let b = std::fs::read(path)?;
-    let mut out = Vec::with_capacity(b.len() / 300);
-    let mut i = 0usize;
-    while i + 7 <= b.len() {
-        if b[i] != 0xFF || b[i + 1] & 0xF0 != 0xF0 {
-            // resync (shouldn't happen in files we wrote)
-            i += 1;
-            continue;
+    use std::io::Read;
+    let len_total = std::fs::metadata(path)?.len();
+    let mut r = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
+    let mut out = Vec::with_capacity((len_total / 300) as usize);
+    let mut pos = 0u64;
+    let mut h = [0u8; 7];
+    while pos + 7 <= len_total {
+        r.read_exact(&mut h)?;
+        if h[0] != 0xFF || h[1] & 0xF0 != 0xF0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("ADTS sync lost at byte {pos}")));
         }
-        let len = (((b[i + 3] & 3) as usize) << 11) | ((b[i + 4] as usize) << 3) | ((b[i + 5] as usize) >> 5);
+        if h[6] & 3 != 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "ADTS frames with several raw data blocks are not supported"));
+        }
+        let len = (((h[3] & 3) as u64) << 11) | ((h[4] as u64) << 3) | ((h[5] as u64) >> 5);
         if len < 7 {
-            i += 1;
-            continue;
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad ADTS frame at byte {pos}")));
         }
-        out.push(i as u64);
-        i += len;
+        out.push(pos);
+        pos += len;
+        if pos < len_total {
+            r.seek_relative(len as i64 - 7)?;
+        }
     }
     Ok(out)
+}
+
+/// Where the analysis audio of a project lives and how to cut it.
+#[derive(Clone)]
+struct AnalysisSource {
+    path: PathBuf,
+    /// ADTS frame offsets (remote VODs); None = seekable container (local .mka)
+    index: Option<Arc<Vec<u64>>>,
+    samples_per_frame: f64,
+    sample_rate: f64,
+}
+
+impl AnalysisSource {
+    /// Decode `[start, start+duration)` seconds of the analysis timeline
+    /// (decoded-sample time), sample-exact. Blocking.
+    fn decode(&self, start: f64, duration: f64, rate: u32, channels: u32) -> ApiResult<Vec<f32>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let start = start.max(0.0);
+        match &self.index {
+            // whole ADTS frames with 2 frames of decoder pre-roll, then trim exactly
+            Some(idx) if !idx.is_empty() => {
+                let (spf, sr) = (self.samples_per_frame, self.sample_rate);
+                let k = ((start * sr / spf).floor() as usize).saturating_sub(2).min(idx.len() - 1);
+                let k_end = (((start + duration) * sr / spf).ceil() as usize + 2).min(idx.len());
+                let mut f = std::fs::File::open(&self.path)?;
+                let end = match idx.get(k_end) {
+                    Some(&x) => x,
+                    None => f.metadata()?.len(),
+                };
+                f.seek(SeekFrom::Start(idx[k]))?;
+                let mut bytes = vec![0u8; (end - idx[k]) as usize];
+                f.read_exact(&mut bytes)?;
+                let skip = start - k as f64 * spf / sr;
+                Ok(ffmpeg::decode_bytes(bytes, "aac", rate, channels, skip, duration)?)
+            }
+            Some(_) => Ok(Vec::new()),
+            None => {
+                let mut rd = ffmpeg::decode(&self.path, rate, channels, Some(start), Some(duration))?;
+                let mut out = Vec::new();
+                let mut buf = vec![0f32; 1 << 16];
+                loop {
+                    let n = rd.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
+/// Clip offset predicted from stored indexes: where the clip's first segment
+/// starts on the analysis (decoded-sample) timeline vs. on the EXTINF timeline.
+fn predicted_offset(p: &Project, v: &VideoClip) -> f64 {
+    if is_local(p) {
+        return 0.0;
+    }
+    let Some(a) = &p.audio else { return 0.0 };
+    let seg = v.segments.first;
+    if seg < a.index.first_segment || seg - a.index.first_segment > a.index.frames.len() || a.index.sample_rate == 0 {
+        return 0.0;
+    }
+    a.index.sample_at_segment(seg - a.index.first_segment) as f64 / a.index.sample_rate as f64 - v.vod_start
 }
 
 /// Builds `overview.peaks` while the analysis audio is still being written:
@@ -1080,6 +1183,9 @@ impl Engine {
         if !(start.is_finite() && end.is_finite()) || end <= start || start < 0.0 {
             return Err(invalid("bad clip range"));
         }
+        if self.jobs.lock().unwrap().values().any(|j| j.info.project_id == id && (j.info.kind == "clips.fetch" || j.info.kind == "export.run")) {
+            return Err(ApiError::new("BUSY", "clips are being fetched or exported"));
+        }
         let dir = self.store.dir(id).join(format!("clips/{clip_id}"));
         let p = self
             .mutate(id, |p| {
@@ -1090,6 +1196,10 @@ impl Engine {
                 c.stems = None;
                 c.talk.clear();
                 c.offset = 0.0;
+                c.alignment = None;
+                // keep the requested range through re-planning
+                c.pinned = true;
+                plan::plan_clips(p);
                 Ok(())
             })
             .await?;
@@ -1136,51 +1246,29 @@ impl Engine {
     /// a 32-bit float WAV for previewing before any video exists. Sample-exact:
     /// VOD time t is decoded sample t·rate of the whole audio (the timeline the
     /// detector and clip alignment use).
-    pub async fn audio_window(&self, id: &str, start: f64, duration: f64, sample_rate: Option<u32>, channels: Option<u32>) -> ApiResult<Value> {
+    pub async fn audio_window(self: &Arc<Self>, id: &str, start: f64, duration: f64, sample_rate: Option<u32>, channels: Option<u32>) -> ApiResult<Value> {
         let p = self.get(id)?;
-        let audio = p.audio.clone().ok_or_else(|| precondition("fetch the audio first"))?;
+        p.audio.as_ref().ok_or_else(|| precondition("fetch the audio first"))?;
         if !(start.is_finite() && duration.is_finite()) || start < 0.0 || duration <= 0.0 || duration > 3600.0 {
             return Err(invalid("bad window"));
         }
         let (rate, ch) = (sample_rate.unwrap_or(48000).clamp(8000, 192000), channels.unwrap_or(2).clamp(1, 2));
-        let src = self.store.path(id, &audio.file);
         let dir = self.store.dir(id).join("cache");
         std::fs::create_dir_all(&dir)?;
         let out = dir.join(format!("window_{}_{}_{rate}_{ch}.wav", (start * 1000.0).round() as u64, (duration * 1000.0).round() as u64));
-        prune_cache(&dir, 24);
         if !out.is_file() {
-            let index = if is_local(&p) { None } else { Some(self.frame_index(id, &src)?) };
-            let (src, outc, spf, sr) = (src.clone(), out.clone(), audio.index.samples_per_frame as f64, audio.index.sample_rate as f64);
+            let eng = self.clone();
+            let (pc, outc, dirc) = (p.clone(), out.clone(), dir.clone());
             tokio::task::spawn_blocking(move || -> ApiResult<()> {
-                let tmp = outc.with_extension("part.wav");
-                let mut c = ffmpeg::command();
-                c.arg("-y");
-                let mut _slice = None;
-                match index {
-                    // ADTS has no seek index: cut whole frames (2 frames of decoder
-                    // pre-roll), decode, and trim the pre-roll exactly
-                    Some(idx) => {
-                        let k = ((start * sr / spf).floor() as usize).saturating_sub(2).min(idx.len().saturating_sub(1));
-                        let k_end = (((start + duration) * sr / spf).ceil() as usize + 2).min(idx.len());
-                        let bytes = std::fs::read(&src)?;
-                        let (a, b) = (idx[k] as usize, idx.get(k_end).map(|&x| x as usize).unwrap_or(bytes.len()));
-                        let slice = outc.with_extension("adts");
-                        std::fs::write(&slice, &bytes[a..b])?;
-                        let skip = start - k as f64 * spf / sr;
-                        c.args(["-f", "aac", "-i"]).arg(&slice).args(["-ss", &format!("{skip:.6}")]);
-                        _slice = Some(slice);
-                    }
-                    None => {
-                        c.args(["-ss", &format!("{start:.6}"), "-i"]).arg(&src);
-                    }
+                let src = eng.analysis_source(&pc)?;
+                let pcm = src.decode(start, duration, rate, ch)?;
+                // unique temp name: identical concurrent requests don't collide
+                let tmp = dirc.join(format!("tmp_{}.wav", project::new_id("w")));
+                wav::write_f32(&tmp, rate, ch as u16, &pcm)?;
+                if std::fs::rename(&tmp, &outc).is_err() {
+                    let _ = std::fs::remove_file(&tmp); // another request won the race
                 }
-                c.args(["-t", &format!("{duration:.6}"), "-vn", "-ac", &ch.to_string(), "-ar", &rate.to_string(), "-c:a", "pcm_f32le", "-f", "wav"]).arg(&tmp);
-                let r = ffmpeg::run(c);
-                if let Some(s) = _slice {
-                    let _ = std::fs::remove_file(s);
-                }
-                r?;
-                std::fs::rename(&tmp, &outc)?;
+                prune_cache(&dirc, 24);
                 Ok(())
             })
             .await??;
@@ -1189,15 +1277,26 @@ impl Engine {
         Ok(json!({ "path": out, "file": rel, "start": start, "duration": duration, "sample_rate": rate, "channels": ch }))
     }
 
-    fn frame_index(&self, id: &str, path: &Path) -> ApiResult<Arc<Vec<u64>>> {
-        let len = std::fs::metadata(path)?.len();
-        if let Some((l, idx)) = self.frame_index.lock().unwrap().get(id)
-            && *l == len {
-                return Ok(idx.clone());
-            }
-        let idx = Arc::new(adts_index(path)?);
-        self.frame_index.lock().unwrap().insert(id.to_string(), (len, idx.clone()));
-        Ok(idx)
+    /// The project's analysis audio with its frame index (built once, cached;
+    /// blocking — call from a worker thread).
+    fn analysis_source(&self, p: &Project) -> ApiResult<AnalysisSource> {
+        let audio = p.audio.as_ref().ok_or_else(|| precondition("fetch the audio first"))?;
+        let path = self.store.path(&p.id, &audio.file);
+        let index = if is_local(p) {
+            None
+        } else {
+            let len = std::fs::metadata(&path)?.len();
+            let cached = self.frame_index.lock().unwrap().get(&p.id).filter(|(l, _)| *l == len).map(|(_, i)| i.clone());
+            Some(match cached {
+                Some(i) => i,
+                None => {
+                    let idx = Arc::new(adts_index(&path)?);
+                    self.frame_index.lock().unwrap().insert(p.id.clone(), (len, idx.clone()));
+                    idx
+                }
+            })
+        };
+        Ok(AnalysisSource { path, index, samples_per_frame: audio.index.samples_per_frame as f64, sample_rate: audio.index.sample_rate as f64 })
     }
 
     /// Engine preference + per-run override for keeping the PC awake.
@@ -1210,15 +1309,21 @@ impl Engine {
     pub fn job_fetch_audio(self: &Arc<Self>, id: &str) -> ApiResult<String> {
         let p = self.get(id)?;
         self.spawn_job("audio.fetch", id, Vec::new(), move |eng, ctx| async move {
+            // the old probabilities / frame index describe the old audio
+            let _ = std::fs::remove_file(eng.store.path(&p.id, "probs.bin"));
+            eng.frame_index.lock().unwrap().remove(&p.id);
             if is_local(&p) {
                 let path = PathBuf::from(&p.source.as_ref().unwrap().url);
                 let (file, track) = ("audio.mka", p.settings.audio_track);
-                let out = eng.store.path(&p.id, file);
+                let out = eng.store.path(&p.id, "audio.part.mka");
+                let fin = eng.store.path(&p.id, file);
                 (ctx.progress)(Progress::note("audio.fetch", "copy_audio_track", "copying the audio track"));
                 let t0 = Instant::now();
                 let duration = tokio::task::spawn_blocking(move || -> ApiResult<f64> {
                     crate::local::extract_audio(&path, track, &out)?;
-                    Ok(crate::local::probe(&out)?.duration)
+                    let d = crate::local::probe(&out)?.duration;
+                    std::fs::rename(&out, &fin)?;
+                    Ok(d)
                 })
                 .await??;
                 let bytes = std::fs::metadata(eng.store.path(&p.id, file)).map(|m| m.len()).unwrap_or(0);
@@ -1267,7 +1372,8 @@ impl Engine {
             }
             let src = eng.source(&p).await?;
             let file = "audio.aac";
-            let out = eng.store.path(&p.id, file);
+            // download next to the current audio; it is replaced only on success
+            let out = eng.store.path(&p.id, "audio.part.aac");
             let _ = std::fs::remove_file(&out);
             // overview waveform fills in while the audio downloads
             let follower = PeaksFollower::start(out.clone(), eng.store.path(&p.id, "overview.peaks"));
@@ -1283,7 +1389,14 @@ impl Engine {
             };
             let r = audio_extract::extract_audio(&src, &out, &ExtractOptions::default(), progress, ctx.cancel.clone()).await;
             tokio::task::spawn_blocking(move || follower.finish()).await?;
-            let r = r?;
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&out);
+                    return Err(e.into());
+                }
+            };
+            std::fs::rename(&out, eng.store.path(&p.id, file))?;
             let variant = src.info.audio_variant;
             let p = eng
                 .mutate(&p.id, |p| {
@@ -1311,7 +1424,9 @@ impl Engine {
         let audio = p.audio.clone().ok_or_else(|| precondition("fetch the audio first"))?;
         self.spawn_job("detect.run", id, Vec::new(), move |eng, ctx| async move {
             let probs_path = eng.store.path(&p.id, "probs.bin");
-            let cached = if retag { None } else { std::fs::read(&probs_path).ok().and_then(|b| Probs::from_bytes(&b)) };
+            // probs.bin is reused only while it belongs to the current audio
+            // (audio.fetch deletes it and clears `detection`)
+            let cached = if retag || p.detection.is_none() { None } else { std::fs::read(&probs_path).ok().and_then(|b| Probs::from_bytes(&b)) };
             let (probs, device) = match cached {
                 Some(pr) => (pr, p.detection.as_ref().map(|d| d.device).unwrap_or(runtime::Device::Cpu)),
                 None => {
@@ -1364,6 +1479,9 @@ impl Engine {
 
     /// Re-run the segmenter on cached probabilities (fast, synchronous).
     pub async fn rerun_detection(&self, id: &str, params: Params) -> ApiResult<Project> {
+        if self.get(id)?.detection.is_none() {
+            return Err(precondition("run detection first"));
+        }
         let probs = std::fs::read(self.store.path(id, "probs.bin"))
             .ok()
             .and_then(|b| Probs::from_bytes(&b))
@@ -1411,28 +1529,35 @@ impl Engine {
                     })
                     .await?;
             }
-        let from_songs: Option<Vec<String>> = song_ids.map(|ids| {
-            p.songs.iter().filter(|s| ids.contains(&s.id)).filter_map(|s| s.clip_id.clone()).collect()
-        });
-        let todo: Vec<String> = p
-            .clips
-            .iter()
-            .filter(|c| match (&clip_ids, &from_songs) {
-                (Some(ids), _) | (None, Some(ids)) => ids.contains(&c.id),
-                (None, None) => c.video.is_none() || c.stems.is_none(),
-            })
-            .map(|c| c.id.clone())
-            .collect();
+        // What to work on, expressed so it survives re-planning while the job
+        // runs (edits re-plan unfetched clips and may change their ids): the
+        // target songs, plus explicitly named clips.
+        let target = match (&clip_ids, &song_ids) {
+            (Some(ids), _) => FetchTarget::Clips(
+                ids.clone(),
+                p.clips.iter().filter(|c| ids.contains(&c.id)).flat_map(|c| c.song_ids.clone()).collect(),
+            ),
+            (None, Some(ids)) => FetchTarget::Songs(ids.clone()),
+            (None, None) => FetchTarget::Missing,
+        };
+        let todo: Vec<String> = p.clips.iter().filter(|c| target.wants(c)).map(|c| c.id.clone()).collect();
         if todo.is_empty() {
             return Err(precondition("no clips to fetch (plan clips / run detection first)"));
         }
         self.spawn_job("clips.fetch", id, todo.clone(), move |eng, ctx| async move {
-            let n = todo.len();
             let mut done = Vec::new();
-            for (k, cid) in todo.iter().enumerate() {
+            let mut attempted: std::collections::HashSet<String> = std::collections::HashSet::new();
+            loop {
                 if ctx.cancel.is_cancelled() {
                     return Err(ApiError::new("CANCELLED", "cancelled"));
                 }
+                // re-read the plan every time: the user may have edited songs
+                let cur = eng.get(&p.id)?;
+                let Some(cid) = cur.clips.iter().filter(|c| !attempted.contains(&c.id)).find(|c| target.wants(c)).map(|c| c.id.clone()) else {
+                    break;
+                };
+                attempted.insert(cid.clone());
+                let (k, n) = (attempted.len() - 1, todo.len().max(attempted.len()));
                 (ctx.progress)(Progress {
                     message: Some(format!("clip {}/{n}", k + 1)),
                     item: Some(cid.clone()),
@@ -1447,16 +1572,45 @@ impl Engine {
                     })
                 };
                 let cctx = JobCtx { progress: tagged, ..ctx.clone() };
-                eng.process_clip(&p.id, cid, &cctx).await?;
-                done.push(cid.clone());
+                if eng.process_clip(&p.id, &cid, &cctx).await? {
+                    done.push(cid.clone());
+                }
             }
+            eng.remove_orphan_clip_dirs(&p.id);
             Ok(json!({ "clips": done }))
         })
     }
 
-    async fn process_clip(self: &Arc<Self>, pid: &str, cid: &str, ctx: &JobCtx) -> ApiResult<()> {
-        let p = self.get(pid)?;
-        let clip = p.clip(cid).cloned().ok_or_else(|| ApiError::new("NOT_FOUND", format!("clip {cid}")))?;
+    /// Delete `clips/<id>/` folders no clip refers to (left behind when a clip
+    /// was re-planned away while it downloaded).
+    fn remove_orphan_clip_dirs(&self, pid: &str) {
+        let Ok(p) = self.get(pid) else { return };
+        let Ok(rd) = std::fs::read_dir(self.store.dir(pid).join("clips")) else { return };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !p.clips.iter().any(|c| c.id == name) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+
+    /// Returns false when the clip was re-planned away (the user edited its
+    /// songs) — not an error; the job moves on.
+    async fn process_clip(self: &Arc<Self>, pid: &str, cid: &str, ctx: &JobCtx) -> ApiResult<bool> {
+        // pin it so edits during the download don't re-plan it away
+        let p = match self
+            .mutate(pid, |p| {
+                let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", format!("clip {cid}")))?;
+                c.pinned = true;
+                Ok(())
+            })
+            .await
+        {
+            Ok(p) => p,
+            Err(e) if e.code == "NOT_FOUND" && self.store.exists(pid) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let clip = p.clip(cid).cloned().unwrap();
         let dir = self.store.dir(pid).join(clip.dir_name());
         std::fs::create_dir_all(&dir)?;
         let mp4 = dir.join("source.mp4");
@@ -1473,20 +1627,34 @@ impl Engine {
                 video_fetch::fetch_video(&src, clip.start, clip.end, &mp4, &opts, ctx.progress.clone(), ctx.cancel.clone()).await?
             };
             // 2) align against the analysis audio
-            let offset = self.measure_offset(&p, &v.path, v.vod_start).await.unwrap_or_else(|e| {
-                tracing::warn!("alignment failed ({e}); assuming 0");
-                0.0
-            });
-            let p2 = self
+            let al = self.align_clip(&p, &v).await;
+            if !al.ok {
+                (ctx.progress)(
+                    Progress::note("align", "alignment_weak", format!("clip audio didn't match the analysis audio (corr {:.2}); using the predicted offset", al.corr))
+                        .arg("corr", (al.corr as f64 * 100.0).round() / 100.0),
+                );
+            }
+            let offset = if al.method == "measured" { al.offset } else { al.predicted };
+            let alignment = Alignment { method: al.method, corr: al.corr, predicted: al.predicted, ok: al.ok };
+            let r = self
                 .mutate(pid, |p| {
                     let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
                     c.video = Some(v);
                     c.offset = offset;
+                    c.alignment = Some(alignment);
                     c.stems = None;
                     Ok(())
                 })
-                .await?;
-            p2.clip(cid).cloned().unwrap()
+                .await;
+            match r {
+                Ok(p2) => p2.clip(cid).cloned().unwrap(),
+                Err(e) if e.code == "NOT_FOUND" => {
+                    // re-planned away while downloading: nothing refers to it any more
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+            }
         } else {
             clip
         };
@@ -1504,21 +1672,25 @@ impl Engine {
                 Ok(st)
             })
             .await??;
-            let p2 = self
+            let r = self
                 .mutate(pid, |p| {
                     let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
                     c.stems = Some(stems);
                     Ok(())
                 })
-                .await?;
-            p2.clip(cid).cloned().unwrap()
+                .await;
+            match r {
+                Ok(p2) => p2.clip(cid).cloned().unwrap(),
+                Err(e) if e.code == "NOT_FOUND" => return Ok(false),
+                Err(e) => return Err(e),
+            }
         } else {
             clip
         };
 
         // 4) talk → mute suggestions
         if !p.settings.suggest_mutes {
-            return Ok(());
+            return Ok(true);
         }
         (ctx.progress)(Progress::note("talk", "find_talk", "finding talk in the vocal stem"));
         let stems = clip.stems.clone().unwrap();
@@ -1538,7 +1710,7 @@ impl Engine {
         })
         .await??;
         let (fade, gain_db) = (p.settings.mute_fade, p.settings.mute_gain_db);
-        self.mutate(pid, |p| {
+        let r = self.mutate(pid, |p| {
             let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
             let talk_vod: Vec<(f64, f64)> = regions.iter().filter_map(|&(a, b)| Some((c.to_vod_time(a)?, c.to_vod_time(b)?))).collect();
             c.talk = talk_vod.clone();
@@ -1563,41 +1735,73 @@ impl Engine {
                     })
                     .collect();
                 s.mutes.extend(fresh);
-                s.mutes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+                s.mutes.sort_by(|a, b| a.start.total_cmp(&b.start));
             }
             Ok(())
         })
-        .await?;
-        Ok(())
+        .await;
+        match r {
+            Ok(_) => Ok(true),
+            Err(e) if e.code == "NOT_FOUND" => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
-    /// Lag of the clip's audio against the analysis audio around the clip start.
-    async fn measure_offset(&self, p: &Project, mp4: &Path, vod_start: f64) -> ApiResult<f64> {
-        let audio = p.audio.as_ref().ok_or_else(|| precondition("no audio"))?;
-        let analysis = self.store.path(&p.id, &audio.file);
-        // The engine always extracts the whole VOD, so analysis t=0 is VOD t=0
-        // (its frame-count timeline may drift slightly from EXTINF; the measured
-        // offset absorbs that locally).
-        if audio.index.first_segment != 0 {
-            return Err(precondition("analysis audio does not start at the VOD start"));
-        }
-        let (mp4, rate) = (mp4.to_path_buf(), 8000u32);
-        // clip window [5 s, 45 s); analysis window starts 3 s earlier in VOD time,
-        // so the expected lag is ~3 s and ±6 s covers any plausible drift
-        let a_start = (vod_start + 2.0).max(0.0);
-        tokio::task::spawn_blocking(move || -> ApiResult<f64> {
-            let clip = ffmpeg::decode(&mp4, rate, 1, Some(5.0), Some(40.0))?.read_all()?;
-            let ana = ffmpeg::decode(&analysis, rate, 1, Some(a_start), Some(50.0))?.read_all()?;
-            // clip[t] ≈ ana[t + lag]  →  clip t=5 ↔ analysis a_start + lag
-            let (lag, corr) = align::find_lag(&ana, &clip, rate, 6.0);
-            tracing::info!("clip alignment: lag {lag:.4}s corr {corr:.3}");
-            if corr < 0.3 {
-                return Err(ApiError::new("FORMAT", format!("weak alignment correlation {corr:.2}")));
+    /// Offset of the clip's files against the analysis timeline.
+    ///
+    /// The offset is *predicted* exactly from the segment index (frame-count
+    /// time of the clip's first segment − its EXTINF time) and *confirmed* by
+    /// cross-correlating the clip audio with the analysis audio in a narrow
+    /// window around the prediction, trying a few spots in the clip (a silent
+    /// intro can't be matched). Without confirmation the prediction is used
+    /// and the clip is flagged (`ok: false`) instead of silently assuming 0.
+    async fn align_clip(self: &Arc<Self>, p: &Project, v: &VideoClip) -> AlignOutcome {
+        let predicted = predicted_offset(p, v);
+        let fallback = move |corr: f32| AlignOutcome { method: "predicted".into(), offset: predicted, corr, predicted, ok: false };
+        let (eng, pc, vc) = (self.clone(), p.clone(), v.clone());
+        let r = tokio::task::spawn_blocking(move || -> ApiResult<AlignOutcome> {
+            const RATE: u32 = 8000;
+            const W: f64 = 2.0; // search ± around the prediction
+            let src = eng.analysis_source(&pc)?;
+            let mut best = (0.0f32, None);
+            for t0 in [5.0, 60.0, 120.0, 0.0] {
+                let len = (vc.duration - t0).min(40.0);
+                if len < 8.0 {
+                    continue;
+                }
+                let clip = ffmpeg::decode(&vc.path, RATE, 1, Some(t0), Some(len))?.read_all()?;
+                // analysis time of clip t0 is expected at vod_start + predicted + t0
+                let expect = vc.vod_start + predicted + t0;
+                let s0 = (expect - W).max(0.0);
+                let ana = src.decode(s0, len + 2.0 * W, RATE, 1)?;
+                if clip.is_empty() || ana.is_empty() {
+                    continue;
+                }
+                // clip[t] ≈ ana[t + lag]; expected lag = expect − s0
+                let (lag, corr) = align::find_lag(&ana, &clip, RATE, (expect - s0) + W);
+                let offset = s0 + lag - vc.vod_start - t0;
+                tracing::info!("clip alignment @{t0}s: offset {offset:.4}s (predicted {predicted:.4}) corr {corr:.3}");
+                if corr >= 0.3 && (offset - predicted).abs() <= W {
+                    return Ok(AlignOutcome { method: "measured".into(), offset, corr, predicted, ok: true });
+                }
+                if corr > best.0 {
+                    best = (corr, Some(offset));
+                }
             }
-            // VOD time of clip t=5 = a_start + lag; offset = that − vod_start − 5
-            Ok(a_start + lag - vod_start - 5.0)
+            Ok(fallback(best.0))
         })
-        .await?
+        .await;
+        match r {
+            Ok(Ok(a)) => a,
+            Ok(Err(e)) => {
+                tracing::warn!("alignment failed ({e}); using the predicted offset");
+                fallback(0.0)
+            }
+            Err(e) => {
+                tracing::warn!("alignment task failed ({e}); using the predicted offset");
+                fallback(0.0)
+            }
+        }
     }
 
     // ── export ──────────────────────────────────────────────────────────

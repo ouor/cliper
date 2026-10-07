@@ -76,7 +76,7 @@ pub fn plan_clips(p: &mut Project) {
 }
 
 fn new_clip(start: f64, end: f64, pinned: bool) -> Clip {
-    Clip { id: new_id("c"), start, end, video: None, offset: 0.0, stems: None, talk: Vec::new(), song_ids: Vec::new(), pinned }
+    Clip { id: new_id("c"), start, end, video: None, offset: 0.0, stems: None, talk: Vec::new(), song_ids: Vec::new(), pinned, alignment: None }
 }
 
 fn refresh_song_ids(p: &mut Project) {
