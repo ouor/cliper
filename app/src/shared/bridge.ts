@@ -15,6 +15,7 @@ export interface EngineStatus {
   projectsRoot: string | null;
   /** engine.ready protocol version */
   protocol?: number;
+  minClientProtocol?: number;
 }
 
 export interface RpcFailure {

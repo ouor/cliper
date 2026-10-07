@@ -9,7 +9,7 @@ import { setMode, toast, updateSettings, useApp } from "@/state/app";
 import { projectUi, setProjectUi, updateProjectSettings, useProjects } from "@/state/projects";
 import { runningJobs, songProgress, startJob, useJobs } from "@/state/jobs";
 import { useWs } from "@/state/ws";
-import { hostClip, renderDescription, songNumbers, songTitle, unconfirmedMutes, videoState, vodLink } from "@/lib/song";
+import { renderDescription, songNumbers, songTitle, unconfirmedMutes, videoState, vodLink } from "@/lib/song";
 import { fmtBytes, fmtEta, fmtTime } from "@/lib/format";
 import { call } from "@/lib/rpc";
 import { friendly } from "@/lib/errors";
@@ -119,16 +119,11 @@ export function ExportView({ p }: { p: Project }) {
     void updateSettings({ exportPreset: preset, audioFormat: format });
     if (tpl !== p.settings.filename_template) await updateProjectSettings(p.id, { filename_template: tpl });
     const ids = selected.map((s) => s.id);
-    const overrides: Record<string, string> = {};
-    for (const s of selected) {
-      const clip = hostClip(p, s);
-      // 아카이브: this run only, without touching the songs' own switches (no export option yet)
-      if (preset === "archive" && clip?.stems) overrides[s.id] = clip.stems.orig;
-    }
     const opts: Partial<ExportOptions> = {
       song_ids: ids,
       include_unconfirmed: false,
-      audio_overrides: overrides,
+      // 아카이브: original audio for this run only; the songs' mute_enabled stays as it is
+      apply_mutes: preset === "archive" ? false : null,
       format: preset === "audio" ? format : "mp4",
       video_codec: preset === "fast" ? "copy" : null,
       stems: preset === "editor",

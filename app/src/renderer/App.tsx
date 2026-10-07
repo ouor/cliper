@@ -86,7 +86,9 @@ function EngineBanner() {
       </div>
     );
   }
-  if (engine.state === "ready" && engine.protocol !== undefined && engine.protocol !== PROTOCOL_VERSION) {
+  // compatible when min_client_protocol <= PROTOCOL_VERSION <= protocol
+  const incompatible = engine.protocol !== undefined && (PROTOCOL_VERSION > engine.protocol || PROTOCOL_VERSION < (engine.minClientProtocol ?? engine.protocol));
+  if (engine.state === "ready" && incompatible) {
     return (
       <div className="engine-banner failed">
         <AlertTriangle size={16} />

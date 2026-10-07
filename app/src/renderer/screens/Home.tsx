@@ -1,9 +1,10 @@
 // S1 홈 + S2 방송 확인 카드.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Clipboard, Film, FolderOpen, History, Layers, ListPlus, Mic2, MoreHorizontal, Play, Search, Settings2, Trash2, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Info, Clipboard, Film, FolderOpen, History, Layers, ListPlus, Mic2, MoreHorizontal, Play, Search, Settings2, Trash2, Users, X } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { ProjectSummary } from "@ipc/generated/ProjectSummary";
 import type { AudioTrack } from "@ipc/generated/AudioTrack";
+import type { Note } from "@ipc/generated/Note";
 import { ask, go, openSettings, toast, useApp } from "@/state/app";
 import { forgetProject, putProject, refreshList, useProjects } from "@/state/projects";
 import { KIND_LABEL, startJob, takeInterrupted, useJobs } from "@/state/jobs";
@@ -41,6 +42,20 @@ function Thumb({ url, platform, size = "md" }: { url?: string | null; platform?:
       {url && !err ? <img src={url} alt="" onError={() => setErr(true)} draggable={false} /> : platform === "local" ? <Film size={size === "lg" ? 28 : 18} /> : <Mic2 size={size === "lg" ? 28 : 18} />}
     </div>
   );
+}
+
+export function noticeKo(n: Note): string | null {
+  const a = n.args ?? {};
+  switch (n.code) {
+    case "multipart":
+      return `이 다시보기는 ${a.parts ?? "여러"}개 파트로 나뉘어 있어요. 지금은 첫 번째 파트만 처리해요.`;
+    case "multitrack":
+      return `오디오 트랙이 ${a.tracks ?? "여러"}개 있어요. 분석과 내보내기에 쓸 트랙을 위에서 고르세요.`;
+    case "audio_only":
+      return "영상이 없는 파일이에요. 오디오(WAV·FLAC·MP3)로만 내보낼 수 있어요.";
+    default:
+      return null;
+  }
 }
 
 export function trackLabel(t: AudioTrack): string {
@@ -131,8 +146,12 @@ function BroadcastCard({ r, onCancel }: { r: Resolved; onCancel: () => void }) {
             <span className="muted">약 {fmtBytes(Math.max(5e6, dur * 8400))} (영상은 고른 곡만 나중에 받아요)</span>
           </div>
         )}
-        {/* engine notes are English log text; show only localized ones */}
-        {src.notes.filter((n) => /[가-힣]/.test(n)).length > 0 && <div className="hint">{src.notes.filter((n) => /[가-힣]/.test(n)).join(" · ")}</div>}
+        {/* coded notices in Korean; `notes` is English log text and stays hidden */}
+        {(src.notices ?? []).map(noticeKo).filter(Boolean).map((t) => (
+          <div key={t} className="banner info notice">
+            <Info size={14} /> <span>{t}</span>
+          </div>
+        ))}
       </div>
       <div className="bcard-actions">
         <button className="btn ghost" onClick={onCancel} disabled={busy}>
