@@ -117,7 +117,6 @@ function MuteRow({ p, s, m, selected, warn }: { p: Project; s: Song; m: Mute; se
           </span>
         ))}
       <span className={`tag ${m.confirmed ? "mute" : "suggest"}`}>{m.confirmed ? (m.origin === "manual" ? "직접 만듦" : "확인함") : "제안 · 확인 전"}</span>
-      {void p}
     </button>
   );
 }
@@ -195,6 +194,9 @@ export function TalkEditor({ p }: { p: Project }) {
 
   // "listened" (export pre-check): result mode played for a while on this song
   const listenAcc = useRef(0);
+  useEffect(() => {
+    listenAcc.current = 0;
+  }, [s?.id]);
   useEffect(() => {
     if (!s || !playing || mode !== 1) return;
     const t = setInterval(() => {

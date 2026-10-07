@@ -58,6 +58,8 @@ export const useProjects = create<ProjectsStore>(() => ({
 interface PendingOp {
   label: string;
   apply: (songs: Song[]) => Song[];
+  /** the undo entry this op created (dropped if the op fails) */
+  history?: HistoryEntry;
 }
 
 const engineState: Record<string, Project> = {};
@@ -184,42 +186,66 @@ function muteEq(a: Mute, b: Mute): boolean {
   return a.start === b.start && a.end === b.end && a.fade_in === b.fade_in && a.fade_out === b.fade_out && a.confirmed === b.confirmed && a.gain_db === b.gain_db && a.origin === b.origin;
 }
 
+/**
+ * Send the difference between the engine's songs and `target`.
+ * - one song touched: per-item calls (song.update / mute.* / song.remove / song.add), race-free
+ *   against jobs that edit other songs;
+ * - several songs (merge, split, multi-song undo): one atomic `songs.set`.
+ * Every call carries the revision this op expects (its first snapshot, then the revision our
+ * own previous call produced), so any change made by someone else in between → CONFLICT.
+ */
 async function syncSongs(pid: string, target: Song[]) {
-  const rev = () => (syncStats.calls++, engineState[pid].revision);
-  const base = engineState[pid].songs;
+  const start = engineState[pid];
+  let expected = start.revision;
+  const take = (p: Project) => {
+    expected = p.revision;
+    setEngine(p);
+  };
+  const base = start.songs;
   const byId = new Map(base.map((s) => [s.id, s]));
   const targetIds = new Set(target.map((s) => s.id));
-  // 1) removals
-  for (const s of base) {
-    if (!targetIds.has(s.id)) setEngine(await call("song.remove", { id: pid, song_id: s.id, base_revision: rev() }));
+  const removed = base.filter((s) => !targetIds.has(s.id));
+  const added = target.filter((t) => !byId.has(t.id));
+  const changed = target.filter((t) => byId.has(t.id) && JSON.stringify(editable(t)) !== JSON.stringify(editable(byId.get(t.id)!)));
+  if (removed.length + added.length + changed.length === 0) return;
+  syncStats.calls++;
+  if (removed.length + added.length + changed.length > 1) {
+    // atomic: the engine keeps our (client) ids for new songs and mutes
+    take(await call("songs.set", { id: pid, songs: target, base_revision: expected }));
+    return;
   }
-  // 2) changes to existing songs
-  for (const t of target) {
-    const b = byId.get(t.id);
-    if (!b) continue;
+  for (const s of removed) take(await call("song.remove", { id: pid, song_id: s.id, base_revision: expected }));
+  for (const t of changed) {
+    const b = byId.get(t.id)!;
     const patch: Partial<Song> = {};
     for (const k of SONG_FIELDS) if (t[k] !== b[k]) (patch as Record<string, unknown>)[k] = t[k];
-    if (Object.keys(patch).length) setEngine(await call("song.update", { id: pid, song_id: t.id, patch, base_revision: rev() }));
+    if (Object.keys(patch).length) take(await call("song.update", { id: pid, song_id: t.id, patch, base_revision: expected }));
     const bm = new Map(b.mutes.map((m) => [m.id, m]));
     const tm = new Set(t.mutes.map((m) => m.id));
     for (const m of b.mutes) {
-      if (!tm.has(m.id)) setEngine(await call("mute.remove", { id: pid, song_id: t.id, mute_id: m.id, base_revision: rev() }));
+      if (!tm.has(m.id)) take(await call("mute.remove", { id: pid, song_id: t.id, mute_id: m.id, base_revision: expected }));
     }
     for (const m of t.mutes) {
       const old = bm.get(m.id);
       if (old && muteEq(old, m)) continue;
-      const r = await call("mute.upsert", { id: pid, song_id: t.id, mute: m, base_revision: rev() });
-      setEngine(r.project);
-      if (!old) addAlias(pid, m.id, r.mute_id);
+      const r = await call("mute.upsert", { id: pid, song_id: t.id, mute: m, base_revision: expected });
+      if (!old) addAlias(pid, m.id, r.mute_id); // before the state update, so no duplicate shows (L1)
+      take(r.project);
     }
   }
-  // 3) additions
-  for (const t of target) {
-    if (byId.has(t.id)) continue;
-    const r = await call("song.add", { id: pid, song: t, base_revision: rev() });
-    setEngine(r.project);
+  for (const t of added) {
+    const r = await call("song.add", { id: pid, song: t, base_revision: expected });
     addAlias(pid, t.id, r.song_id);
+    take(r.project);
   }
+}
+
+/** The fields an edit can change (engine-owned ones excluded). */
+function editable(s: Song) {
+  const o: Record<string, unknown> = {};
+  for (const k of SONG_FIELDS) o[k] = s[k];
+  o.mutes = s.mutes.map((m) => [m.id, m.start, m.end, m.fade_in, m.fade_out, m.confirmed, m.gain_db, m.origin]);
+  return o;
 }
 
 async function runOp(pid: string, op: PendingOp) {
@@ -242,7 +268,15 @@ async function runOp(pid: string, op: PendingOp) {
     }
   } catch (e) {
     const f = friendly(e);
-    toast(`${op.label}: ${f.title} ${f.hint ?? ""}`.trim(), { kind: "error" });
+    toast(`${op.label}: ${f.title} ${f.hint ?? ""}`.trim(), {
+      kind: "error",
+      action: f.code === "TIMEOUT" || f.code === "ENGINE_DOWN" ? { label: "엔진 다시 시작", run: () => void window.cliper.restartEngine() } : undefined,
+    });
+    // a failed edit is not undoable (its "before" would be stale)
+    if (op.history) {
+      const h = useProjects.getState().history[pid];
+      if (h) useProjects.setState((s) => ({ history: { ...s.history, [pid]: { undo: h.undo.filter((x) => x !== op.history), redo: h.redo.filter((x) => x !== op.history) } } }));
+    }
     try {
       setEngine(await call("project.get", { id: pid }));
     } catch {
@@ -262,7 +296,7 @@ function enqueue(pid: string, op: PendingOp): Promise<void> {
   return next;
 }
 
-function touched(before: Song[], after: Song[]): HistoryEntry["before"][] {
+function touched(before: Song[], after: Song[]): [Map<string, Song | null>, Map<string, Song | null>] {
   const b = new Map(before.map((s) => [s.id, s]));
   const a = new Map(after.map((s) => [s.id, s]));
   const ids = new Set([...b.keys(), ...a.keys()]);
@@ -271,7 +305,7 @@ function touched(before: Song[], after: Song[]): HistoryEntry["before"][] {
   for (const id of ids) {
     const x = b.get(id) ?? null;
     const y = a.get(id) ?? null;
-    if (JSON.stringify(x) !== JSON.stringify(y)) {
+    if (JSON.stringify(x && editable(x)) !== JSON.stringify(y && editable(y))) {
       mb.set(id, x && clone(x));
       ma.set(id, y && clone(y));
     }
@@ -279,20 +313,39 @@ function touched(before: Song[], after: Song[]): HistoryEntry["before"][] {
   return [mb, ma];
 }
 
-/** Apply a history side (song id → state) onto the current list, keeping engine-owned fields. */
-function restore(pid: string, side: Map<string, Song | null>, songs: Song[]): Song[] {
+/**
+ * Move the touched songs from `from` to `to` (undo: after → before, redo: before → after),
+ * applying only what the op itself changed: the song fields that differ, and the mutes the op
+ * added / removed / changed. Mutes that appeared since (job suggestions) are left alone.
+ */
+function restore(pid: string, to: Map<string, Song | null>, from: Map<string, Song | null>, songs: Song[]): Song[] {
   let out = songs;
-  for (const [key, want] of side) {
+  for (const [key, want] of to) {
+    const was = from.get(key) ?? null;
     const id = rid(pid, key);
     const cur = out.find((s) => s.id === id);
     if (!want) {
       out = out.filter((s) => s.id !== id);
-    } else if (cur) {
-      const mutes = want.mutes.map((m) => ({ ...m, id: rid(pid, m.id) }));
-      out = out.map((s) => (s.id === id ? { ...clone(want), id, mutes, clip_id: cur.clip_id, export: cur.export, confidence: cur.confidence ?? want.confidence } : s));
-    } else {
-      out = [...out, { ...clone(want), id }];
+      continue;
     }
+    if (!cur || !was) {
+      // re-add (undo of a removal / redo of an add)
+      if (!cur) out = [...out, { ...clone(want), id, mutes: want.mutes.map((m) => ({ ...m, id: rid(pid, m.id) })) }];
+      continue;
+    }
+    const next: Song = { ...cur, mutes: [...cur.mutes] };
+    for (const k of SONG_FIELDS) if (want[k] !== was[k]) (next as Record<string, unknown>)[k] = want[k];
+    const wantM = new Map(want.mutes.map((m) => [rid(pid, m.id), m]));
+    const wasM = new Map(was.mutes.map((m) => [rid(pid, m.id), m]));
+    for (const [mid, m] of wantM) {
+      const prev = wasM.get(mid);
+      if (prev && muteEq(prev, m)) continue; // the op didn't touch it
+      const i = next.mutes.findIndex((x) => x.id === mid);
+      if (i >= 0) next.mutes[i] = { ...m, id: mid };
+      else next.mutes.push({ ...m, id: mid });
+    }
+    for (const mid of wasM.keys()) if (!wantM.has(mid)) next.mutes = next.mutes.filter((x) => x.id !== mid);
+    out = out.map((s) => (s.id === id ? next : s));
   }
   return out;
 }
@@ -308,11 +361,12 @@ export function editSongs(id: string, label: string, fn: (songs: Song[]) => Song
   const after = fn(clone(before));
   const [hb, ha] = touched(before, after);
   if (hb.size === 0) return Promise.resolve();
+  const entry: HistoryEntry = { label, before: hb, after: ha };
   useProjects.setState((s) => {
     const h = s.history[id] ?? { undo: [], redo: [] };
-    return { history: { ...s.history, [id]: { undo: [...h.undo.slice(-99), { label, before: hb, after: ha }], redo: [] } } };
+    return { history: { ...s.history, [id]: { undo: [...h.undo.slice(-99), entry], redo: [] } } };
   });
-  return enqueue(id, { label, apply: fn });
+  return enqueue(id, { label, apply: fn, history: entry });
 }
 
 /** Mutate a single song (ids are resolved at sync time). */
@@ -330,7 +384,7 @@ export function undo(id: string): string | null {
   if (!h || h.undo.length === 0) return null;
   const last = h.undo[h.undo.length - 1];
   useProjects.setState((s) => ({ history: { ...s.history, [id]: { undo: h.undo.slice(0, -1), redo: [...h.redo, last] } } }));
-  void enqueue(id, { label: `되돌리기: ${last.label}`, apply: (songs) => restore(id, last.before, songs) });
+  void enqueue(id, { label: `되돌리기: ${last.label}`, apply: (songs) => restore(id, last.before, last.after, songs) });
   return last.label;
 }
 
@@ -339,8 +393,13 @@ export function redo(id: string): string | null {
   if (!h || h.redo.length === 0) return null;
   const next = h.redo[h.redo.length - 1];
   useProjects.setState((s) => ({ history: { ...s.history, [id]: { undo: [...h.undo, next], redo: h.redo.slice(0, -1) } } }));
-  void enqueue(id, { label: `다시 하기: ${next.label}`, apply: (songs) => restore(id, next.after, songs) });
+  void enqueue(id, { label: `다시 하기: ${next.label}`, apply: (songs) => restore(id, next.after, next.before, songs) });
   return next.label;
+}
+
+/** After server-side bulk changes (다시 찾기, 세트리스트) older history no longer applies. */
+export function clearHistory(id: string) {
+  useProjects.setState((s) => ({ history: { ...s.history, [id]: { undo: [], redo: [] } } }));
 }
 
 export async function updateProjectSettings(id: string, patch: Partial<Settings>) {

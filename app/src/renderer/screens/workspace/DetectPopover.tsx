@@ -4,7 +4,7 @@ import type { Project } from "@ipc/generated/Project";
 import { call } from "@/lib/rpc";
 import { SENSITIVITY_LABEL, sensitivityFromParams, sensitivityParams } from "@/lib/song";
 import { toast, updateSettings, useApp } from "@/state/app";
-import { editSongs, getProject } from "@/state/projects";
+import { clearHistory, editSongs, getProject } from "@/state/projects";
 import { useWs } from "@/state/ws";
 import { friendly } from "@/lib/errors";
 
@@ -23,6 +23,7 @@ export function DetectPopover({ p }: { p: Project }) {
       const defaults = await call("detect.default_params", {});
       const params = sensitivityParams(defaults, level, minSec);
       const res = await call("detect.rerun", { id: p.id, params });
+      clearHistory(p.id);
       void updateSettings({ sensitivity: level, minSongSec: minSec });
       const beforeIds = new Set(before.map((s) => s.id));
       const n0 = before.filter((s) => s.enabled).length;

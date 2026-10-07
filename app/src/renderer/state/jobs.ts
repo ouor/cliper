@@ -64,6 +64,10 @@ export function noteKo(note?: Note | null): string | undefined {
       return "참조용 영상 만드는 중";
     case "decode":
       return "소리 푸는 중";
+    case "alignment_weak":
+      return "영상과 소리의 시간 맞춤이 불확실해요. 이 곡은 시작·끝을 한 번 확인해 주세요";
+    case "silent_segments":
+      return `받지 못한 구간 ${args.count ?? "일부"}개는 무음으로 채웠어요`;
     default:
       return undefined;
   }
@@ -121,14 +125,24 @@ export interface Waiting {
   addedAt: number;
 }
 
+export interface InterruptedJob {
+  jobId: string;
+  method: JobMethod;
+  params: unknown;
+  label?: string;
+  projectId: string;
+}
+
 interface JobsStore {
   jobs: Record<string, Job>;
   order: string[];
   waiting: Waiting[];
   queue: QueueEntry[];
+  /** jobs that were running when the app last closed (지난번에 멈춘 작업) */
+  interrupted: InterruptedJob[];
 }
 
-export const useJobs = create<JobsStore>(() => ({ jobs: {}, order: [], waiting: [], queue: [] }));
+export const useJobs = create<JobsStore>(() => ({ jobs: {}, order: [], waiting: [], queue: [], interrupted: [] }));
 
 type Then = (result: unknown) => void;
 const thens = new Map<string, Then>();
@@ -182,8 +196,9 @@ function onProgress(jobId: string, kind: string, projectId: string, pr: Progress
   let items = j.items;
   if (pr.item && !items.includes(pr.item)) items = [...items, pr.item];
   // items before item_index are finished (engine order = job.started items)
-  const idx = pr.item_index ?? (pr.item ? items.indexOf(pr.item) : j.itemsDone.length);
-  const itemsDone = idx > 0 ? items.slice(0, idx) : j.itemsDone;
+  let itemsDone = j.itemsDone;
+  if (typeof pr.item_index === "number") itemsDone = pr.item_index > 0 ? items.slice(0, pr.item_index) : [];
+  else if (pr.item && j.item && pr.item !== j.item && !itemsDone.includes(j.item)) itemsDone = [...itemsDone, j.item];
   const fraction = computeFraction({ ...j, items, itemsDone }, pr);
   const changed = fraction !== j.fraction || pr.stage !== j.stage || pr.done !== j.done || pr.note?.code !== j.note?.code;
   const samples = fraction !== null ? [...j.samples.filter(([t]) => now - t < 20000), [now, fraction] as [number, number]] : j.samples;
@@ -270,19 +285,45 @@ export function wireJobs() {
   onNotification("queue.changed", (p) => useJobs.setState({ queue: p.queue }));
 }
 
-/** Engine restarted: running jobs are gone. */
+/** The engine went away (crash, restart, root or device change): its running jobs are gone. */
 export function markEngineLost() {
   const s = useJobs.getState();
   for (const j of Object.values(s.jobs)) {
     if (j.status === "running") {
+      thens.delete(j.id);
       upsert(j.id, { status: "failed", finishedAt: Date.now(), error: { title: "처리 엔진이 다시 시작되어 작업이 멈췄어요.", hint: "끝난 곡은 남아 있어요. [다시 시도]로 이어서 할 수 있어요.", action: "retry", code: "ENGINE_DOWN" } });
     }
   }
 }
 
+/** After the engine is ready again: drop store jobs it doesn't know, start what was waiting. */
+export async function reconcileJobs() {
+  let live: Set<string>;
+  try {
+    live = new Set((await call("job.list", {})).map((j) => j.job_id));
+  } catch {
+    return;
+  }
+  for (const j of Object.values(useJobs.getState().jobs)) {
+    if (j.status === "running" && !live.has(j.id)) {
+      thens.delete(j.id);
+      upsert(j.id, { status: "failed", finishedAt: Date.now(), error: { title: "처리 엔진이 다시 시작되어 작업이 멈췄어요.", hint: "끝난 곡은 남아 있어요. [다시 시도]로 이어서 할 수 있어요.", action: "retry", code: "ENGINE_DOWN" } });
+    }
+  }
+  // waiting entries were blocked by jobs that no longer exist
+  const keys = new Set(useJobs.getState().waiting.map((w) => w.key));
+  for (const key of keys) {
+    const [projectId, kind] = key.split("|");
+    if (runningJobs(useJobs.getState(), projectId, kind).length === 0) dispatchWaiting(projectId, kind);
+  }
+}
+
+let lastBusy: boolean | null = null;
 function syncBusy() {
   const s = useJobs.getState();
   const busy = Object.values(s.jobs).some((j) => j.status === "running") || s.waiting.length > 0 || s.queue.some((q) => q.status === "running" || q.status === "waiting");
+  if (busy === lastBusy) return;
+  lastBusy = busy;
   window.cliper.setBusy(busy);
 }
 
@@ -308,13 +349,7 @@ export function cancelWaiting(w: Waiting) {
 }
 
 // ── persistence of in-flight requests ("지난번에 멈춘 작업") ──
-interface ActiveRecord {
-  jobId: string;
-  method: JobMethod;
-  params: unknown;
-  label?: string;
-  projectId: string;
-}
+type ActiveRecord = InterruptedJob;
 let active: ActiveRecord[] = [];
 async function rememberActive(r: ActiveRecord) {
   active = [...active.filter((a) => a.jobId !== r.jobId), r];
@@ -325,12 +360,16 @@ async function forgetActive(jobId: string) {
   active = active.filter((a) => a.jobId !== jobId);
   await window.cliper.setState("activeJobs", active);
 }
-/** Jobs that were running when the app last closed (call once at startup). */
-export async function takeInterrupted(): Promise<ActiveRecord[]> {
+/** Jobs that were running when the app last closed. Called once in boot(); Home reads the store. */
+export async function takeInterrupted(): Promise<void> {
   const left = ((await window.cliper.getState<ActiveRecord[]>("activeJobs")) ?? []).filter((r) => r && r.method);
   active = [];
   await window.cliper.setState("activeJobs", []);
-  return left;
+  useJobs.setState({ interrupted: left });
+}
+
+export function clearInterrupted() {
+  useJobs.setState({ interrupted: [] });
 }
 
 /**
@@ -352,7 +391,8 @@ export async function startJob<M extends JobMethod>(method: M, params: ParamsOf<
       if (j?.status === "done") opts.then(j.result);
       else thens.set(job_id, opts.then);
     }
-    void rememberActive({ jobId: job_id, method, params, label: opts.label, projectId });
+    // a very fast job may already be finished: then there is nothing to resume later
+    if (useJobs.getState().jobs[job_id]?.status === "running" || !useJobs.getState().jobs[job_id]) void rememberActive({ jobId: job_id, method, params, label: opts.label, projectId });
     return job_id;
   } catch (e) {
     if (e instanceof EngineError && e.engineCode === "BUSY") {
@@ -360,6 +400,8 @@ export async function startJob<M extends JobMethod>(method: M, params: ParamsOf<
       if (opts.then) pendingThen.set(`${w.key}|${w.addedAt}`, opts.then);
       useJobs.setState((s) => ({ waiting: [...s.waiting, w] }));
       syncBusy();
+      // the blocking job may have finished before the BUSY answer arrived
+      if (runningJobs(useJobs.getState(), projectId, method).length === 0) setTimeout(() => dispatchWaiting(projectId, method), 300);
       return null;
     }
     throw e;

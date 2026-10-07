@@ -8,6 +8,7 @@ import { useWs } from "@/state/ws";
 import { call } from "@/lib/rpc";
 import { friendly } from "@/lib/errors";
 import { toast } from "@/state/app";
+import { clearHistory } from "@/state/projects";
 import { fmtTime } from "@/lib/format";
 import { songNumbers, songTitle } from "@/lib/song";
 
@@ -24,6 +25,7 @@ export function SetlistDialog({ p }: { p: Project }) {
     try {
       const r = await call("songs.match_setlist", { id: p.id, text, apply, overwrite });
       if (apply) {
+        clearHistory(p.id);
         toast(`곡 ${r.applied}개에 제목을 넣었어요.`, { kind: "ok" });
         close();
       } else setPreview(r);

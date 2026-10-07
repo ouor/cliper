@@ -74,6 +74,9 @@ export function dismissToast(id: number) {
 }
 
 export function ask(spec: DialogSpec): Promise<string> {
+  // a dialog already open is answered "cancel" first, so its caller never hangs (L9)
+  const open = useApp.getState().dialog;
+  if (open) open.resolve("cancel");
   return new Promise((resolve) => {
     useApp.setState({
       dialog: {

@@ -39,6 +39,7 @@ const TABLE: Record<string, Omit<FriendlyError, "code" | "detail">> = {
   INVALID_PARAMS: { title: "요청을 처리하지 못했어요.", hint: "입력한 값을 확인해 주세요.", action: "none" },
   IO: { title: "파일을 읽거나 쓰지 못했어요.", hint: "저장 공간이 부족하거나 폴더 권한이 없을 수 있어요.", action: "settings" },
   INTERNAL: { title: "예상하지 못한 문제가 생겼어요.", hint: "원본과 저장된 작업은 그대로예요. 다시 시도해 주세요.", action: "retry" },
+  TIMEOUT: { title: "처리 엔진이 응답하지 않아요.", hint: "잠시 뒤 다시 해 보세요. 계속되면 엔진을 다시 시작해 주세요. 저장된 작업은 그대로예요.", action: "retry" },
   ENGINE_DOWN: { title: "처리 엔진이 응답하지 않아요.", hint: "다시 시작하는 중이에요. 저장된 작업은 그대로예요.", action: "retry" },
 };
 

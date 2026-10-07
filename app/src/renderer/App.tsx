@@ -4,7 +4,7 @@ import type { SystemInfo } from "@ipc/generated/SystemInfo";
 import { PROTOCOL_VERSION } from "@ipc/protocol";
 import { applyTheme, ask, go, openSettings, toast, useApp } from "./state/app";
 import { applyChanged, loadProject, refreshList } from "./state/projects";
-import { markEngineLost, useJobs, wireJobs } from "./state/jobs";
+import { markEngineLost, reconcileJobs, takeInterrupted, useJobs, wireJobs } from "./state/jobs";
 import { onNotification } from "./lib/rpc";
 import { comboFromEvent, keysFor } from "./lib/keys";
 import { DialogHost, isTyping, Toasts } from "./components/common";
@@ -29,6 +29,7 @@ async function boot() {
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(useApp.getState().settings.theme));
   if (settings.audioSinkId) void player.setSink(settings.audioSinkId);
 
+  await takeInterrupted(); // once per app start (M3)
   wireJobs();
   onNotification("project.changed", (p) => applyChanged(p.project));
 
@@ -41,7 +42,9 @@ async function boot() {
       if (r.name === "workspace") void loadProject(r.projectId).catch(() => go({ name: "home" }));
       if (wasReady) toast("처리 엔진을 다시 시작했어요. 저장된 작업은 그대로예요.", { kind: "ok" });
       wasReady = true;
-    } else if (wasReady && (s.state === "restarting" || s.state === "failed")) {
+      void reconcileJobs();
+    } else if (wasReady) {
+      // any way out of "ready" (crash, user restart, root/device change) ends the running jobs
       markEngineLost();
     }
   };

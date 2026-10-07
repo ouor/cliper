@@ -7,7 +7,7 @@ import type { AudioTrack } from "@ipc/generated/AudioTrack";
 import type { Note } from "@ipc/generated/Note";
 import { ask, go, openSettings, toast, useApp } from "@/state/app";
 import { forgetProject, putProject, refreshList, useProjects } from "@/state/projects";
-import { KIND_LABEL, startJob, takeInterrupted, useJobs } from "@/state/jobs";
+import { clearInterrupted, KIND_LABEL, startJob, useJobs } from "@/state/jobs";
 import { call } from "@/lib/rpc";
 import { friendly, type FriendlyError } from "@/lib/errors";
 import { fmtBytes, fmtDate, fmtDurationKo, fmtRelative, fmtTime } from "@/lib/format";
@@ -269,12 +269,11 @@ export function Home() {
   const [search, setSearch] = useState("");
   const [byChannel, setByChannel] = useState(false);
   const [drag, setDrag] = useState(false);
-  const [interrupted, setInterrupted] = useState<Awaited<ReturnType<typeof takeInterrupted>>>([]);
+  const interrupted = useJobs((s) => s.interrupted);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
-    void takeInterrupted().then(setInterrupted);
   }, []);
 
   const resolve = async (input: string) => {
@@ -346,7 +345,7 @@ export function Home() {
 
   const resume = async () => {
     const list = interrupted;
-    setInterrupted([]);
+    clearInterrupted();
     for (const r of list) {
       try {
         await startJob(r.method, r.params as never, { label: r.label });
@@ -554,7 +553,7 @@ export function Home() {
               <History size={15} />
               <span className="grow">지난번에 멈춘 작업 {interrupted.length}개가 있어요. 다 받은 영상과 내보낸 곡은 건너뛰고 이어서 해요(소리 받기는 처음부터 다시 받아요).</span>
               <div className="actions">
-                <button className="btn sm ghost" onClick={() => setInterrupted([])}>
+                <button className="btn sm ghost" onClick={() => clearInterrupted()}>
                   나중에
                 </button>
                 <button className="btn sm primary" onClick={() => void resume()}>

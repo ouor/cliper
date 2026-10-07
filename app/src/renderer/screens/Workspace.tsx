@@ -237,6 +237,9 @@ async function askOvernight(p: Project) {
   await processAll(p.id, { exportToo: r === "export" });
 }
 
+/** shortcuts that may auto-repeat while the key is held */
+const REPEATABLE = new Set(["seek.back", "seek.fwd", "seek.back2", "seek.fwd2", "seek.fineBack", "seek.fineFwd", "edge.back", "edge.fwd", "song.prev", "song.next", "talk.nextSong", "talk.prevSong", "mute.next", "mute.prev"]);
+
 const STEPS: { mode: WorkspaceMode; n: string; label: string }[] = [
   { mode: "review", n: "1", label: "곡 검수" },
   { mode: "talk", n: "2", label: "멘트 다듬기" },
@@ -347,6 +350,11 @@ export function Workspace({ projectId }: { projectId: string }) {
       if (!a) return;
       // jobs / settings / help are owned by the app-level handler
       if (a.id === "jobs" || a.id === "settings" || a.id === "help") return;
+      // holding a key must not confirm / add / toggle repeatedly
+      if (e.repeat && !REPEATABLE.has(a.id)) {
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
       run(a.id);
     };
@@ -358,7 +366,6 @@ export function Workspace({ projectId }: { projectId: string }) {
       const ordered = sortSongs(proj, mode === "talk" ? "time" : st.sort, st.search).filter((x) => x.enabled || st.showExcluded);
       const idx = ordered.findIndex((x) => x.id === st.selected);
       const t = player.now();
-      const pre = useApp.getState().settings.listenPreroll;
       const mutes = s ? [...s.mutes].sort((a, b) => a.start - b.start) : [];
       const m = s?.mutes.find((x) => x.id === st.selectedMute);
       switch (id) {
@@ -525,7 +532,6 @@ export function Workspace({ projectId }: { projectId: string }) {
           return;
         }
       }
-      void pre;
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
