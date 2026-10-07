@@ -109,6 +109,11 @@ http
           // content: true sizes the page area exactly (README screenshots)
           await app.evaluate(({ BrowserWindow }, [w, h, c]) => (c ? BrowserWindow.getAllWindows()[0].setContentSize(w, h) : BrowserWindow.getAllWindows()[0].setSize(w, h)), [b.width, b.height, !!b.content]);
           return send(200, { ok: true });
+        case "/stubOpenDialog": // QA: the next open-file dialogs return this path (native dialogs can't be driven)
+          await app.evaluate(({ dialog }, p) => {
+            dialog.showOpenDialog = async () => (p ? { canceled: false, filePaths: [p] } : { canceled: true, filePaths: [] });
+          }, b.path ?? null);
+          return send(200, { ok: true });
         case "/close": // like clicking the window's X (preventable close event)
           await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
           return send(200, { ok: true });

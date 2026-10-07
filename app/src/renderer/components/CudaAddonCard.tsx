@@ -1,8 +1,10 @@
 // GPU 가속 구성요소 (CUDA add-on): status, progress, cancel / retry / reinstall / remove.
-import { Download, FolderOpen, RotateCcw, Trash2, X, Zap } from "lucide-react";
+import { Download, ExternalLink, FileArchive, FolderOpen, RotateCcw, Trash2, X, Zap } from "lucide-react";
 import { useApp, ask } from "@/state/app";
 import { Progress } from "@/components/common";
-import { addonLine, cancelCudaAddon, cudaAddon, fmtMB, installCudaAddon, removeCudaAddon, restartNow, useAddon } from "@/state/addon";
+import { addonLine, cancelCudaAddon, cudaAddon, CUDA_RELEASE_PAGE, fmtMB, installCudaAddon, installCudaAddonFromZip, removeCudaAddon, restartNow, useAddon } from "@/state/addon";
+
+const failed0 = (p: string) => p === "failed";
 
 export function CudaAddonCard({ compact }: { compact?: boolean }) {
   useApp((s) => s.system); // re-render when system info changes
@@ -12,8 +14,9 @@ export function CudaAddonCard({ compact }: { compact?: boolean }) {
   // nothing to say on a PC that doesn't need it and doesn't have it
   if (compact && !info.needed && !info.installed && st.phase === "idle") return null;
 
-  const active = st.phase === "download" || st.phase === "extract";
-  const frac = st.phase === "download" && st.total ? st.done / st.total : null;
+  const active = st.phase === "download" || st.phase === "verify" || st.phase === "extract";
+  const frac = (st.phase === "download" || st.phase === "verify") && st.total ? st.done / st.total : null;
+  const manual = failed0(st.phase) && (st.errorCode === "NETWORK" || st.errorCode === "ADDON" || st.errorCode === "INVALID_PARAMS");
   const failed = st.phase === "failed" || st.phase === "cancelled";
 
   return (
@@ -45,6 +48,18 @@ export function CudaAddonCard({ compact }: { compact?: boolean }) {
         )}
       </div>
       <div className="hint">{addonLine(st, info)}</div>
+      {(manual || (!compact && !info.installed && !active && st.phase !== "done")) && (
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          {manual && (
+            <button className="btn xs subtle" onClick={() => void window.cliper.openExternal(CUDA_RELEASE_PAGE)}>
+              <ExternalLink size={12} /> 릴리스 페이지 열기
+            </button>
+          )}
+          <button className={`btn xs ${manual ? "primary" : "ghost"}`} onClick={() => void installCudaAddonFromZip()}>
+            <FileArchive size={12} /> zip 파일로 설치
+          </button>
+        </div>
+      )}
       {active && <Progress value={frac} indeterminate={st.phase === "extract"} />}
       {active && <div className="hint faint">받는 동안에도 곡 찾기와 영상 받기는 그대로 할 수 있어요(CPU로 처리).</div>}
       {!compact && (info.installed || st.phase === "done") && (
@@ -57,6 +72,9 @@ export function CudaAddonCard({ compact }: { compact?: boolean }) {
           </button>
           <button className="btn xs ghost" disabled={active} onClick={() => void installCudaAddon({ reinstall: true })}>
             <RotateCcw size={12} /> 다시 설치
+          </button>
+          <button className="btn xs ghost" disabled={active} onClick={() => void installCudaAddonFromZip()}>
+            <FileArchive size={12} /> zip 파일로 설치
           </button>
           <button
             className="btn xs ghost"
@@ -85,8 +103,8 @@ export function CudaAddonCard({ compact }: { compact?: boolean }) {
 /** Status-bar item while the add-on is being installed. */
 export function CudaAddonStatus() {
   const st = useAddon();
-  if (!["download", "extract", "restart_wait", "restarting", "probing"].includes(st.phase)) return null;
-  const pct = st.phase === "download" && st.total ? ` ${Math.floor((st.done / st.total) * 100)}%` : "";
+  if (!["download", "verify", "extract", "restart_wait", "restarting", "probing"].includes(st.phase)) return null;
+  const pct = (st.phase === "download" || st.phase === "verify") && st.total ? ` ${Math.floor((st.done / st.total) * 100)}%` : "";
   return (
     <button className="sb-item" onClick={() => useApp.setState({ overlay: "settings", settingsTab: "advanced" })} data-tip={addonLine(st, cudaAddon())} data-tip-pos="top">
       <Zap size={13} /> GPU 구성요소{pct || (st.phase === "restart_wait" ? " 재시작 대기" : " 설치 중")}

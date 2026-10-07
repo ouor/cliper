@@ -259,6 +259,10 @@ function checkEngineParams(method: string, params: Record<string, unknown>): str
     const dir = (params.settings as { output_dir?: unknown } | undefined)?.output_dir;
     if (dir != null && (typeof dir !== "string" || !(pickedFolders.has(resolve(dir)) || knownOutputDirs.has(resolve(dir))))) return "output folder not chosen by the user";
   }
+  if (method === "addon.install_cuda" && params.zip != null) {
+    // a local add-on zip: only one the user just picked in the file dialog
+    if (typeof params.zip !== "string" || !pickedFiles.has(params.zip) || !/\.zip$/i.test(params.zip)) return "zip not chosen by the user";
+  }
   if (method === "export.run") {
     const ov = params.audio_overrides as Record<string, unknown> | undefined;
     if (ov && Object.keys(ov).length) return "audio_overrides is not used by the app";

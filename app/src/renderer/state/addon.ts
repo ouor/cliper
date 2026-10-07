@@ -28,7 +28,11 @@ export interface CudaAddonInfo {
   needed: boolean;
 }
 
-export type AddonPhase = "idle" | "download" | "extract" | "restart_wait" | "restarting" | "probing" | "done" | "failed" | "cancelled";
+/** where to get the add-on by hand (private repo / offline PCs: the automatic download can fail) */
+export const CUDA_ADDON_FILE = "cliper-cuda-addon-v1-amd64.zip";
+export const CUDA_RELEASE_PAGE = "https://github.com/ouor/cliper/releases/tag/v0.1.0";
+
+export type AddonPhase = "idle" | "download" | "verify" | "extract" | "restart_wait" | "restarting" | "probing" | "done" | "failed" | "cancelled";
 
 interface AddonState {
   phase: AddonPhase;
@@ -36,11 +40,13 @@ interface AddonState {
   done: number;
   total: number;
   error: string | null;
+  /** engine error code of the last failure (NETWORK → offer the release page + zip install) */
+  errorCode: string | null;
   /** auto-install already tried in this app session (a cancel is respected until the next launch) */
   autoTried: boolean;
 }
 
-export const useAddon = create<AddonState>(() => ({ phase: "idle", jobId: null, done: 0, total: 0, error: null, autoTried: false }));
+export const useAddon = create<AddonState>(() => ({ phase: "idle", jobId: null, done: 0, total: 0, error: null, errorCode: null, autoTried: false }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const callAny = (method: string, params: Record<string, unknown>) => call(method as Method, params as never) as Promise<any>;
@@ -50,24 +56,31 @@ export function cudaAddon(): CudaAddonInfo | null {
   return sys?.cuda_addon ?? null;
 }
 
-const running = (p: AddonPhase) => p === "download" || p === "extract";
+const running = (p: AddonPhase) => p === "download" || p === "verify" || p === "extract";
+
+/** Install from a zip the user downloaded (file dialog; main only accepts a path picked there). */
+export async function installCudaAddonFromZip() {
+  const zip = await window.cliper.pickFile({ title: `${CUDA_ADDON_FILE} 고르기`, filters: [{ name: "GPU 가속 구성요소 (zip)", extensions: ["zip"] }] });
+  if (zip) await installCudaAddon({ zip });
+}
 
 /** Start (or retry) the install. Safe to call repeatedly. */
-export async function installCudaAddon(opts: { reinstall?: boolean } = {}) {
+export async function installCudaAddon(opts: { reinstall?: boolean; zip?: string } = {}) {
   const st = useAddon.getState();
   if (running(st.phase) || st.phase === "restarting" || st.phase === "probing") return;
   const info = cudaAddon();
   if (!info) return;
-  useAddon.setState({ phase: "download", jobId: null, done: 0, total: info.size, error: null, autoTried: true });
+  useAddon.setState({ phase: opts.zip ? "verify" : "download", jobId: null, done: 0, total: info.size, error: null, errorCode: null, autoTried: true });
   try {
     if (opts.reinstall && info.installed) await callAny("addon.remove_cuda", {});
-    const r = await callAny(CUDA_JOB, {});
+    const r = await callAny(CUDA_JOB, opts.zip ? { zip: opts.zip } : {});
     useAddon.setState({ jobId: r.job_id });
   } catch (e) {
     const busy = e instanceof EngineError && e.engineCode === "BUSY";
     // BUSY: an install is already running (e.g. started before a renderer reload) — follow it
     if (busy) return;
-    useAddon.setState({ phase: "failed", error: e instanceof Error ? e.message : String(e) });
+    const code = e instanceof EngineError ? e.engineCode ?? null : null;
+    useAddon.setState({ phase: "failed", errorCode: code, error: code === "INVALID_PARAMS" ? "고른 파일을 열 수 없어요" : e instanceof Error ? e.message : String(e) });
   }
 }
 
@@ -161,7 +174,7 @@ export function wireAddon() {
     const extract = pr.stage === "addon.extract";
     useAddon.setState({
       jobId: p.job_id,
-      phase: extract ? "extract" : "download",
+      phase: extract ? "extract" : pr.stage === "addon.verify" ? "verify" : "download",
       done: extract ? pr.done : pr.bytes ?? pr.done,
       total: pr.total || useAddon.getState().total,
     });
@@ -174,7 +187,8 @@ export function wireAddon() {
   onNotification("job.failed", (p) => {
     if ((p.kind as string) !== CUDA_JOB) return;
     const cancelled = p.error.code === "CANCELLED";
-    useAddon.setState({ jobId: null, phase: cancelled ? "cancelled" : "failed", error: cancelled ? null : friendly(p.error as ApiError).title });
+    const code = String(p.error.code);
+    useAddon.setState({ jobId: null, phase: cancelled ? "cancelled" : "failed", errorCode: cancelled ? null : code, error: cancelled ? null : friendly(p.error as ApiError).title });
   });
 }
 
@@ -183,6 +197,8 @@ export function addonLine(st: AddonState, info: CudaAddonInfo | null): string {
   switch (st.phase) {
     case "download":
       return `GPU 가속 구성요소 받는 중 ${fmtMB(st.done)} / ${fmtMB(st.total || info?.size || 0)}`;
+    case "verify":
+      return `받은 파일 확인 중 ${fmtMB(st.done)} / ${fmtMB(st.total || info?.size || 0)}`;
     case "extract":
       return "GPU 가속 구성요소 설치 중…";
     case "restart_wait":
@@ -194,6 +210,10 @@ export function addonLine(st: AddonState, info: CudaAddonInfo | null): string {
     case "done":
       return "GPU 가속 구성요소 설치됨";
     case "failed":
+      if (st.errorCode === "NETWORK")
+        return `GPU 가속 구성요소를 자동으로 받지 못했어요. 릴리스 페이지에서 ${CUDA_ADDON_FILE} 파일을 받은 뒤 'zip 파일로 설치'를 눌러 주세요. 그동안에도 CPU로 처리해요.`;
+      if (st.errorCode === "ADDON")
+        return `파일이 올바르지 않아요. 릴리스 페이지의 ${CUDA_ADDON_FILE} 파일이 맞는지, 다 받아졌는지 확인해 주세요.`;
       return `GPU 가속 구성요소를 설치하지 못했어요${st.error ? ` · ${st.error}` : ""}`;
     case "cancelled":
       return "GPU 가속 구성요소 설치를 취소했어요. CPU로 처리해요.";
