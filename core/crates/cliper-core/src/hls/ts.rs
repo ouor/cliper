@@ -180,7 +180,7 @@ mod tests {
         let mut buf = vec![0x00, 0xFF, 0x12];
         for n in [10usize, 20, 30] {
             buf.extend(cfg.adts_header(n));
-            buf.extend(std::iter::repeat(0x55).take(n));
+            buf.extend(std::iter::repeat_n(0x55, n));
         }
         let f = split_adts(&buf);
         assert_eq!(f.len(), 3);

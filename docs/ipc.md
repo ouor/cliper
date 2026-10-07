@@ -78,8 +78,9 @@ Prefer the **per-item methods** (`song.update` / `song.add` / `song.remove`,
 adds mute suggestions at the same moment is never overwritten. `songs.set`
 (whole-list replacement) is still there for bulk edits and undo.
 
-Every editing method accepts `base_revision`: the `revision` of the project
-the client edited. If the project changed since (`project.revision` is bumped
+The editing methods (`song.update/add/remove`, `mute.upsert/remove`,
+`songs.set`) accept `base_revision`: the `revision` of the project the client
+edited. If the project changed since (`project.revision` is bumped
 on every save), the call fails with `CONFLICT` and nothing is written — reload
 (or take the latest `project.changed`) and reapply.
 
@@ -93,9 +94,17 @@ on every save), the call fails with `CONFLICT` and nothing is written — reload
   returns sample-exact windows of it (verified identical to a full decode), so
   songs can be previewed before any video is fetched.
 - A clip's files (`source.mp4`, `orig.wav`, `vocals.wav`, peaks) have their own
-  time base starting at 0. Convert with
-  `clip_time = vod_time − clip.video.vod_start − clip.offset`
-  (`offset` is measured by cross-correlation, typically a few ms).
+  time base starting at 0 (the file's timeline: stems are padded if the audio
+  stream starts after the video). Convert with
+  `clip_time = vod_time − clip.video.vod_start − clip.offset`.
+- `offset` is **predicted** from the segment index and **confirmed** by
+  cross-correlating the clip audio with the analysis audio (typically tens of
+  ms). `clip.alignment = {method, corr, predicted, ok}`: `ok: false` (method
+  `"predicted"`) means the audio couldn't be matched (e.g. silence) — flag the
+  clip's songs for a timing check.
+- Clips are planned as songs ± margins, merged when they overlap, but a merged
+  clip stops growing at 20 min (`MAX_CLIP_SEC`). Separation streams, so memory
+  doesn't depend on clip length.
 - `clip.video.duration` is the fetched span; a song (and its mutes) must lie in
   `[vod_start + offset, vod_start + offset + duration]` to be exportable. If the
   user drags a song edge outside, call `clip.extend` then `clips.fetch`.
@@ -128,11 +137,17 @@ multitrack file). A recording without video can only be exported as wav/flac/mp3
 edit is `orig − (1 − g(t))·vocals` with `g` = the mute envelope: 1 outside
 mutes; inside a mute, a raised-cosine `fade_in` from 1 down to the floor, the
 floor, then a raised-cosine `fade_out` back to 1 — fades lie *inside*
-`[start, end]`. The floor is 0 for `gain_db: null`, else `10^(gain_db/20)`;
-where mutes overlap the smaller gain wins. Export additionally applies
+`[start, end]`, each clamped to half the mute's length. The floor is 0 for
+`gain_db: null`, else `10^(gain_db/20)`; where mutes overlap the smaller gain
+wins. Suggested mutes put their fades *outside* the detected speech
+(`start = speech − fade`), so the voice is fully removed from its first
+syllable. Export additionally applies
 `settings.song_fade_in/out` (raised cosine, min 5 ms) at the song edges and
-optional loudness normalisation. An AudioWorklet doing the same math previews
-the result sample-accurately (loudness aside).
+optional loudness normalisation. Without normalisation, a song whose render
+would exceed full scale is turned down just enough (`ExportResult.clip_guard_db`).
+With it, `loudness.mode` says whether loudnorm stayed `linear` or had to go
+`dynamic` (the gain would break the true-peak ceiling). An AudioWorklet doing
+the same math previews the result sample-accurately (loudness aside).
 
 ### `CLPEAKS1` (little endian)
 
@@ -185,7 +200,7 @@ See `protocol.ts` for exact shapes.
 | `detect.default_params` / `detect.rerun` | request | rerun is instant (cached probabilities) |
 | `audio.fetch` | job | |
 | `detect.run` | job | `{params?, retag?}` |
-| `clips.fetch` | job | `{clip_ids?, song_ids?, exact?}` default: clips missing video or stems. `exact` + `song_ids`: plan clips covering only those songs (± margins) so close neighbours aren't fetched along (such clips are `pinned`) |
+| `clips.fetch` | job | `{clip_ids?, song_ids?, exact?}` default: clips missing video or stems. `exact` + `song_ids`: plan clips covering only those songs (± margins) so close neighbours aren't fetched along (such clips are `pinned`). Edits while it runs are fine: it re-reads the plan between clips, pins the clip it works on, and skips clips re-planned away |
 | `export.run` | job | `ExportOptions`: `song_ids?`, `format?` (mp4/wav/flac/mp3), `video_codec?` ("copy" = fast), `include_unconfirmed?`, `apply_mutes?` (false = original audio for this run only), `stems?` + `also_render?`, `handles?`, `reference_video?`, `audio_overrides?` (song id → audio file aligned to clip start) |
 | `songs.match_setlist` | request | `{text, tolerance?=150, apply?, overwrite?}` → `SetlistMatch` |
 | `project.export_metadata` | request | `{format: csv/json/chapters/timestamps, include_disabled?, path?}` → `{text, path}` |
@@ -193,7 +208,12 @@ See `protocol.ts` for exact shapes.
 | `job.list` / `job.cancel` | request | |
 | `engine.shutdown` | request | |
 
-Only one job **per kind per project** runs at a time (`BUSY` otherwise).
+Only one job **per kind per project** runs at a time, and `audio.fetch` excludes
+`detect.run`, `clips.fetch` and `audio.window` on the same project (`BUSY`
+otherwise; the message names the running job). `clip.extend` / `drop_media` are
+`BUSY` while clips are fetched or exported. Settings are validated
+(`INVALID_PARAMS`: ranges, `video_codec` ∈ `h264_nvenc` / `libx264` / `copy`).
+Project ids are plain names (no path separators).
 
 ## Notifications
 
@@ -215,7 +235,17 @@ event is about, so per-song progress can be shown. Progress `stage` values: `aud
 Note codes: `copy_audio_track`, `cut_recording`, `find_talk`,
 `fallback_segments {count}`, `variant_truncated {resolution}`, `remux`,
 `render_audio`, `measure_loudness`, `write_stems`, `write_reference_video`,
-`decode`. Unknown codes may appear later — ignore them.
+`decode`, `alignment_weak {corr}`, `silent_segments {count}` (segments
+without audio filled with silence, keeping the timeline), `gpu_out_of_memory`
+(separation redone on the CPU). Unknown codes may appear later — ignore them.
+
+A job that panics fails with `INTERNAL` like any other error. Closing stdin
+or `engine.shutdown` cancels all jobs; the engine's ffmpeg children run in a
+kill-on-close Job Object, so they never outlive it.
+
+**GPU memory**: the separator picks its batch size from free VRAM, halves it
+on out-of-memory, then frees the detection model and retries, then separates
+that clip on the CPU (`gpu_out_of_memory`).
 
 While any job runs the engine keeps Windows from going to sleep (unless
 `system.set_keep_awake {enabled: false}`).
@@ -226,7 +256,9 @@ A failed job (not a cancelled one) is also stored as `project.last_error`
 ### Resuming after a restart
 
 Jobs don't survive the engine. What is kept: `audio.fetch` restarts from
-scratch (about a minute for 4 h); `clips.fetch` skips clips that already have
+scratch (about a minute for 4 h; it downloads to a `.part` file, so the
+previous audio stays valid until the new one is complete, and it drops
+`probs.bin` so the next `detect.run` re-tags); `clips.fetch` skips clips that already have
 video and stems (a half-downloaded clip starts over); `export.run` redoes the
 songs it is asked for (finished ones have `song.export`). So re-issuing the
 same requests resumes the work.

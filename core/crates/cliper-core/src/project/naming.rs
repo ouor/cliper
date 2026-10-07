@@ -60,6 +60,25 @@ pub fn render_name(template: &str, p: &Project, song: &Song, number: usize) -> S
 }
 
 /// `dir/name.ext`, or `dir/name_v2.ext`, `_v3`… if taken.
+/// Keep a file name within ~120 characters (Windows' 255-unit component limit
+/// minus room for `_v2` suffixes and extensions).
+pub fn limit_len(name: &str) -> String {
+    const MAX: usize = 120;
+    if name.chars().count() <= MAX {
+        return name.to_string();
+    }
+    name.chars().take(MAX).collect::<String>().trim_end_matches(['_', '-', ' ', '.']).to_string()
+}
+
+/// `dir/name` (a folder) that doesn't exist yet: `name`, `name_v2`, …
+pub fn unique_dir(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    (2..).map(|v| dir.join(format!("{name}_v{v}"))).find(|p| !p.exists()).unwrap()
+}
+
 pub fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
     let first = dir.join(format!("{name}.{ext}"));
     if !first.exists() {

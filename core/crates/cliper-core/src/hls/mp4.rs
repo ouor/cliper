@@ -49,7 +49,7 @@ pub fn iter_boxes(buf: &[u8], start: usize, end: usize) -> Vec<([u8; 4], BoxRef)
         } else if size == 0 {
             size = end - o;
         }
-        if size < hs {
+        if size < hs || size > end - o {
             break;
         }
         out.push((typ, BoxRef { start: o, header: hs, size }));

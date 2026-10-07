@@ -59,7 +59,9 @@ pub fn init() -> &'static RuntimeInfo {
                 paths.extend(std::env::split_paths(&p));
             }
             if let Ok(joined) = std::env::join_paths(paths) {
-                // SAFETY: called once, before inference threads exist.
+                // SAFETY: `cliper` calls init() first thing in main, before the
+                // tokio runtime or any other thread exists; later calls return
+                // the cached result without touching the environment.
                 unsafe { std::env::set_var("PATH", joined) };
             }
         }

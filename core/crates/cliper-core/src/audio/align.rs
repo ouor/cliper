@@ -45,7 +45,7 @@ pub fn find_lag(a: &[f32], b: &[f32], rate: u32, max_lag: f64) -> (f64, f32) {
 mod tests {
     #[test]
     fn finds_shift() {
-        let a: Vec<f32> = (0..20000).map(|i| (((i * 7919) % 1009) as f32 / 1009.0 - 0.5)).collect();
+        let a: Vec<f32> = (0..20000).map(|i| ((i * 7919) % 1009) as f32 / 1009.0 - 0.5).collect();
         let b: Vec<f32> = a[123..123 + 8000].to_vec();
         let (lag, c) = super::find_lag(&a, &b, 1000, 1.0);
         assert!((lag - 0.123).abs() < 1e-9, "{lag}");

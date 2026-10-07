@@ -190,9 +190,10 @@ pub fn resample_grid(frames: &[[f32; 3]], duration: f64) -> Probs {
             } else {
                 let x0 = j as f64 * step;
                 let x1 = (j + 1) as f64 * step;
-                let w = ((t - x0) / (x1 - x0)) as f32;
+                let w = (t - x0) / (x1 - x0);
                 let (a, b) = (frames[j], frames[j + 1]);
-                [a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w, a[2] + (b[2] - a[2]) * w]
+                let lerp = |k: usize| (a[k] as f64 + (b[k] as f64 - a[k] as f64) * w) as f32;
+                [lerp(0), lerp(1), lerp(2)]
             }
         };
         p.music[i] = v[0];

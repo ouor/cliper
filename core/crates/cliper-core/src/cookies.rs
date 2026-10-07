@@ -100,8 +100,8 @@ impl CookieJar {
 
     pub fn status(&self) -> CookieStatus {
         let names: Vec<String> = self.stored.as_ref().map(|s| s.cookies.keys().cloned().collect()).unwrap_or_default();
-        let mut platforms: Vec<String> = names.iter().map(|n| platform_of(n).to_string()).collect();
-        platforms.dedup();
+        let platforms: Vec<String> =
+            names.iter().map(|n| platform_of(n).to_string()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
         CookieStatus {
             set: !names.is_empty(),
             platforms,
@@ -122,31 +122,39 @@ mod dpapi {
 
     pub const AVAILABLE: bool = true;
 
-    fn run(data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
+    /// App-specific entropy: other programs running as the user can't decrypt
+    /// the blob with a plain CryptUnprotectData call.
+    const ENTROPY: &[u8] = b"cliper/cookies/v1";
+
+    fn run(data: &[u8], encrypt: bool, entropy: Option<&[u8]>) -> Option<Vec<u8>> {
         let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+        let ent = entropy.map(|e| CRYPT_INTEGER_BLOB { cbData: e.len() as u32, pbData: e.as_ptr() as *mut u8 });
+        let ent_ptr = ent.as_ref().map_or(std::ptr::null(), |e| e as *const _);
         let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
-        // SAFETY: valid input blob; on success the output buffer is LocalAlloc'd
-        // by the system, copied, then freed.
+        // SAFETY: valid input/entropy blobs that outlive the call; on success the
+        // output buffer is LocalAlloc'd by the system, copied, zeroed, then freed.
         unsafe {
             let ok = if encrypt {
-                CryptProtectData(&input, std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+                CryptProtectData(&input, std::ptr::null(), ent_ptr, std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
             } else {
-                CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+                CryptUnprotectData(&input, std::ptr::null_mut(), ent_ptr, std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
             };
             if ok == 0 || out.pbData.is_null() {
                 return None;
             }
             let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+            std::ptr::write_bytes(out.pbData, 0, out.cbData as usize);
             LocalFree(out.pbData as _);
             Some(v)
         }
     }
 
     pub fn protect(data: &[u8]) -> Option<Vec<u8>> {
-        run(data, true)
+        run(data, true, Some(ENTROPY))
     }
+    /// Also reads blobs written before the entropy was added.
     pub fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
-        run(data, false)
+        run(data, false, Some(ENTROPY)).or_else(|| run(data, false, None))
     }
 }
 

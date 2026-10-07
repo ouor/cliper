@@ -63,6 +63,7 @@ fn ramp(k: usize, n: usize) -> f32 {
 
 /// Render interleaved stereo `[in_t, out_t)` (clip seconds) at `rate`.
 /// `fade_in` / `fade_out` (s) shape the very start / end (min 5 ms against clicks).
+#[allow(clippy::too_many_arguments)]
 pub fn render(orig: &[f32], vocals: &[f32], rate: u32, in_t: f64, out_t: f64, mutes: &[MuteSpan], fade_in: f64, fade_out: f64) -> Vec<f32> {
     let frames = orig.len().min(vocals.len()) / 2;
     let a = ((in_t.max(0.0) * rate as f64).round() as usize).min(frames);

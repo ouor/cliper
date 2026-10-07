@@ -144,6 +144,7 @@ api_from!(video_fetch::VideoError, |e: video_fetch::VideoError| match e {
     video_fetch::VideoError::Ffmpeg(f) => f.into(),
     video_fetch::VideoError::Io(e) => e.into(),
     video_fetch::VideoError::Format(m) => ApiError::new("FORMAT", m),
+    video_fetch::VideoError::Internal(m) => ApiError::new("INTERNAL", m),
 });
 api_from!(crate::stems::StemError, |e: crate::stems::StemError| match e {
     crate::stems::StemError::Ffmpeg(f) => f.into(),
@@ -270,11 +271,11 @@ pub struct Engine {
     /// ADTS frame byte offsets of a project's analysis audio (audio.window)
     frame_index: Mutex<HashMap<String, FrameIndex>>,
     /// results of finished jobs, for `wait_job` (kept until read)
-    finished: Mutex<(HashMap<String, ApiResult<Value>>, std::collections::VecDeque<String>)>,
+    finished: Mutex<FinishedJobs>,
     job_finished: tokio::sync::Notify,
     pub(crate) queue: Mutex<Vec<crate::queue::QueueEntry>>,
     pub(crate) queue_wake: tokio::sync::Notify,
-    pub(crate) queue_worker: Mutex<bool>,
+    pub(crate) queue_worker: AtomicBool,
 }
 
 /// Keep Windows from sleeping while jobs run (unattended overnight batches).
@@ -355,6 +356,52 @@ impl EnginePrefs {
 fn gpu_name() -> Option<(String, u64)> {
     static GPU: OnceLock<Option<(String, u64)>> = OnceLock::new();
     GPU.get_or_init(runtime::gpu_name).clone()
+}
+
+/// Encoders `export.run` understands.
+const VIDEO_CODECS: [&str; 3] = ["h264_nvenc", "libx264", "copy"];
+
+fn validate_settings(s: &Settings) -> ApiResult<()> {
+    let range = |v: f64, lo: f64, hi: f64, what: &str| -> ApiResult<()> {
+        if v.is_finite() && (lo..=hi).contains(&v) { Ok(()) } else { Err(invalid(format!("{what} must be within {lo}..{hi}"))) }
+    };
+    range(s.margin_before, 0.0, 600.0, "margin_before")?;
+    range(s.margin_after, 0.0, 600.0, "margin_after")?;
+    range(s.mute_fade, 0.0, 5.0, "mute_fade")?;
+    if let Some(g) = s.mute_gain_db {
+        range(g, -120.0, 0.0, "mute_gain_db")?;
+    }
+    range(s.song_fade_in, 0.0, 30.0, "song_fade_in")?;
+    range(s.song_fade_out, 0.0, 30.0, "song_fade_out")?;
+    if !VIDEO_CODECS.contains(&s.video_codec.as_str()) {
+        return Err(invalid(format!("video_codec must be one of {VIDEO_CODECS:?}")));
+    }
+    range(s.video_quality as f64, 0.0, 51.0, "video_quality")?;
+    range(s.audio_bitrate_k as f64, 32.0, 512.0, "audio_bitrate_k")?;
+    if let Some(l) = s.loudness {
+        range(l.target_lufs, -70.0, 0.0, "loudness.target_lufs")?;
+        range(l.true_peak, -9.0, 0.0, "loudness.true_peak")?;
+    }
+    if s.filename_template.trim().is_empty() {
+        return Err(invalid("filename_template must not be empty"));
+    }
+    Ok(())
+}
+
+/// Give duplicate song / mute ids fresh ones (the first keeps its id).
+fn dedupe_ids(songs: &mut [Song]) {
+    let mut seen = std::collections::HashSet::new();
+    let mut seen_m = std::collections::HashSet::new();
+    for s in songs.iter_mut() {
+        if !s.id.is_empty() && !seen.insert(s.id.clone()) {
+            s.id = project::new_id("s");
+        }
+        for m in s.mutes.iter_mut() {
+            if !m.id.is_empty() && !seen_m.insert(m.id.clone()) {
+                m.id = project::new_id("m");
+            }
+        }
+    }
 }
 
 fn validate_song(s: &mut Song) -> ApiResult<()> {
@@ -465,8 +512,14 @@ impl AnalysisSource {
                 f.seek(SeekFrom::Start(idx[k]))?;
                 let mut bytes = vec![0u8; (end - idx[k]) as usize];
                 f.read_exact(&mut bytes)?;
-                let skip = start - k as f64 * spf / sr;
-                Ok(ffmpeg::decode_bytes(bytes, "aac", rate, channels, skip, duration)?)
+                // decoded sample 0 is frame k's first sample; trim by counting
+                // samples (ffmpeg's -ss on piped raw AAC uses estimated
+                // timestamps, which drift on VBR audio)
+                let pcm = ffmpeg::decode_bytes(bytes, "aac", rate, channels, 0.0, (k_end - k) as f64 * spf / sr + 1.0)?;
+                let ch = channels as usize;
+                let a = ((start - k as f64 * spf / sr) * rate as f64).round() as usize * ch;
+                let n = (duration * rate as f64).round() as usize * ch;
+                Ok(pcm.get(a.min(pcm.len())..(a + n).min(pcm.len())).unwrap_or_default().to_vec())
             }
             Some(_) => Ok(Vec::new()),
             None => {
@@ -624,6 +677,9 @@ fn follow(audio: &Path, out: &Path, done: &AtomicBool, until_ms: &AtomicU64) -> 
 /// (audio file length when indexed, ADTS frame offsets)
 type FrameIndex = (u64, Arc<Vec<u64>>);
 
+/// Results of finished jobs (for `wait_job`) and their insertion order.
+type FinishedJobs = (HashMap<String, ApiResult<Value>>, std::collections::VecDeque<String>);
+
 /// Current stage of a job for the ETA: (stage, item, started, `done` at start).
 type StageClock = (String, Option<String>, Instant, u64);
 
@@ -669,7 +725,7 @@ impl Engine {
             job_finished: tokio::sync::Notify::new(),
             queue: Mutex::new(Vec::new()),
             queue_wake: tokio::sync::Notify::new(),
-            queue_worker: Mutex::new(false),
+            queue_worker: AtomicBool::new(false),
         });
         keep_awake_while_busy(Arc::downgrade(&eng));
         eng
@@ -770,6 +826,13 @@ impl Engine {
     /// Login cookies used for resolving (e.g. chzzk `NID_AUT`/`NID_SES`);
     /// persisted (encrypted with DPAPI on Windows). None clears them.
     pub fn set_cookies(&self, cookies: Option<BTreeMap<String, String>>) -> ApiResult<CookieStatus> {
+        for (k, v) in cookies.iter().flatten() {
+            let name_ok = !k.is_empty() && k.chars().all(|c| c.is_ascii_graphic() && !"()<>@,;:\\\"/[]?={}".contains(c));
+            let value_ok = v.chars().all(|c| c.is_ascii_graphic() && c != ';' && c != ',' && c != '"');
+            if !name_ok || !value_ok {
+                return Err(invalid(format!("cookie {k:?} has characters a Cookie header can't carry")));
+            }
+        }
         let mut jar = self.cookies.lk();
         jar.set(cookies)?;
         Ok(jar.status())
@@ -996,11 +1059,19 @@ fn summarize(projects: Vec<Project>) -> Vec<ProjectSummary> {
 }
 
 impl Engine {
-    pub fn delete(&self, id: &str) -> ApiResult<()> {
+    pub async fn delete(&self, id: &str) -> ApiResult<()> {
+        let lock = self.lock_for(id);
+        let _g = lock.lock().await;
         if self.jobs.lk().values().any(|j| j.info.project_id == id) {
             return Err(ApiError::new("BUSY", "project has running jobs"));
         }
-        Ok(self.store.delete(id)?)
+        let store = self.store.clone();
+        let idc = id.to_string();
+        tokio::task::spawn_blocking(move || store.delete(&idc)).await??;
+        self.frame_index.lk().remove(id);
+        self.sources.lock().await.remove(id);
+        self.locks.lk().remove(id);
+        Ok(())
     }
 
     /// Resolve `input` and create (or reopen) its project. Id = `<platform>-<video id>`.
@@ -1088,9 +1159,7 @@ impl Engine {
     }
 
     pub async fn update_settings(&self, id: &str, settings: Settings) -> ApiResult<Project> {
-        if settings.margin_before < 0.0 || settings.margin_after < 0.0 {
-            return Err(invalid("margins must be ≥ 0"));
-        }
+        validate_settings(&settings)?;
         self.mutate(id, |p| {
             p.settings = settings;
             plan::plan_clips(p);
@@ -1104,6 +1173,7 @@ impl Engine {
     /// `base_revision`: fail with CONFLICT if the project changed since the
     /// client's copy (e.g. a job just added mute suggestions).
     pub async fn set_songs(&self, id: &str, mut songs: Vec<Song>, base_revision: Option<u64>) -> ApiResult<Project> {
+        dedupe_ids(&mut songs);
         for s in songs.iter_mut() {
             validate_song(s)?;
         }
@@ -1180,17 +1250,16 @@ impl Engine {
     /// Add (empty / unknown id) or replace (known id) one mute of a song.
     /// Returns the project and the mute id.
     pub async fn upsert_mute(&self, id: &str, song_id: &str, mut mute: Mute, base_revision: Option<u64>) -> ApiResult<(Project, String)> {
-        let p = self.get(id)?;
-        let known = p.song(song_id).is_some_and(|s| s.mutes.iter().any(|m| m.id == mute.id));
-        if !known {
-            mute.id = String::new();
-        }
-        validate_mute(&mut mute)?;
-        let mid = mute.id.clone();
+        let mut mid = String::new();
         let p = self
             .mutate(id, |p| {
                 check_revision(p, base_revision)?;
                 let s = p.song_mut(song_id).ok_or_else(|| ApiError::new("NOT_FOUND", format!("song {song_id}")))?;
+                if !s.mutes.iter().any(|m| m.id == mute.id) {
+                    mute.id = String::new();
+                }
+                validate_mute(&mut mute)?;
+                mid = mute.id.clone();
                 match s.mutes.iter_mut().find(|m| m.id == mute.id) {
                     Some(m) => *m = mute,
                     None => s.mutes.push(mute),
@@ -1940,8 +2009,12 @@ impl Engine {
         if songs.is_empty() {
             return Err(precondition("no songs to export"));
         }
+        if let Some(c) = &opts.video_codec
+            && !VIDEO_CODECS.contains(&c.as_str()) {
+                return Err(invalid(format!("video_codec must be one of {VIDEO_CODECS:?}")));
+            }
         let no_video = p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local && s.variants.first().is_none_or(|v| v.height == 0));
-        if no_video && opts.format.unwrap_or_default().has_video() && !(opts.stems && !opts.also_render) {
+        if no_video && opts.format.unwrap_or_default().has_video() && (!opts.stems || opts.also_render) {
             return Err(precondition("this recording has no video; export as wav / flac / mp3"));
         }
         for s in &songs {
@@ -1977,11 +2050,19 @@ impl Engine {
                         inner(pr)
                     })
                 };
+                // edits made while earlier songs exported apply to this one
+                // (same clip only: a re-fetched clip has different stems)
+                let latest = eng.get(&p.id).ok();
+                let s = &latest
+                    .as_ref()
+                    .and_then(|q| q.song(&s.id).cloned())
+                    .filter(|x| x.clip_id == s.clip_id && x.enabled)
+                    .unwrap_or_else(|| s.clone());
                 let clip = p.clip(s.clip_id.as_ref().unwrap()).unwrap();
                 let (stems, video) = (clip.stems.clone().unwrap(), clip.video.clone().unwrap());
                 let ct = |t: f64| clip.to_clip_time(t).unwrap();
                 let number = all.iter().position(|x| x.id == s.id).map(|i| i + 1).unwrap_or(k + 1);
-                let name = naming::render_name(&p.settings.filename_template, &p, s, number);
+                let name = naming::limit_len(&naming::render_name(&p.settings.filename_template, &p, s, number));
                 let mutes: Vec<MuteSpan> = s
                     .mutes
                     .iter()
@@ -1999,7 +2080,7 @@ impl Engine {
                         out_t,
                         handles: opts.handles.unwrap_or(3.0).max(0.0),
                         mutes: mutes.clone(),
-                        dir: out_dir.join(format!("{name}_stems")),
+                        dir: naming::unique_dir(&out_dir, &format!("{name}_stems")),
                         name: name.clone(),
                         vod_offset: video.vod_start + clip.offset,
                         reference_video: opts.reference_video,
@@ -2089,14 +2170,19 @@ fn dir_size(d: &Path) -> u64 {
         .sum()
 }
 
-/// Keep at most `keep` newest files in a cache dir.
+/// Keep at most `keep` newest finished windows in a cache dir (in-flight temp
+/// files and windows younger than a few seconds are never touched).
 fn prune_cache(dir: &Path, keep: usize) {
+    let now = std::time::SystemTime::now();
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("window_"))
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
+    let young = files.iter().filter(|(t, _)| now.duration_since(*t).unwrap_or_default() < Duration::from_secs(10)).count();
+    let keep = keep.max(young);
     if files.len() <= keep {
         return;
     }
@@ -2122,3 +2208,7 @@ fn song_metadata(p: &Project, s: &Song) -> Vec<(String, String)> {
     }
     m
 }
+
+#[cfg(test)]
+#[path = "engine_tests.rs"]
+mod tests;

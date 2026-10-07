@@ -23,6 +23,8 @@ use crate::source::{Container, Source};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VideoError {
+    #[error("internal: {0}")]
+    Internal(String),
     #[error(transparent)]
     Net(#[from] NetError),
     #[error("{0}")]
@@ -180,7 +182,7 @@ pub async fn fetch_video(
             ffmpeg::run_cancellable(c, &cancel_c)
         })
         .await
-        .map_err(|e| VideoError::Format(e.to_string()))??;
+        .map_err(|e| VideoError::Internal(e.to_string()))??;
         let _ = tokio::fs::remove_file(&raw).await;
         let bytes = tokio::fs::metadata(out).await?.len();
         let duration = pl.durations[range.first..range.last].iter().sum();

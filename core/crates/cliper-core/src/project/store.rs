@@ -43,7 +43,20 @@ impl Store {
         self.dir(id).join(rel)
     }
 
+    /// Project ids come from the client: only plain names (letters, digits,
+    /// `-`, `_`, `.` not leading), never paths.
+    pub fn valid_id(id: &str) -> bool {
+        !id.is_empty()
+            && id.len() <= 160
+            && !id.starts_with('.')
+            && id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+            && !id.contains("..")
+    }
+
     pub fn create(&self, id: &str, input: &str) -> Result<Project, StoreError> {
+        if !Self::valid_id(id) {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
         std::fs::create_dir_all(self.dir(id))?;
         let p = Project::new(id, input);
         self.save_raw(&p)?;
@@ -51,10 +64,13 @@ impl Store {
     }
 
     pub fn exists(&self, id: &str) -> bool {
-        self.path(id, "project.json").is_file()
+        Self::valid_id(id) && self.path(id, "project.json").is_file()
     }
 
     pub fn load(&self, id: &str) -> Result<Project, StoreError> {
+        if !Self::valid_id(id) {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
         let path = self.path(id, "project.json");
         let b = std::fs::read(&path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => StoreError::NotFound(id.to_string()),
@@ -89,6 +105,9 @@ impl Store {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), StoreError> {
+        if !Self::valid_id(id) {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
         let d = self.dir(id);
         if !d.join("project.json").is_file() {
             return Err(StoreError::NotFound(id.to_string()));

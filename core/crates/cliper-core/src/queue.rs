@@ -128,11 +128,9 @@ impl Engine {
     }
 
     fn ensure_queue_worker(self: &Arc<Self>) {
-        let mut started = self.queue_worker.lk();
-        if *started {
+        if self.queue_worker.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        *started = true;
         let eng = self.clone();
         tokio::spawn(async move {
             loop {

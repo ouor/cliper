@@ -153,27 +153,7 @@ impl Source {
     }
 
     /// Variant index best matching a target height (`None` = highest).
-    /// Load `variants[idx]`'s playlist (+ init) as an audio fallback if its
-/// segmentation matches `primary`.
-pub async fn load_fallback(
-    http: &Http,
-    variant: &Variant,
-    primary: &MediaPlaylist,
-    token_query: Option<&str>,
-) -> Option<AudioFallback> {
-    let text = http.get_text(&variant.url).await.ok()?;
-    let playlist = m3u8::parse_media(&text, &variant.url, token_query);
-    if playlist.segments.len() != primary.segments.len() {
-        return None;
-    }
-    let init = match &playlist.init_url {
-        Some(u) => http.get_bytes(u).await.ok()?,
-        None => Vec::new(),
-    };
-    Some(AudioFallback { playlist, init })
-}
-
-pub fn pick_variant(&self, height: Option<u32>) -> usize {
+    pub fn pick_variant(&self, height: Option<u32>) -> usize {
         pick_variant(&self.info.variants, height)
     }
 }

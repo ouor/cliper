@@ -346,7 +346,13 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
 
     let mut used = if video { spec.video_codec.clone() } else { String::new() };
     let mut res = run_with_progress(build(&used), dur, progress, cancel);
-    if res.is_err() && used == "h264_nvenc" && !cancel.is_cancelled() {
+    // fall back to x264 only when NVENC itself failed (no NVIDIA GPU / driver),
+    // not for input errors that would fail again
+    let nvenc_problem = |e: &ExportError| {
+        let m = e.to_string().to_ascii_lowercase();
+        ["nvenc", "cuda", "nvcuda", "no capable devices", "openencodesession", "encoder", "device"].iter().any(|k| m.contains(k))
+    };
+    if used == "h264_nvenc" && res.as_ref().is_err_and(nvenc_problem) && !cancel.is_cancelled() {
         tracing::warn!("h264_nvenc failed, retrying with libx264: {:?}", res.as_ref().err());
         used = "libx264".into();
         res = run_with_progress(build(&used), dur, progress, cancel);
@@ -455,10 +461,8 @@ pub fn export_stems(spec: &StemsSpec, progress: &ProgressFn) -> Result<StemsResu
     let len = b - a;
     let mut rpp = String::from("<REAPER_PROJECT 0.1 \"7.0\"\n  SAMPLERATE ");
     rpp.push_str(&format!("{rate} 0 0\n"));
-    let mut idx = 1;
-    for (n, s, e) in &marks {
+    for (idx, (n, s, e)) in (1..).zip(marks.iter()) {
         rpp.push_str(&format!("  MARKER {idx} {s:.6} \"{n}\" 1\n  MARKER {idx} {e:.6} \"\" 1\n"));
-        idx += 1;
     }
     for f in &files {
         let name = f.file_stem().unwrap().to_string_lossy().replace('"', "'");

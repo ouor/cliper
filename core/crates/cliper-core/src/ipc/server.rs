@@ -217,7 +217,7 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         "project.create" => to_json(eng.create(&p::<CreateArg>(&params)?.input).await?),
         "project.get" => to_json(eng.get(&p::<IdArg>(&params)?.id)?),
         "project.delete" => {
-            eng.delete(&p::<IdArg>(&params)?.id)?;
+            eng.delete(&p::<IdArg>(&params)?.id).await?;
             Ok(json!(true))
         }
         "project.update_settings" => {
@@ -354,6 +354,19 @@ pub async fn serve(cfg: EngineConfig) -> anyhow::Result<()> {
         let id = req.get("id").cloned();
         let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
         let params = req.get("params").cloned().unwrap_or(Value::Null);
+        let bad = if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || method.is_empty() {
+            Some(rpc_error(-32600, "invalid request (jsonrpc must be \"2.0\" and method a string)", None))
+        } else if !(params.is_object() || params.is_null()) {
+            Some(rpc_error(-32602, "params must be an object", None))
+        } else {
+            None
+        };
+        if let Some(err) = bad {
+            if let Some(id) = id {
+                let _ = out_tx.send(json!({ "jsonrpc": "2.0", "id": id, "error": err }).to_string());
+            }
+            continue;
+        }
         if method == "engine.shutdown" {
             for j in eng.jobs() {
                 eng.cancel(&j.job_id);
