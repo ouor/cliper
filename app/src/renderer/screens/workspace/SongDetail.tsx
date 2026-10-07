@@ -51,12 +51,16 @@ export function TimeField({ value, onCommit, label }: { value: number; onCommit:
   );
 }
 
+let handledFocus = 0;
+
 export function TextField({ value, placeholder, onCommit, field, className, maxLength }: { value: string; placeholder: string; onCommit: (v: string) => void; field?: "title" | "note"; className?: string; maxLength?: number }) {
   const [text, setText] = useState<string | null>(null);
   const ref = useRef<HTMLInputElement>(null);
   const focus = useWs((s) => s.focus);
   useEffect(() => {
-    if (field && focus.field === field) {
+    // one-shot: a remount (e.g. another song selected) must not steal focus again
+    if (field && focus.field === field && focus.n !== handledFocus) {
+      handledFocus = focus.n;
       ref.current?.focus();
       ref.current?.select();
     }

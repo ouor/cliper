@@ -132,7 +132,7 @@ export class Engine extends EventEmitter {
         }
       } else if (typeof msg.method === "string") {
         if (msg.method === "engine.ready") {
-          this.setStatus({ state: "ready", system: msg.params?.system ?? null, reason: undefined, detail: undefined });
+          this.setStatus({ state: "ready", system: msg.params?.system ?? null, protocol: msg.params?.protocol, reason: undefined, detail: undefined });
         }
         this.emit("notify", msg.method, msg.params);
       }

@@ -2,22 +2,9 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, Cpu, FolderOpen, Gauge, Mic2, ShieldCheck } from "lucide-react";
 import { updateSettings, useApp } from "@/state/app";
+import { call } from "@/lib/rpc";
 import { fmtBytes } from "@/lib/format";
 import type { DriveInfo } from "../../shared/bridge";
-
-export function gpuName(): string | null {
-  try {
-    const c = document.createElement("canvas");
-    const gl = c.getContext("webgl");
-    const ext = gl?.getExtension("WEBGL_debug_renderer_info");
-    const r = ext ? String(gl!.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : "";
-    // "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)"
-    const m = /ANGLE \([^,]+,\s*([^,]+?)(?:\s+\(0x[0-9a-f]+\))?\s+Direct3D/i.exec(r) ?? /ANGLE \([^,]+,\s*([^,]+),/.exec(r);
-    return (m?.[1] ?? r) || null;
-  } catch {
-    return null;
-  }
-}
 
 export function FirstRun() {
   const settings = useApp((s) => s.settings);
@@ -27,7 +14,8 @@ export function FirstRun() {
   const [folder, setFolder] = useState(settings.projectsRoot ?? "");
   const [drives, setDrives] = useState<DriveInfo[]>([]);
   const [check, setCheck] = useState<{ ok: boolean; free: number; reason?: string } | null>(null);
-  const [gpu] = useState(gpuName);
+  const [probing, setProbing] = useState(false);
+  const [probed, setProbed] = useState(false);
 
   useEffect(() => {
     void window.cliper.drives().then((d) => {
@@ -49,8 +37,20 @@ export function FirstRun() {
   const drive = drives.find((d) => folder.toUpperCase().startsWith(d.path.toUpperCase()));
   const cLow = drive?.path.toUpperCase().startsWith("C") && drive.free < 50e9;
   const better = [...drives].sort((a, b) => b.free - a.free)[0];
-  const nvidia = !!gpu && /nvidia/i.test(gpu);
-  const cuda = !!system && system.cuda_dirs.length > 0 && !system.prefer_cpu;
+  const gpu = system?.gpu ?? null;
+
+  // PC 확인: start the CUDA provider once (a few seconds) so the answer is real
+  useEffect(() => {
+    if (step !== 1 || engine.state !== "ready" || probed || probing) return;
+    setProbing(true);
+    call("system.probe_gpu", {})
+      .then((info) => useApp.setState({ system: info }))
+      .catch(() => {})
+      .finally(() => {
+        setProbing(false);
+        setProbed(true);
+      });
+  }, [step, engine.state, probed, probing]);
 
   const next = async () => {
     if (step === 0) {
@@ -132,19 +132,31 @@ export function FirstRun() {
             <div className="pc-check">
               <Cpu size={18} />
               <div className="grow">
-                <div className="pc-gpu">{gpu ?? "그래픽카드 정보를 읽지 못했어요"}</div>
+                <div className="pc-gpu">{gpu ? `${gpu.name}${gpu.vram_mb ? ` · ${Math.round(gpu.vram_mb / 1024)}GB` : ""}` : system ? "NVIDIA 그래픽카드를 찾지 못했어요" : "그래픽카드 확인 중…"}</div>
                 {engine.state !== "ready" ? (
                   <div className="row faint">
                     <div className="spinner" /> 처리 엔진을 준비하는 중…
                   </div>
-                ) : nvidia && cuda ? (
+                ) : probing || (gpu && gpu.cuda_ok === null) ? (
+                  <div className="row faint">
+                    <div className="spinner" /> 그래픽카드로 처리할 수 있는지 확인하는 중… (몇 초)
+                  </div>
+                ) : gpu?.cuda_ok && !system?.prefer_cpu ? (
                   <div className="ok-line">
                     <Gauge size={14} /> 멘트 지우기가 빠르게 돌아가요 (5분 곡 약 8초).
                   </div>
                 ) : (
                   <div className="banner warn" style={{ marginTop: 8 }}>
                     <AlertTriangle size={15} />
-                    <span>멘트 지우기가 느릴 수 있어요. 곡 찾기와 영상 받기는 문제없어요. 멘트 지우기는 밤에 돌려 두는 걸 추천해요.</span>
+                    <div>
+                      <span>멘트 지우기가 느릴 수 있어요. 곡 찾기와 영상 받기는 문제없어요. 멘트 지우기는 밤에 돌려 두는 걸 추천해요.</span>
+                      {gpu?.reason && (
+                        <details>
+                          <summary>자세히</summary>
+                          <pre className="detail">{gpu.reason}</pre>
+                        </details>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

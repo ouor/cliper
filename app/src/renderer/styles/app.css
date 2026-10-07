@@ -2238,3 +2238,27 @@
 .scope.active .scope-canvas {
   border-color: var(--accent-line);
 }
+
+.song-fades {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 0;
+  font-size: var(--fs-xs);
+}
+.song-fades .ms-field .input {
+  width: 48px;
+}
+
+.track-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+}
+.track-pick .select {
+  max-width: 260px;
+}
+.cookie-status {
+  align-items: center;
+}

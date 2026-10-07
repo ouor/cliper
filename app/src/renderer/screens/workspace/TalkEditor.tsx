@@ -6,7 +6,7 @@ import type { Song } from "@ipc/generated/Song";
 import type { Mute } from "@ipc/generated/Mute";
 import { useWs } from "@/state/ws";
 import { useApp } from "@/state/app";
-import { projectUi, setProjectUi, useProjects, editSong } from "@/state/projects";
+import { projectUi, setProjectUi, editSong } from "@/state/projects";
 import { songProgress, useJobs } from "@/state/jobs";
 import { player, usePlayer, LISTEN_KEY, LISTEN_LABEL, type ListenMode } from "@/audio/player";
 import { clipCovered, hostClip, muteOutsideClip, mutePosition, singOverlap, songNumbers, songTitle, unconfirmedMutes, videoState } from "@/lib/song";
@@ -69,6 +69,35 @@ function MsField({ value, onCommit, label }: { value: number; onCommit: (v: numb
   );
 }
 
+/** Song fade (seconds, null = project default) edited in seconds with one decimal. */
+function SongFadeField({ label, value, fallback, onCommit }: { label: string; value: number | null; fallback: number; onCommit: (v: number | null) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  return (
+    <label className="ms-field" data-tip={`비우면 작업 기본값 (${fallback}초)`} data-tip-pos="top">
+      <span className="faint">{label}</span>
+      <input
+        className="input sm mono"
+        placeholder={String(fallback)}
+        value={text ?? (value === null ? "" : String(value))}
+        onFocus={() => setText(value === null ? "" : String(value))}
+        onChange={(e) => setText(e.target.value.replace(/[^\d.]/g, ""))}
+        onBlur={() => {
+          if (text !== null) {
+            const v = text.trim() === "" ? null : Math.max(0.01, Math.min(5, Number(text)));
+            if (v === null || Number.isFinite(v)) if (v !== value) onCommit(v);
+          }
+          setText(null);
+        }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+      />
+      <span className="faint">초</span>
+    </label>
+  );
+}
+
 function MuteRow({ p, s, m, selected, warn }: { p: Project; s: Song; m: Mute; selected: boolean; warn: string[] }) {
   return (
     <button className={`mute-row${selected ? " selected" : ""}${m.confirmed ? " confirmed" : " suggested"}`} onClick={() => selectMuteAndLoop(m, usePlayer.getState().playing)}>
@@ -101,12 +130,11 @@ export function TalkEditor({ p }: { p: Project }) {
   const stems = usePlayer((s) => s.stems);
   const playing = usePlayer((s) => s.playing);
   const jobs = useJobs();
-  const ui = useProjects((s) => s.ui[p.id]) ?? projectUi(p.id);
   const { probs } = useMapData(p);
   const s = p.songs.find((x) => x.id === ws.selected);
   const clip = s ? hostClip(p, s) : null;
   const vs = s ? videoState(p, s) : "none";
-  const muteOn = s ? !ui.muteOff.includes(s.id) : true;
+  const muteOn = s ? s.mute_enabled : true;
   const [peaks, setPeaks] = useState<{ orig: Peaks | null; voc: Peaks | null }>({ orig: null, voc: null });
   const videoRef = useRef<HTMLVideoElement>(null);
   const [notesOpen, setNotesOpen] = useState(false);
@@ -299,10 +327,18 @@ export function TalkEditor({ p }: { p: Project }) {
             </button>
           </div>
           <label className="mute-toggle">
-            <input type="checkbox" className="switch" checked={muteOn} onChange={(e) => setProjectUi(p.id, { muteOff: e.target.checked ? ui.muteOff.filter((x) => x !== s.id) : [...ui.muteOff, s.id] })} />
+            <input type="checkbox" className="switch" checked={muteOn} onChange={(e) => {
+                const on = e.target.checked;
+                void editSong(p.id, s.id, on ? "멘트 지우기 켜기" : "멘트 지우기 끄기", (x) => void (x.mute_enabled = on));
+              }} />
             <span className="grow">멘트 지우기 사용</span>
             <span className="faint">{muteOn ? "확인한 구간만 내보내요" : "원본 소리로 내보내요"}</span>
           </label>
+          <div className="song-fades">
+            <span className="faint">곡 페이드</span>
+            <SongFadeField label="인" value={s.fade_in} fallback={p.settings.song_fade_in} onCommit={(v) => void editSong(p.id, s.id, "곡 페이드 인", (x) => void (x.fade_in = v))} />
+            <SongFadeField label="아웃" value={s.fade_out} fallback={p.settings.song_fade_out} onCommit={(v) => void editSong(p.id, s.id, "곡 페이드 아웃", (x) => void (x.fade_out = v))} />
+          </div>
           <div className="mp-list">
             {mutes.length === 0 && <div className="mp-empty">멘트가 겹친 부분을 찾지 못했어요. 필요하면 목소리 줄을 드래그해서 직접 추가하세요.</div>}
             {mutes.map((m) => (

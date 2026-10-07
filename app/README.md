@@ -32,7 +32,7 @@ npm run typecheck  # main/preload + renderer 타입 검사
 | `CLIPER_PROJECTS` | 작업 폴더(엔진 `--projects`)를 강제로 지정 |
 | `CLIPER_SKIP_FIRST_RUN=1` | `CLIPER_PROJECTS`와 함께 쓰면 첫 실행 마법사를 건너뜀 |
 | `CLIPER_USER_DATA` | 앱 설정 폴더(userData)를 바꿈 — 깨끗한 프로필로 시험할 때 |
-| `CLIPER_ENGINE` / `CLIPER_MODELS` / `CLIPER_FFMPEG` | 엔진 exe / 모델 폴더 / ffmpeg 경로 (기본: 저장소의 `core/target/release/cliper.exe`, `models/`, PATH의 `ffmpeg`) |
+| `CLIPER_ENGINE` / `CLIPER_MODELS` | 엔진 exe / 모델 폴더 (기본: 저장소의 `core/target/release/cliper.exe`, `models/`). 앱 자체는 ffmpeg를 직접 부르지 않습니다 |
 
 예: 이미 처리된 프로젝트 폴더로 바로 열기
 
@@ -58,7 +58,7 @@ app/
 │  │  ├─ index.ts               창, IPC 핸들러, 설정/상태 저장(userData), 닫기 확인, 알림
 │  │  ├─ engine.ts              엔진 자식 프로세스: NDJSON JSON-RPC, 요청-응답 매칭, 알림 전달,
 │  │  │                         비정상 종료 시 재시작(2분에 3회까지), stderr 로그(userData/logs/engine.log)
-│  │  └─ media.ts               cliper-media:// 프로토콜 (아래 참고)
+│  │  └─ media.ts               cliper-media:// 프로토콜 (허용 목록 파일만, Range 지원)
 │  ├─ preload/index.ts          contextBridge로 window.cliper 노출 (sandbox, contextIsolation)
 │  └─ renderer/
 │     ├─ App.tsx · main.tsx     부팅, 엔진 상태 배너, 전역 단축키, 오버레이
@@ -84,14 +84,16 @@ app/
 - 빌드 CSP: `script-src 'self'`, `connect-src 'self' cliper-media:` 등. 개발 모드에서만 Vite HMR용 완화.
 - 브리지: 엔진 호출(`call`)과 알림 구독, 설정/작은 상태 저장, 폴더·파일 대화상자, 경로 열기/폴더 표시, 디스크 여유 공간. 임의 파일 읽기는 없고, 쿠키 파일은 **사용자가 대화상자에서 고른 파일만** 1MB 이하로 읽습니다.
 - `cliper-media://project/<프로젝트 id>/<경로>`: 작업 폴더 안의 **허용 목록 파일만**(`overview.peaks`, `probs.bin`, `clips/<id>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks}`) 제공. id는 경로 구분자·예약 문자·`..` 불가, 해석 후 작업 폴더 안인지 다시 확인. Range 요청 지원(영상 탐색).
-- `cliper-media://pcm/<프로젝트 id>?t=&d=`: 곡 검수 미리듣기용으로 방송 전체 오디오의 한 구간(최대 60초)을 f32 PCM으로 디코드. `audio.aac`는 ADTS 프레임 색인으로 정확한 위치를 잘라 ffmpeg에 넘기고(엔진과 교차상관 0ms 일치 확인), 로컬 녹화본 `audio.mka`는 ffmpeg 탐색을 씁니다.
+- 곡 검수 미리듣기(영상 받기 전)는 엔진 `audio.window`가 만든 `cache/window_*.wav`(전체 디코드와 샘플 단위로 같음)를 같은 프로토콜로 6초씩 읽습니다. 허용 목록에 `cache/window_<숫자>.wav`만 추가했습니다.
 
 ### 엔진 연동 요점
 
 - 엔진은 앱 시작 시(작업 폴더가 정해져 있으면) `serve --projects <작업 폴더> --models <models>`로 실행. 작업 폴더나 처리 장치(CPU)를 바꾸면 다시 시작합니다. 처리 우선순위 "낮게"는 OS 프로세스 우선순위로 적용.
-- `project.changed`를 진실의 원천으로 씁니다. 곡 편집은 낙관적으로 즉시 반영하고 `songs.set`으로 보냅니다(새 곡/구간 id는 앱이 만듦). 응답 대기 중 들어온 알림의 곡 목록은 무시하고 마지막 응답으로 맞춥니다.
+- `project.changed`를 진실의 원천으로 씁니다. 곡 편집은 **대기 중 편집(pending op)**으로 화면에 즉시 반영하고(엔진 최신 상태 위에 다시 적용), 순서대로 엔진에 보냅니다. 보낼 때는 편집 전후를 비교해 바뀐 것만 `song.update` / `song.add` / `song.remove` / `mute.upsert` / `mute.remove`로 보내고 모두 `base_revision`을 붙입니다. `CONFLICT`면 최신 상태를 받아 같은 편집을 다시 적용해 재시도합니다. 엔진이 새로 붙인 id(`song.add`, 새 `mute.upsert`)는 별칭으로 기록해 선택 상태와 되돌리기 기록이 따라가게 합니다(`state/projects.ts`).
+- 되돌리기는 그 편집이 건드린 곡만 이전 상태로 되돌립니다. 그사이 작업이 넣은 멘트 제안 같은 다른 변경은 지우지 않습니다.
 - 같은 종류 작업이 돌고 있어 `BUSY`가 오면 앱 대기열에 넣고, 앞 작업이 끝나면 자동으로 시작합니다.
-- 소리 받기 → 곡 찾기, 영상 받기 → 내보내기(밤새 처리) 같은 연결은 앱이 작업 완료 알림으로 이어 줍니다.
+- 소리 받기 → 곡 찾기, 영상 받기 → 내보내기(밤새 처리) 같은 연결은 앱이 작업 완료 알림으로 이어 줍니다. 곡을 정해서 받을 때는 `clips.fetch {song_ids, exact: true}`로 이웃 곡을 함께 받지 않습니다.
+- 진행 표시는 `job.started.items`, `progress.item_index/items_total/eta_sec`, `progress.note.code`(한국어 문장은 앱이 만듦)를 씁니다. 소리 받는 동안은 `progress.peaks_until`에 맞춰 `overview.peaks`를 다시 읽어 파형을 채웁니다.
 - 진행 중 작업 요청은 userData에 기록해 두었다가, 앱이 작업 중에 닫히면 다음 실행 때 "지난번에 멈춘 작업 [이어서 하기]"로 다시 요청합니다.
 
 ## 패키징 (후속 과제)

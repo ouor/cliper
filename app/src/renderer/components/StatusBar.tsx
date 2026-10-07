@@ -9,6 +9,7 @@ export function StatusBar() {
   const root = useApp((s) => s.settings.projectsRoot);
   const route = useApp((s) => s.route);
   const engine = useApp((s) => s.engine.state);
+  const keepAwake = useApp((s) => s.system?.keep_awake ?? true);
   const jobs = useJobs();
   const mode = usePlayer((s) => s.mode);
   const source = usePlayer((s) => s.source);
@@ -58,7 +59,7 @@ export function StatusBar() {
       {route.name === "workspace" && route.mode === "talk" && source === "stems" && (
         <span className={`sb-item listen-pill m${mode}`}>듣는 중: {LISTEN_LABEL[mode]}</span>
       )}
-      {busy && (
+      {busy && keepAwake && (
         <span className="sb-item faint" data-tip="작업이 끝나면 꺼져요" data-tip-pos="top">
           <Moon size={13} /> 절전 방지 켜짐
         </span>

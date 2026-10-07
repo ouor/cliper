@@ -13,6 +13,8 @@ export interface EngineStatus {
   detail?: string;
   restarts: number;
   projectsRoot: string | null;
+  /** engine.ready protocol version */
+  protocol?: number;
 }
 
 export interface RpcFailure {

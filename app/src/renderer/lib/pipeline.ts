@@ -46,7 +46,8 @@ export async function startAnalysis(id: string, fetchAudio: boolean) {
 /** 영상 받기 (+ 나누기 + 멘트 제안) for the given songs. */
 export async function fetchSongs(id: string, songIds: string[], label?: string) {
   if (songIds.length === 0) return;
-  const jobId = await startJob("clips.fetch", { id, song_ids: songIds }, { label: label ?? (songIds.length === 1 ? "이 곡 받기" : `영상 받기 ${songIds.length}곡`) });
+  // exact: only these songs (± margins), not close neighbours that share a merged clip
+  const jobId = await startJob("clips.fetch", { id, song_ids: songIds, exact: true }, { label: label ?? (songIds.length === 1 ? "이 곡 받기" : `영상 받기 ${songIds.length}곡`) });
   if (jobId === null) toast("앞 작업이 끝나면 시작해요.", { kind: "info" });
 }
 
@@ -63,7 +64,7 @@ export async function processAll(id: string, opts: { exportToo: boolean }) {
   }
   await startJob(
     "clips.fetch",
-    { id, song_ids: ids },
+    { id, song_ids: ids, exact: true },
     {
       label: `밤새 처리 · 영상 받기 ${ids.length}곡`,
       then: opts.exportToo

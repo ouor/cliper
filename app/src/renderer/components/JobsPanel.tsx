@@ -57,7 +57,7 @@ function JobRow({ j }: { j: Job }) {
       </div>
       {j.status === "running" && <Progress value={j.fraction} />}
       <div className={`job-sub ${j.status === "failed" ? "err" : ""}`}>{jobProgressText(j)}</div>
-      {j.status === "running" && noteKo(j.message) && <div className="job-sub faint">{noteKo(j.message)}</div>}
+      {j.status === "running" && noteKo(j.note) && <div className="job-sub faint">{noteKo(j.note)}</div>}
       {j.status === "failed" && j.error && (
         <div className="job-fail">
           {j.error.hint && <div className="muted">{j.error.hint}</div>}
@@ -97,6 +97,7 @@ export function JobsPanel() {
   const summaries = useProjects((x) => x.summaries);
   const jobs = s.order.map((id) => s.jobs[id]).filter(Boolean);
   const running = jobs.some((j) => j.status === "running");
+  const keepAwake = useApp((x) => x.system?.keep_awake ?? true);
   const groups = new Map<string, Job[]>();
   for (const j of jobs) groups.set(j.projectId, [...(groups.get(j.projectId) ?? []), j]);
   for (const w of s.waiting) if (!groups.has(w.projectId)) groups.set(w.projectId, []);
@@ -112,7 +113,7 @@ export function JobsPanel() {
           <X size={16} />
         </button>
       </header>
-      {running && (
+      {running && keepAwake && (
         <div className="banner info jobs-sleep">
           <Moon size={15} /> 절전 방지 켜짐 · 작업이 끝나면 꺼져요
         </div>

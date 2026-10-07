@@ -2,7 +2,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Cookie, Copy, Cpu, Download, Film, FolderOpen, Info, Keyboard, Mic2, RotateCcw, Scissors, Search, Settings2, Trash2, Upload, X } from "lucide-react";
 import { useApp, updateSettings, toast, ask, applyTheme, type SettingsTab } from "@/state/app";
-import { useProjects, getProject, loadProject } from "@/state/projects";
+import { useProjects, getProject } from "@/state/projects";
 import { fmtBytes } from "@/lib/format";
 import { KEY_ACTIONS, comboFromEvent, keysFor, prettyKey, SCOPE_LABEL, type KeyScope } from "@/lib/keys";
 import { DESC_VARS, SENSITIVITY_LABEL, renderDescription } from "@/lib/song";
@@ -11,7 +11,6 @@ import { call } from "@/lib/rpc";
 import { player } from "@/audio/player";
 import { DEFAULT_SETTINGS } from "../../shared/settings";
 import { friendly } from "@/lib/errors";
-import { gpuName } from "./FirstRun";
 
 const TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
   { id: "general", label: "일반", icon: <Settings2 size={15} /> },
@@ -159,11 +158,9 @@ function CacheSection() {
     });
     if (r !== "ok") return;
     try {
-      const p = getProject(id) ?? (await loadProject(id));
-      // clip.extend with the same range drops the clip's video and stems
-      for (const c of p.clips) if (c.video || c.stems) await call("clip.extend", { id, clip_id: c.id, start: c.start, end: c.end });
+      const r = await call("project.drop_media", { id });
       setSizes((x) => ({ ...x, [id]: { total: x[id].total - x[id].clips, clips: 0 } }));
-      toast("받은 영상을 지웠어요.", { kind: "ok" });
+      toast(`받은 영상을 지웠어요 (${fmtBytes(r.freed_bytes)} 확보). 곡 목록과 편집은 그대로예요.`, { kind: "ok" });
     } catch (e) {
       toast(friendly(e).title, { kind: "error" });
     }
@@ -228,7 +225,7 @@ export function SettingsScreen() {
       `ffmpeg: ${system?.ffmpeg ?? "없음"}`,
       `models: ${system ? Object.entries(system.models).map(([k, v]) => `${k}=${v ? "ok" : "missing"}`).join(", ") : "?"}`,
       `cuda: ${system?.cuda_dirs.join("; ") || "없음"} · prefer_cpu ${system?.prefer_cpu}`,
-      `gpu: ${gpuName() ?? "?"}`,
+      `gpu: ${system?.gpu ? `${system.gpu.name} ${system.gpu.vram_mb}MB cuda_ok=${system.gpu.cuda_ok} ${system.gpu.reason ?? ""}` : "없음"} · keep_awake ${system?.keep_awake}`,
       `projects: ${st.projectsRoot}`,
     ].join("\n");
 
@@ -266,8 +263,18 @@ export function SettingsScreen() {
                     </button>
                   </span>
                 </Row>
-                <Row label="작업 중 절전 방지" hint="처리 엔진이 작업하는 동안 항상 PC가 잠들지 않게 해요. 작업이 끝나면 자동으로 풀려요.">
-                  <span className="tag ok">항상 켬</span>
+                <Row label="작업 중 절전 방지" hint="처리 엔진이 작업하는 동안 PC가 잠들지 않게 해요. 작업이 끝나면 자동으로 풀려요.">
+                  <Toggle
+                    checked={system?.keep_awake ?? true}
+                    onChange={async (v) => {
+                      try {
+                        await call("system.set_keep_awake", { enabled: v });
+                        useApp.setState({ system: await call("system.info", {}) });
+                      } catch (e) {
+                        toast(friendly(e).title, { kind: "error" });
+                      }
+                    }}
+                  />
                 </Row>
                 <Row label="완료 알림" hint="앱을 보고 있지 않을 때 Windows 알림으로 알려 줘요.">
                   <Toggle checked={st.notifications} onChange={(v) => set({ notifications: v })} />
@@ -439,7 +446,7 @@ export function SettingsScreen() {
               <>
                 <Row label="로그인 쿠키" hint="구독자 전용이나 비공개 다시보기를 받을 때만 필요해요.">
                   <span className="row">
-                    <span className={`tag ${st.cookies ? "ok" : ""}`}>{st.cookies ? "설정됨" : "없음"}</span>
+                    <span className={`tag ${system?.cookies.set ? (system.cookies.valid === false ? "danger" : "ok") : ""}`}>{system?.cookies.set ? (system.cookies.valid === false ? "만료됨" : "설정됨") : "없음"}</span>
                     <button className="btn sm subtle" onClick={() => useApp.setState({ overlay: "cookies" })}>
                       <Cookie size={13} /> 설정…
                     </button>
@@ -509,7 +516,7 @@ export function SettingsScreen() {
                       <Film size={13} /> 목소리 분리: MDX-Net (UVR-MDX-NET-Voc_FT) · 곡 찾기: PANNs
                     </div>
                     <div>
-                      <Cpu size={13} /> {gpuName() ?? "그래픽카드 정보 없음"} · CUDA {system?.cuda_dirs.length ? "사용 가능" : "없음"}
+                      <Cpu size={13} /> {system?.gpu?.name ?? "NVIDIA 그래픽카드 없음"} · {system?.gpu?.cuda_ok === true ? "GPU로 처리" : system?.gpu?.cuda_ok === false ? `GPU 사용 불가${system.gpu.reason ? ` (${system.gpu.reason})` : ""}` : "GPU 사용 여부는 첫 처리 때 확인"}
                       {system?.prefer_cpu ? " (CPU 사용 중)" : ""}
                     </div>
                     <div className="faint">ffmpeg: {system?.ffmpeg?.split(" Copyright")[0] ?? "없음"}</div>

@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import type { Method, ParamsOf } from "@ipc/protocol";
 import type { Progress } from "@ipc/generated/Progress";
+import type { Note } from "@ipc/generated/Note";
 import type { QueueEntry } from "@ipc/generated/QueueEntry";
 import type { ApiError } from "@ipc/generated/ApiError";
 import { call, EngineError, onNotification } from "@/lib/rpc";
@@ -36,29 +37,36 @@ export const STAGE_LABEL: Record<string, string> = {
   "export.stems": "편집기용 파일 만드는 중",
 };
 
-const NOTE_KO: [RegExp, string | ((m: RegExpExecArray) => string)][] = [
-  [/^copying the audio track/i, "녹화 파일에서 소리를 꺼내는 중"],
-  [/^cutting the recording/i, "녹화 파일에서 곡 부분을 자르는 중"],
-  [/^finding talk/i, "목소리에서 멘트를 찾는 중"],
-  [/^rendering audio/i, "소리 만드는 중"],
-  [/^measuring loudness/i, "소리 크기 재는 중"],
-  [/^writing stems/i, "편집기용 WAV 쓰는 중"],
-  [/^writing reference video/i, "참조용 영상 만드는 중"],
-  [/^remuxing/i, "영상 정리 중"],
-  [/^decoding/i, "소리 푸는 중"],
-  [/segment/i, "일부 구간은 다른 화질의 소리로 채웠어요"],
-  [/^clip (\d+)\/(\d+)$/i, (m) => `구간 ${m[1]}/${m[2]}`],
-  [/^song (\d+)\/(\d+)$/i, (m) => `곡 ${m[1]}/${m[2]}`],
-];
-
-/** Engine progress notes are English; show Korean (unknown English notes are hidden). */
-export function noteKo(msg?: string): string | undefined {
-  if (!msg) return undefined;
-  for (const [re, out] of NOTE_KO) {
-    const m = re.exec(msg);
-    if (m) return typeof out === "string" ? out : out(m);
+/** Progress notes by code (docs/ipc.md); unknown codes are ignored. */
+export function noteKo(note?: Note | null): string | undefined {
+  if (!note) return undefined;
+  const args = note.args ?? {};
+  switch (note.code) {
+    case "copy_audio_track":
+      return "녹화 파일에서 소리를 꺼내는 중";
+    case "cut_recording":
+      return "녹화 파일에서 곡 부분을 자르는 중";
+    case "find_talk":
+      return "목소리에서 멘트를 찾는 중";
+    case "fallback_segments":
+      return `일부 구간(${args.count ?? "몇"}개)은 다른 화질의 소리로 채웠어요`;
+    case "variant_truncated":
+      return `${args.resolution ?? "고른"} 화질 영상이 서버에서 깨져 있어 다른 화질로 받았어요`;
+    case "remux":
+      return "영상 정리 중";
+    case "render_audio":
+      return "소리 만드는 중";
+    case "measure_loudness":
+      return "소리 크기 재는 중";
+    case "write_stems":
+      return "편집기용 WAV 쓰는 중";
+    case "write_reference_video":
+      return "참조용 영상 만드는 중";
+    case "decode":
+      return "소리 푸는 중";
+    default:
+      return undefined;
   }
-  return /[가-힣]/.test(msg) ? msg : undefined;
 }
 
 const CLIP_STAGE_WEIGHT: Record<string, [number, number]> = {
@@ -86,7 +94,10 @@ export interface Job {
   total: number;
   message?: string;
   item?: string;
-  /** items (clip ids / song ids) of this job, in request order when known */
+  note?: Note;
+  /** audio.fetch: overview.peaks covers [0, peaksUntil) */
+  peaksUntil?: number;
+  /** items (clip ids / song ids) of this job in processing order (job.started) */
   items: string[];
   itemsDone: string[];
   fraction: number | null;
@@ -123,25 +134,6 @@ type Then = (result: unknown) => void;
 const thens = new Map<string, Then>();
 const pendingThen = new Map<string, Then>(); // waiting key → then
 
-function itemsFor(method: string, params: any): string[] {
-  const p = getProject(params?.id);
-  if (!p) return [];
-  if (method === "clips.fetch") {
-    if (params.clip_ids?.length) return params.clip_ids;
-    if (params.song_ids?.length) {
-      const ids: string[] = [];
-      for (const s of p.songs) if (params.song_ids.includes(s.id) && s.clip_id && !ids.includes(s.clip_id)) ids.push(s.clip_id);
-      return ids.length ? ids : params.song_ids;
-    }
-    return p.clips.filter((c) => !c.video || !c.stems).map((c) => c.id);
-  }
-  if (method === "export.run") {
-    if (params.song_ids?.length) return params.song_ids;
-    return p.songs.filter((s) => s.enabled).sort((a, b) => a.start - b.start).map((s) => s.id);
-  }
-  return [];
-}
-
 function upsert(id: string, patch: Partial<Job> & { kind?: string; projectId?: string }) {
   useJobs.setState((s) => {
     const cur = s.jobs[id];
@@ -172,11 +164,11 @@ function computeFraction(j: Job, pr: Progress): number | null {
   const stageFrac = pr.total > 0 ? Math.min(1, pr.done / pr.total) : null;
   if (j.kind === "audio.fetch" || j.kind === "detect.run") return stageFrac;
   const table = j.kind === "clips.fetch" ? CLIP_STAGE_WEIGHT : j.kind === "export.run" ? EXPORT_STAGE_WEIGHT : null;
+  const n = Math.max(1, pr.items_total ?? j.items.length);
   if (!table) return stageFrac;
-  const n = Math.max(1, j.items.length);
   const [off, w] = table[pr.stage] ?? [0, 0];
   const inItem = off + w * (stageFrac ?? 0);
-  return Math.min(0.999, (j.itemsDone.length + inItem) / n);
+  return Math.min(0.999, ((pr.item_index ?? j.itemsDone.length) + inItem) / n);
 }
 
 function onProgress(jobId: string, kind: string, projectId: string, pr: Progress) {
@@ -187,30 +179,34 @@ function onProgress(jobId: string, kind: string, projectId: string, pr: Progress
     j = useJobs.getState().jobs[jobId];
   }
   const now = Date.now();
-  let itemsDone = j.itemsDone;
   let items = j.items;
-  if (pr.item && pr.item !== j.item) {
-    if (j.item && !itemsDone.includes(j.item)) itemsDone = [...itemsDone, j.item];
-    if (!items.includes(pr.item)) items = [...items, pr.item];
-  }
-  const tmp = { ...j, items, itemsDone };
-  const fraction = computeFraction(tmp, pr);
-  const changed = fraction !== j.fraction || pr.stage !== j.stage || pr.done !== j.done;
+  if (pr.item && !items.includes(pr.item)) items = [...items, pr.item];
+  // items before item_index are finished (engine order = job.started items)
+  const idx = pr.item_index ?? (pr.item ? items.indexOf(pr.item) : j.itemsDone.length);
+  const itemsDone = idx > 0 ? items.slice(0, idx) : j.itemsDone;
+  const fraction = computeFraction({ ...j, items, itemsDone }, pr);
+  const changed = fraction !== j.fraction || pr.stage !== j.stage || pr.done !== j.done || pr.note?.code !== j.note?.code;
   const samples = fraction !== null ? [...j.samples.filter(([t]) => now - t < 20000), [now, fraction] as [number, number]] : j.samples;
-  let eta: number | null = null;
-  if (fraction !== null && now - j.startedAt > 5000 && samples.length > 2) {
+  let eta: number | null = j.eta;
+  const singleStage = kind === "audio.fetch" || kind === "detect.run" || (pr.items_total ?? items.length) <= 1;
+  if (singleStage && typeof pr.eta_sec === "number" && kind !== "clips.fetch" && kind !== "export.run") {
+    // the engine's estimate covers the current stage = the whole job here
+    eta = pr.eta_sec;
+  } else if (fraction !== null && now - j.startedAt > 5000 && samples.length > 2) {
     const [t0, f0] = samples[0];
     const rate = (fraction - f0) / ((now - t0) / 1000);
     if (rate > 1e-5) {
       const raw = (1 - fraction) / rate;
       eta = j.eta === null ? raw : j.eta * 0.8 + raw * 0.2;
-    } else eta = j.eta;
+    }
   }
   upsert(jobId, {
     stage: pr.stage,
     done: pr.done,
     total: pr.total,
     message: pr.message,
+    note: pr.note ?? (pr.stage !== j.stage ? undefined : j.note),
+    peaksUntil: pr.peaks_until ?? j.peaksUntil,
     item: pr.item ?? j.item,
     items,
     itemsDone,
@@ -240,7 +236,7 @@ async function notifyDone(j: Job, ok: boolean) {
 
 export function wireJobs() {
   onNotification("job.started", (p) => {
-    upsert(p.job_id, { kind: p.kind, projectId: p.project_id, status: "running" });
+    upsert(p.job_id, { kind: p.kind, projectId: p.project_id, status: "running", items: p.items ?? [] });
   });
   onNotification("job.progress", (p) => onProgress(p.job_id, p.kind, p.project_id, p.progress));
   onNotification("job.done", (p) => {
@@ -345,13 +341,10 @@ export async function startJob<M extends JobMethod>(method: M, params: ParamsOf<
   const projectId = (params as { id: string }).id;
   try {
     const { job_id } = (await call(method, params)) as { job_id: string };
-    const items = itemsFor(method, params);
-    const cur = useJobs.getState().jobs[job_id];
     upsert(job_id, {
       kind: method,
       projectId,
       request: { method, params, label: opts.label },
-      items: cur?.items.length ? [...new Set([...items, ...cur.items])] : items,
     });
     if (opts.then) {
       // the job may already be done (very fast jobs)
@@ -411,7 +404,8 @@ export function songProgress(s: JobsStore, projectId: string): Map<string, { lab
   for (const j of runningJobs(s, projectId)) {
     if (j.kind === "clips.fetch") {
       for (const clipId of j.items) {
-        const songs = p.songs.filter((x) => x.clip_id === clipId || x.id === clipId);
+        const ids = p.clips.find((c) => c.id === clipId)?.song_ids ?? [];
+        const songs = p.songs.filter((x) => ids.includes(x.id) || x.clip_id === clipId || x.id === clipId);
         const isCur = j.item === clipId;
         const isDone = j.itemsDone.includes(clipId);
         if (isDone) continue;

@@ -96,8 +96,8 @@ export function ExportView({ p }: { p: Project }) {
   const totalDur = selected.reduce((n, s) => n + (s.end - s.start), 0);
   const estBytes = preset === "audio" ? totalDur * (format === "wav" ? 384000 : format === "flac" ? 200000 : 40000) : preset === "editor" ? totalDur * 384000 * 4 : totalDur * ((p.source?.variants[0]?.bandwidth || 8e6) / 8);
   const estSec = preset === "fast" ? selected.length * 4 : preset === "audio" ? selected.length * 3 : preset === "editor" ? selected.length * 8 : totalDur * 0.15;
-  const unconfSongs = selected.filter((s) => !ui.muteOff.includes(s.id) && unconfirmedMutes(s) > 0);
-  const notListened = selected.filter((s) => !ui.muteOff.includes(s.id) && s.mutes.some((m) => m.confirmed) && !ui.listened.includes(s.id));
+  const unconfSongs = selected.filter((s) => s.mute_enabled && unconfirmedMutes(s) > 0);
+  const notListened = selected.filter((s) => s.mute_enabled && s.mutes.some((m) => m.confirmed) && !ui.listened.includes(s.id));
   const reexport = selected.filter((s) => s.export);
   const diskShort = free !== null && estBytes > free * 0.95;
 
@@ -122,8 +122,8 @@ export function ExportView({ p }: { p: Project }) {
     const overrides: Record<string, string> = {};
     for (const s of selected) {
       const clip = hostClip(p, s);
-      const off = preset === "archive" || ui.muteOff.includes(s.id);
-      if (off && clip?.stems && preset !== "editor") overrides[s.id] = clip.stems.orig;
+      // 아카이브: this run only, without touching the songs' own switches (no export option yet)
+      if (preset === "archive" && clip?.stems) overrides[s.id] = clip.stems.orig;
     }
     const opts: Partial<ExportOptions> = {
       song_ids: ids,
@@ -199,7 +199,7 @@ export function ExportView({ p }: { p: Project }) {
           {songs.map((s) => {
             const vs = videoState(p, s);
             const unconf = unconfirmedMutes(s);
-            const off = ui.muteOff.includes(s.id);
+            const off = !s.mute_enabled;
             const pr = prog.get(s.id);
             const n = nums.get(s.id);
             return (

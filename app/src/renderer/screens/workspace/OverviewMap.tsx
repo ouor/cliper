@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListMusic, Maximize2, SlidersHorizontal, ZoomIn, ZoomOut } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import { begin, colors, drawCurve, drawGrid, drawRuler, drawWave, hatch, panView, roundRect, useCanvasSize, useThemeVersion, zoomView } from "@/canvas/draw";
-import { loadPeaks, loadProbs, mediaUrl, type Peaks, type Probs } from "@/lib/peaks";
+import { invalidateMedia, loadPeaks, loadProbs, mediaUrl, type Peaks, type Probs } from "@/lib/peaks";
 import { clipCovered, reviewStatus, songNumbers, songTitle, videoState } from "@/lib/song";
 import { useWs } from "@/state/ws";
 import { useApp, updateSettings } from "@/state/app";
@@ -27,19 +27,27 @@ type Drag =
   | { kind: "pan"; x0: number; view: [number, number]; moved: boolean; t: number }
   | { kind: "bar"; songId: string; x0: number; shift: boolean };
 
-export function useMapData(p: Project | undefined) {
+/**
+ * Overview peaks + PANNs curves. While `audio.fetch` runs the engine rewrites overview.peaks every
+ * few seconds and reports `peaks_until`; pass it so the waveform fills in live.
+ */
+export function useMapData(p: Project | undefined, peaksUntil?: number) {
   const [peaks, setPeaks] = useState<Peaks | null>(null);
   const [probs, setProbs] = useState<Probs | null>(null);
-  const key = p ? `${p.id}|${p.detection ? "d" : ""}|${p.audio?.fetched_bytes ?? 0}|${p.audio?.elapsed_sec ?? 0}` : "";
+  const live = peaksUntil !== undefined && !p?.detection ? Math.floor(peaksUntil / 600) : -1;
+  const key = p ? `${p.id}|${p.detection ? "d" : ""}|${p.audio?.fetched_bytes ?? 0}|${p.audio?.elapsed_sec ?? 0}|${live}` : "";
   useEffect(() => {
-    if (!p?.detection) {
+    if (!p || (!p.audio && live < 0)) {
       setPeaks(null);
       setProbs(null);
       return;
     }
     let alive = true;
+    // growing file: drop older parsed copies so memory stays flat
+    if (live >= 0) invalidateMedia(mediaUrl(p.id, "overview.peaks"));
     void loadPeaks(mediaUrl(p.id, "overview.peaks", key)).then((x) => alive && setPeaks(x)).catch(() => {});
-    void loadProbs(mediaUrl(p.id, "probs.bin", key)).then((x) => alive && setProbs(x)).catch(() => {});
+    if (p.detection) void loadProbs(mediaUrl(p.id, "probs.bin", key)).then((x) => alive && setProbs(x)).catch(() => {});
+    else setProbs(null);
     return () => {
       alive = false;
     };
@@ -50,7 +58,6 @@ export function useMapData(p: Project | undefined) {
 
 export function OverviewMap({ p }: { p: Project }) {
   const total = p.audio?.duration || p.source?.duration || 1;
-  const { peaks, probs } = useMapData(p);
   const ws = useWs();
   const lanes = useApp((s) => s.settings.showLanes);
   const showCandidates = useApp((s) => s.settings.showCandidates);
@@ -76,6 +83,7 @@ export function OverviewMap({ p }: { p: Project }) {
 
   const audioJob = runningJobs(jobs, p.id, "audio.fetch")[0];
   const detectJob = runningJobs(jobs, p.id, "detect.run")[0];
+  const { peaks, probs } = useMapData(p, audioJob?.peaksUntil);
 
   // keep the selected song visible
   useEffect(() => {
@@ -132,11 +140,13 @@ export function OverviewMap({ p }: { p: Project }) {
     }
     // waveform
     if (peaks) {
-      drawWave(ctx, peaks, 0, t0, t1, w, yWave + LANE_WAVE / 2, LANE_WAVE / 2 - 2, col.wave, 0.85);
-    } else if (audioJob && audioJob.fraction !== null) {
-      // fills from the left while the audio arrives
-      ctx.fillStyle = col["accent-soft"];
-      ctx.fillRect(0, yWave + 4, xOf(total * audioJob.fraction), LANE_WAVE - 8);
+      // while the audio arrives only [0, peaks_until) is real; the rest of the file is zeros
+      const until = audioJob?.peaksUntil;
+      drawWave(ctx, peaks, 0, t0, t1, w, yWave + LANE_WAVE / 2, LANE_WAVE / 2 - 2, col.wave, 0.85, undefined, until);
+      if (until !== undefined && until < t1) {
+        ctx.fillStyle = col["accent"];
+        ctx.fillRect(Math.max(0, xOf(until)) - 1, yWave + 3, 2, LANE_WAVE - 6);
+      }
     }
     // lane separators
     ctx.strokeStyle = col["line-1"];
@@ -278,7 +288,7 @@ export function OverviewMap({ p }: { p: Project }) {
       ctx.lineWidth = 1;
     }
     drawRuler(ctx, t0, t1, w, yRuler, RULER, col, (t, step) => fmtTime(t, step < 1 ? 1 : 0));
-  }, [p, peaks, probs, view, w, h, dpr, ws.selected, ws.multi, ws.candidate, ws.pendingRange, ws.showExcluded, drag, theme, extraLanes.length, showCandidates, audioJob?.fraction, nums, xOf, yBars, yBand, yProb, yRuler, yWave, total, ref, lanes]);
+  }, [p, peaks, probs, view, w, h, dpr, ws.selected, ws.multi, ws.candidate, ws.pendingRange, ws.showExcluded, drag, theme, extraLanes.length, showCandidates, audioJob?.fraction, audioJob?.peaksUntil, nums, xOf, yBars, yBand, yProb, yRuler, yWave, total, ref, lanes]);
 
   // playhead (no React re-render per frame)
   useEffect(() => {

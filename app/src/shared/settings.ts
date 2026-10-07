@@ -55,7 +55,6 @@ export interface AppSettings {
   // 고급
   device: Device;
   audioSinkId: string;
-  cookies: { platform: "chzzk" | "soop"; savedAt: string } | null;
 }
 
 export const DEFAULT_DESC_TEMPLATE = `{스트리머} - {곡명}
@@ -96,5 +95,4 @@ export const DEFAULT_SETTINGS: AppSettings = {
   keymap: {},
   device: "auto",
   audioSinkId: "",
-  cookies: null,
 };

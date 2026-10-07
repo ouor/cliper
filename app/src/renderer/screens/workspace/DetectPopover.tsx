@@ -13,7 +13,8 @@ export function DetectPopover({ p }: { p: Project }) {
   const [level, setLevel] = useState(sensitivityFromParams(p.detection?.params));
   const [minSec, setMinSec] = useState(p.detection?.params.min_song_sec ?? settings.minSongSec);
   const [busy, setBusy] = useState(false);
-  const kept = p.songs.filter((s) => s.origin === "manual" || s.reviewed || !s.enabled || s.title || s.note || s.mutes.length || s.clip_id && p.clips.find((c) => c.id === s.clip_id)?.video).length;
+  // the engine's "touched" rule (docs/ipc.md): these survive a rerun
+  const kept = p.songs.filter((s) => s.origin === "manual" || s.reviewed || !s.enabled || s.title || s.artist || s.note || s.mutes.length || !s.mute_enabled || s.fade_in !== null || s.fade_out !== null || s.export || (s.clip_id && p.clips.find((c) => c.id === s.clip_id)?.video)).length;
 
   const run = async () => {
     setBusy(true);
@@ -24,10 +25,12 @@ export function DetectPopover({ p }: { p: Project }) {
       const res = await call("detect.rerun", { id: p.id, params });
       void updateSettings({ sensitivity: level, minSongSec: minSec });
       const beforeIds = new Set(before.map((s) => s.id));
-      const added = res.songs.filter((s) => !beforeIds.has(s.id) && s.enabled);
-      const removed = before.filter((s) => !res.songs.some((x) => x.id === s.id)).length;
-      useWs.setState({ detectOpen: false });
-      const parts = [added.length ? `곡 ${added.length}개가 새로 찾아졌어요` : "새로 찾은 곡은 없어요", removed ? `${removed}개는 빠졌어요` : "", kept ? `직접 고친 곡 ${kept}개는 그대로예요` : ""].filter(Boolean);
+      const n0 = before.filter((s) => s.enabled).length;
+      const n1 = res.songs.filter((s) => s.enabled).length;
+      const keptN = res.songs.filter((s) => beforeIds.has(s.id)).length;
+      const ws = useWs.getState();
+      useWs.setState({ detectOpen: false, selected: ws.selected && res.songs.some((s) => s.id === ws.selected) ? ws.selected : null });
+      const parts = [n0 === n1 ? `곡 ${n1}개로 다시 찾았어요` : `곡 ${n0}개 → ${n1}개로 다시 찾았어요`, keptN ? `손댄 곡 ${keptN}개는 그대로예요` : ""].filter(Boolean);
       toast(parts.join(". ") + ".", {
         kind: "ok",
         action: {
@@ -56,7 +59,7 @@ export function DetectPopover({ p }: { p: Project }) {
         <input className="input sm" type="number" min={15} max={180} step={5} value={minSec} onChange={(e) => setMinSec(Number(e.target.value) || 45)} style={{ width: 70 }} />
         <span className="faint">초</span>
       </div>
-      <div className="hint">다시 찾기는 몇 초면 끝나요. 확인했거나 직접 고친 곡, 제외한 곡은 그대로 유지돼요.</div>
+      <div className="hint">다시 찾기는 몇 초면 끝나요. 확인했거나 직접 고친 곡, 제외한 곡, 영상을 받은 곡{kept ? ` (지금 ${kept}개)` : ""}은 그대로 유지되고, 나머지 자동 곡은 새 기준으로 바뀌어요.</div>
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 4 }}>
         <button className="btn sm ghost" onClick={() => useWs.setState({ detectOpen: false })}>
           닫기

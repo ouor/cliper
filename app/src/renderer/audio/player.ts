@@ -6,6 +6,7 @@ import workletUrl from "./player.worklet.ts?worker&url";
 export const WORKLET_URL = new URL(workletUrl, location.href).href;
 import type { Mute } from "@ipc/generated/Mute";
 import { mediaUrl } from "@/lib/peaks";
+import { call } from "@/lib/rpc";
 
 export type ListenMode = 0 | 1 | 2 | 3; // 원본 / 결과 / 지운 목소리 / 반주
 export const LISTEN_LABEL = ["원본", "결과", "지운 목소리", "반주"] as const;
@@ -188,17 +189,25 @@ class Player {
     }
   }
 
+  /** One review-preview chunk: the engine cuts a sample-exact WAV (`audio.window`), we read it. */
   private fetchChunk(i: number) {
     const pid = this.streamProject!;
     const ac = new AbortController();
     this.inflight.set(i, ac);
-    fetch(`cliper-media://pcm/${encodeURIComponent(pid)}?t=${i * CHUNK}&d=${CHUNK}`, { signal: ac.signal })
-      .then(async (r) => {
-        if (!r.ok) throw new Error(await r.text());
+    const start = i * CHUNK;
+    const duration = Math.min(CHUNK, this.streamDuration - start);
+    call("audio.window", { id: pid, start, duration })
+      .then(async (w) => {
+        if (ac.signal.aborted || this.streamProject !== pid) return;
+        const r = await fetch(mediaUrl(pid, w.file), { signal: ac.signal });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const buf = await r.arrayBuffer();
         if (this.streamProject !== pid) return;
-        const data = new Float32Array(buf, 0, Math.floor(buf.byteLength / 4));
-        this.post({ type: "stream:chunk", index: i, data }, [buf]);
+        const { dataOffset, channels, bits, format } = parseWavHeader(new DataView(buf, 0, Math.min(buf.byteLength, 4096)));
+        if (channels !== 2 || bits !== 32 || format !== 3) throw new Error(`unexpected window format (${channels}ch ${bits}bit)`);
+        const frames = Math.floor((buf.byteLength - dataOffset) / 8);
+        const data = new Float32Array(buf.slice(dataOffset, dataOffset + frames * 8));
+        this.post({ type: "stream:chunk", index: i, data }, [data.buffer]);
         this.sent.add(i);
         if (usePlayer.getState().streamError) usePlayer.setState({ streamError: undefined });
       })

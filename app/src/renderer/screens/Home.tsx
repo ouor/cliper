@@ -3,9 +3,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Clipboard, Film, FolderOpen, History, Layers, ListPlus, Mic2, MoreHorizontal, Play, Search, Settings2, Trash2, Users, X } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { ProjectSummary } from "@ipc/generated/ProjectSummary";
+import type { AudioTrack } from "@ipc/generated/AudioTrack";
 import { ask, go, openSettings, toast, useApp } from "@/state/app";
-import { forgetProject, loadProject, refreshList, useProjects } from "@/state/projects";
-import { startJob, takeInterrupted, useJobs } from "@/state/jobs";
+import { forgetProject, putProject, refreshList, useProjects } from "@/state/projects";
+import { KIND_LABEL, startJob, takeInterrupted, useJobs } from "@/state/jobs";
 import { call } from "@/lib/rpc";
 import { friendly, type FriendlyError } from "@/lib/errors";
 import { fmtBytes, fmtDate, fmtDurationKo, fmtRelative, fmtTime } from "@/lib/format";
@@ -42,11 +43,17 @@ function Thumb({ url, platform, size = "md" }: { url?: string | null; platform?:
   );
 }
 
+export function trackLabel(t: AudioTrack): string {
+  return [`${t.index + 1}번`, t.title, t.language, `${t.codec} ${t.channels}ch`].filter(Boolean).join(" · ");
+}
+
 function BroadcastCard({ r, onCancel }: { r: Resolved; onCancel: () => void }) {
   const p = r.project;
   const src = p.source!;
   const settings = useApp((s) => s.settings);
   const heights = [...new Set(src.variants.map((v) => v.height))].sort((a, b) => b - a);
+  const tracks = src.audio_tracks ?? [];
+  const [track, setTrack] = useState(p.settings.audio_track ?? 0);
   const [height, setHeight] = useState<number | null>(settings.videoHeight && heights.includes(settings.videoHeight) ? settings.videoHeight : null);
   const [busy, setBusy] = useState(false);
   const songs = p.songs.filter((s) => s.enabled);
@@ -59,7 +66,7 @@ function BroadcastCard({ r, onCancel }: { r: Resolved; onCancel: () => void }) {
   const start = async () => {
     setBusy(true);
     try {
-      if (!r.existed || !p.audio) await applyDefaultSettings(p.id, { video_height: height });
+      if (!r.existed || !p.audio) await applyDefaultSettings(p.id, { video_height: height, audio_track: track });
       go({ name: "workspace", projectId: p.id, mode: "review" });
       if (!p.audio || !p.detection) await startAnalysis(p.id, !p.audio);
     } catch (e) {
@@ -91,6 +98,18 @@ function BroadcastCard({ r, onCancel }: { r: Resolved; onCancel: () => void }) {
           </div>
         ) : (
           <div className="bcard-grid">
+            {local && tracks.length > 1 && (
+              <>
+                <span className="label">트랙</span>
+                <select className="select sm" value={track} onChange={(e) => setTrack(Number(e.target.value))}>
+                  {tracks.map((t) => (
+                    <option key={t.index} value={t.index}>
+                      {trackLabel(t)}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             {!local && heights.length > 0 && (
               <>
                 <span className="label">화질</span>
@@ -112,7 +131,8 @@ function BroadcastCard({ r, onCancel }: { r: Resolved; onCancel: () => void }) {
             <span className="muted">약 {fmtBytes(Math.max(5e6, dur * 8400))} (영상은 고른 곡만 나중에 받아요)</span>
           </div>
         )}
-        {src.notes.length > 0 && <div className="hint">{src.notes.join(" · ")}</div>}
+        {/* engine notes are English log text; show only localized ones */}
+        {src.notes.filter((n) => /[가-힣]/.test(n)).length > 0 && <div className="hint">{src.notes.filter((n) => /[가-힣]/.test(n)).join(" · ")}</div>}
       </div>
       <div className="bcard-actions">
         <button className="btn ghost" onClick={onCancel} disabled={busy}>
@@ -126,29 +146,27 @@ function BroadcastCard({ r, onCancel }: { r: Resolved; onCancel: () => void }) {
   );
 }
 
-function ContinueCard({ p }: { p: Project }) {
-  const songs = p.songs.filter((s) => s.enabled);
-  const withVideo = songs.filter((s) => s.clip_id && p.clips.find((c) => c.id === s.clip_id)?.stems).length;
-  const unconfirmed = songs.reduce((n, s) => n + s.mutes.filter((m) => !m.confirmed).length, 0);
-  const unreviewed = songs.filter((s) => !s.reviewed).length;
-  const exported = songs.filter((s) => s.export).length;
+function ContinueCard({ s }: { s: ProjectSummary }) {
   const night = (() => {
-    const h = new Date(p.updated_at).getHours();
+    const h = new Date(s.updated_at).getHours();
     return h < 7 || h >= 23;
   })();
   const parts = [
-    unreviewed ? `확인 전 곡 ${unreviewed}개` : null,
-    withVideo ? `영상 ${withVideo}곡 받음` : null,
-    unconfirmed ? `멘트 확인 대기 ${unconfirmed}개` : null,
-    exported ? `${exported}곡 내보냄` : null,
+    s.unreviewed ? `확인 전 곡 ${s.unreviewed}개` : null,
+    s.clips_ready ? `영상 ${s.clips_ready}곡 받음` : null,
+    s.unconfirmed_mutes ? `멘트 확인 대기 ${s.unconfirmed_mutes}개` : null,
+    s.exported ? `${s.exported}곡 내보냄` : null,
+    s.last_error ? `실패: ${KIND_LABEL[s.last_error.kind] ?? s.last_error.kind}` : null,
   ].filter(Boolean);
-  const mode = unreviewed ? "review" : unconfirmed ? "talk" : "export";
+  const mode = s.unreviewed ? "review" : s.unconfirmed_mutes ? "talk" : "export";
   return (
-    <button className="continue-card" onClick={() => go({ name: "workspace", projectId: p.id, mode })}>
-      <Thumb url={p.source?.catalog.thumbnail} platform={p.source?.platform} />
+    <button className="continue-card" onClick={() => go({ name: "workspace", projectId: s.id, mode })}>
+      <Thumb url={s.thumbnail} platform={s.platform} />
       <div className="grow">
-        <div className="cc-kicker">{night ? "🌙 밤사이 완료" : "이어서 할 작업"} · {fmtRelative(p.updated_at)}</div>
-        <div className="cc-title ellipsis">{projectTitle(p)}</div>
+        <div className="cc-kicker">
+          {night ? "🌙 밤사이 완료" : "이어서 할 작업"} · {fmtRelative(s.updated_at)}
+        </div>
+        <div className="cc-title ellipsis">{s.title || s.id}</div>
         <div className="cc-meta">{parts.join(" · ") || "곡 찾기 전"}</div>
       </div>
       <span className="btn primary sm">
@@ -160,7 +178,8 @@ function ContinueCard({ p }: { p: Project }) {
 
 function ProjectRow({ s }: { s: ProjectSummary }) {
   const [menu, setMenu] = useState(false);
-  const status = s.songs === 0 ? "곡 찾기 전" : s.exported >= s.songs ? "완료" : s.exported > 0 ? `${s.exported}곡 내보냄` : "검수 중";
+  const status = !s.has_detection ? (s.has_audio ? "곡 찾기 전" : "소리 받기 전") : s.songs === 0 ? "곡 없음" : s.exported >= s.songs ? "완료" : s.exported > 0 ? `${s.exported}곡 내보냄` : s.unreviewed ? `확인 전 ${s.unreviewed}` : s.unconfirmed_mutes ? `멘트 확인 ${s.unconfirmed_mutes}` : "검수 중";
+  const err = s.last_error ? friendly({ code: s.last_error.code, message: s.last_error.message }) : null;
   const remove = async () => {
     setMenu(false);
     const r = await ask({
@@ -193,7 +212,12 @@ function ProjectRow({ s }: { s: ProjectSummary }) {
           <span>{s.songs}곡</span>
         </div>
       </div>
-      <span className={`tag ${status === "완료" ? "ok" : status === "곡 찾기 전" ? "" : "accent"}`}>{status}</span>
+      {err && (
+        <span className="tag danger" data-tip={`${KIND_LABEL[s.last_error!.kind] ?? s.last_error!.kind} 실패 · ${err.title}`} data-tip-pos="left">
+          <AlertTriangle size={10} /> 실패
+        </span>
+      )}
+      <span className={`tag ${status === "완료" ? "ok" : status.endsWith("전") ? "" : "accent"}`}>{status}</span>
       <span className="faint pr-date">{fmtRelative(s.updated_at)}</span>
       <div className="pr-menu" onClick={(e) => e.stopPropagation()}>
         <button className="btn ghost icon sm" onClick={() => setMenu(!menu)} aria-label="더 보기">
@@ -214,7 +238,6 @@ function ProjectRow({ s }: { s: ProjectSummary }) {
 export function Home() {
   const summaries = useProjects((s) => s.summaries);
   const listLoaded = useProjects((s) => s.listLoaded);
-  const projects = useProjects((s) => s.projects);
   const engineReady = useApp((s) => s.engine.state === "ready");
   const queue = useJobs((s) => s.queue);
   const settings = useApp((s) => s.settings);
@@ -235,13 +258,6 @@ export function Home() {
     void takeInterrupted().then(setInterrupted);
   }, []);
 
-  // full projects for the "이어서 할 작업" cards (3 most recent)
-  useEffect(() => {
-    if (!engineReady) return;
-    for (const s of summaries.slice(0, 3)) if (!projects[s.id]) void loadProject(s.id).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engineReady, summaries.length]);
-
   const resolve = async (input: string) => {
     setError(null);
     setResolved(null);
@@ -254,7 +270,7 @@ export function Home() {
     const before = new Set(useProjects.getState().summaries.map((s) => s.id));
     try {
       const project = await call("project.create", { input: input.trim() });
-      useProjects.setState((s) => ({ projects: { ...s.projects, [project.id]: project } }));
+      putProject(project);
       setResolved({ project, existed: before.has(project.id) });
       void refreshList();
     } catch (e) {
@@ -337,9 +353,7 @@ export function Home() {
   }, [filtered, byChannel]);
 
   const continueProjects = summaries
-    .slice(0, 3)
-    .map((s) => projects[s.id])
-    .filter((p): p is Project => !!p && !!p.detection && p.songs.some((s) => s.enabled && (!s.reviewed || s.mutes.some((m) => !m.confirmed) || !s.export)))
+    .filter((x) => x.has_detection && x.songs > 0 && (x.unreviewed > 0 || x.unconfirmed_mutes > 0 || x.exported < x.songs || x.last_error))
     .slice(0, 2);
 
   return (
@@ -519,7 +533,7 @@ export function Home() {
           {interrupted.length > 0 && (
             <div className="banner warn">
               <History size={15} />
-              <span className="grow">지난번에 멈춘 작업 {interrupted.length}개가 있어요. 끝난 곡은 그대로 남아 있어요.</span>
+              <span className="grow">지난번에 멈춘 작업 {interrupted.length}개가 있어요. 다 받은 영상과 내보낸 곡은 건너뛰고 이어서 해요(소리 받기는 처음부터 다시 받아요).</span>
               <div className="actions">
                 <button className="btn sm ghost" onClick={() => setInterrupted([])}>
                   나중에
@@ -534,8 +548,8 @@ export function Home() {
           {continueProjects.length > 0 && (
             <section className="home-section">
               <div className="section-title">이어서 할 작업</div>
-              {continueProjects.map((p) => (
-                <ContinueCard key={p.id} p={p} />
+              {continueProjects.map((x) => (
+                <ContinueCard key={x.id} s={x} />
               ))}
             </section>
           )}

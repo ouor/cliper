@@ -3,7 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, Lock, Moon, Redo2, RefreshCw, Settings2, Sparkles, Undo2, Zap } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import { ask, go, openSettings, setMode, toast, useApp, type WorkspaceMode } from "@/state/app";
-import { loadProject, projectUi, redo, setProjectUi, undo, useProjects } from "@/state/projects";
+import { loadProject, projectUi, putProject, redo, setProjectUi, undo, updateProjectSettings, useProjects } from "@/state/projects";
+import { call } from "@/lib/rpc";
+import { trackLabel } from "./Home";
 import { runningJobs, useJobs, cancelJob, retryJob, type Job } from "@/state/jobs";
 import { resetWs, requestFocus, useWs } from "@/state/ws";
 import { player, usePlayer, type ListenMode } from "@/audio/player";
@@ -22,6 +24,37 @@ import { TalkEditor } from "./workspace/TalkEditor";
 import { selectMuteAndLoop } from "./workspace/DetailTimeline";
 import { ExportView } from "./workspace/ExportView";
 import { SetlistDialog } from "./workspace/SetlistDialog";
+
+function TrackPicker({ p }: { p: Project }) {
+  const tracks = p.source?.audio_tracks ?? [];
+  if (p.source?.platform !== "local" || tracks.length < 2) return null;
+  const change = async (track: number) => {
+    const r = await ask({
+      title: "오디오 트랙을 바꿀까요?",
+      body: ["바꾼 트랙에서 소리를 다시 꺼내고 곡을 다시 찾아요(몇 초~1분).", "직접 고치거나 확인한 곡은 그대로 남아요. 받아 둔 영상은 그 트랙으로 다시 받아야 해요."],
+      icon: "question",
+      buttons: [
+        { id: "cancel", label: "취소", kind: "ghost" },
+        { id: "ok", label: "바꾸기", kind: "primary" },
+      ],
+    });
+    if (r !== "ok") return;
+    await updateProjectSettings(p.id, { audio_track: track });
+    await startAnalysis(p.id, true).catch((e) => toast(friendly(e).title, { kind: "error" }));
+  };
+  return (
+    <label className="track-pick" data-tip="멀티트랙 녹화본에서 분석·분리·내보내기에 쓸 오디오 트랙" data-tip-pos="left">
+      <span className="faint">트랙</span>
+      <select className="select sm" value={p.settings.audio_track} onChange={(e) => void change(Number(e.target.value))}>
+        {tracks.map((t) => (
+          <option key={t.index} value={t.index}>
+            {trackLabel(t)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 function OriginalBadge() {
   const [open, setOpen] = useState(false);
@@ -86,7 +119,7 @@ function NextBanner({ p }: { p: Project }) {
           <Progress value={audioJob.fraction} />
         </div>
         <span className="faint">4시간 방송도 영상은 받지 않아요</span>
-        <button className="btn sm ghost" onClick={() => void cancelJob(audioJob.id)} data-tip="받은 부분은 남아요" data-tip-pos="left">
+        <button className="btn sm ghost" onClick={() => void cancelJob(audioJob.id)} data-tip="취소하면 다음에 처음부터 다시 받아요" data-tip-pos="left">
           취소
         </button>
       </div>
@@ -234,6 +267,10 @@ export function Workspace({ projectId }: { projectId: string }) {
     if (!engineReady) return;
     loadProject(projectId)
       .then((proj) => {
+        // local recordings made before the engine listed audio tracks: reopen to fill them in
+        if (proj.source?.platform === "local" && !(proj.source.audio_tracks ?? []).length) {
+          void call("project.create", { input: proj.source.url }).then(putProject).catch(() => {});
+        }
         const cur = useWs.getState().selected;
         if (cur && proj.songs.some((s) => s.id === cur)) return;
         const last = projectUi(projectId).lastSongId;
@@ -535,6 +572,7 @@ export function Workspace({ projectId }: { projectId: string }) {
           </span>
         </div>
         <span className="spacer" />
+        <TrackPicker p={p} />
         <OriginalBadge />
         <button className="btn ghost icon sm" onClick={() => openSettings()} aria-label="설정" data-tip="설정 (Ctrl+,)" data-tip-pos="left">
           <Settings2 size={16} />

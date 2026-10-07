@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification, protocol, shell, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, protocol, shell, session } from "electron";
 import { existsSync, mkdirSync, promises as fsp, readFileSync, writeFileSync, accessSync, constants as fsConst, statfsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,13 +30,6 @@ const MODELS_DIR = firstExisting(
   app.isPackaged ? join(process.resourcesPath, "models") : undefined,
   join(repoRoot, "models"),
 );
-function findFfmpeg(): string {
-  const bundled = app.isPackaged ? join(process.resourcesPath, "ffmpeg", "ffmpeg.exe") : undefined;
-  if (process.env.CLIPER_FFMPEG) return process.env.CLIPER_FFMPEG;
-  if (bundled && existsSync(bundled)) return bundled;
-  return "ffmpeg"; // PATH (the engine uses the same)
-}
-const FFMPEG = findFfmpeg();
 
 // ── settings & small state store (userData) ──
 if (process.env.CLIPER_USER_DATA) app.setPath("userData", resolve(process.env.CLIPER_USER_DATA));
@@ -275,7 +268,9 @@ function registerIpc() {
 
 app.whenReady().then(() => {
   app.setAppUserModelId("com.cliper.desktop");
-  protocol.handle("cliper-media", createMediaHandler({ projectsRoot: () => settings.projectsRoot, ffmpeg: () => FFMPEG }));
+  // no default menu: its accelerators (Ctrl+Shift+Z, Ctrl+R, …) would swallow the app's shortcuts
+  Menu.setApplicationMenu(null);
+  protocol.handle("cliper-media", createMediaHandler({ projectsRoot: () => settings.projectsRoot }));
   // deny every permission request except audio output selection and notifications
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
     cb(permission === "notifications" || permission === "speaker-selection" || permission === "clipboard-sanitized-write");

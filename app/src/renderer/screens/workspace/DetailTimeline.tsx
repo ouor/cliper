@@ -90,8 +90,8 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
       ctx.fillRect(x0, yVoc, x1 - x0, LANE_VOC);
     }
     // song fade curves on the original lane (export fades)
-    const fi = p.settings.song_fade_in;
-    const fo = p.settings.song_fade_out;
+    const fi = s.fade_in ?? p.settings.song_fade_in;
+    const fo = s.fade_out ?? p.settings.song_fade_out;
     ctx.strokeStyle = col["text-2"];
     ctx.setLineDash([2, 3]);
     ctx.beginPath();

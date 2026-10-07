@@ -5,7 +5,6 @@ import type { Song } from "@ipc/generated/Song";
 import { useWs, type SortMode } from "@/state/ws";
 import { useApp } from "@/state/app";
 import { songProgress, useJobs } from "@/state/jobs";
-import { projectUi, useProjects } from "@/state/projects";
 import { reviewStatus, songLabels, songNumbers, songTitle, unconfirmedMutes, videoState } from "@/lib/song";
 import { fmtTime } from "@/lib/format";
 import { player } from "@/audio/player";
@@ -43,7 +42,7 @@ function Row({ p, s, n, selected, multi, prog, talk, shortSec }: { p: Project; s
   const vs = videoState(p, s);
   const labels = songLabels(p, s, shortSec).filter((l) => !(talk && l.kind === "plain"));
   const unconf = unconfirmedMutes(s);
-  const muteOff = projectUi(p.id).muteOff.includes(s.id);
+  const muteOff = !s.mute_enabled;
   const statusText = (() => {
     if (st === "excluded") return "제외됨";
     const parts: string[] = [st === "reviewed" ? "확인" : "미확인"];
@@ -124,7 +123,6 @@ function Row({ p, s, n, selected, multi, prog, talk, shortSec }: { p: Project; s
 export function SongList({ p, talk = false }: { p: Project; talk?: boolean }) {
   const ws = useWs();
   const jobs = useJobs();
-  useProjects((s) => s.ui[p.id]); // re-render on app-side state changes
   const shortSec = useApp((s) => s.settings.shortSec);
   const searchRef = useRef<HTMLInputElement>(null);
   const nums = useMemo(() => songNumbers(p), [p]);
@@ -133,8 +131,10 @@ export function SongList({ p, talk = false }: { p: Project; talk?: boolean }) {
   const active = list.filter((s) => s.enabled);
   const excluded = list.filter((s) => !s.enabled);
 
+  const handled = useRef(ws.focus.n);
   useEffect(() => {
-    if (ws.focus.field === "search") searchRef.current?.focus();
+    if (ws.focus.field === "search" && ws.focus.n !== handled.current) searchRef.current?.focus();
+    handled.current = ws.focus.n;
   }, [ws.focus]);
 
   const addAtPlayhead = () => {

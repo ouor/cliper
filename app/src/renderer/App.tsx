@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { AlertTriangle, RotateCw } from "lucide-react";
 import type { SystemInfo } from "@ipc/generated/SystemInfo";
+import { PROTOCOL_VERSION } from "@ipc/protocol";
 import { applyTheme, ask, go, openSettings, toast, useApp } from "./state/app";
 import { applyChanged, loadProject, refreshList } from "./state/projects";
 import { markEngineLost, useJobs, wireJobs } from "./state/jobs";
@@ -82,6 +83,14 @@ function EngineBanner() {
             <RotateCw size={14} /> 다시 시작
           </button>
         )}
+      </div>
+    );
+  }
+  if (engine.state === "ready" && engine.protocol !== undefined && engine.protocol !== PROTOCOL_VERSION) {
+    return (
+      <div className="engine-banner failed">
+        <AlertTriangle size={16} />
+        <span className="grow">처리 엔진과 앱의 버전이 맞지 않아요 (엔진 {engine.protocol}, 앱 {PROTOCOL_VERSION}). 일부 기능이 동작하지 않을 수 있어요. 앱을 다시 설치해 주세요.</span>
       </div>
     );
   }
