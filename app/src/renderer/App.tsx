@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { AlertTriangle, RotateCw } from "lucide-react";
 import type { SystemInfo } from "@ipc/generated/SystemInfo";
 import { PROTOCOL_VERSION } from "@ipc/protocol";
@@ -13,7 +13,7 @@ import { JobsPanel } from "./components/JobsPanel";
 import { Home } from "./screens/Home";
 import { FirstRun } from "./screens/FirstRun";
 import { Workspace } from "./screens/Workspace";
-import { SettingsScreen } from "./screens/Settings";
+const SettingsScreen = lazy(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen })));
 import { HelpOverlay } from "./screens/HelpOverlay";
 import { CookiesDialog } from "./screens/CookiesDialog";
 import { player } from "./audio/player";
@@ -173,7 +173,11 @@ export function App() {
       <div className="app-main">{route.name === "home" ? <Home /> : <Workspace key={route.projectId} projectId={route.projectId} />}</div>
       <StatusBar />
       {jobsOpen && <JobsPanel />}
-      {overlay === "settings" && <SettingsScreen />}
+      {overlay === "settings" && (
+        <Suspense fallback={null}>
+          <SettingsScreen />
+        </Suspense>
+      )}
       {overlay === "help" && <HelpOverlay />}
       {overlay === "cookies" && <CookiesDialog />}
       <Toasts />

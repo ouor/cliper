@@ -1,5 +1,5 @@
 // 프로젝트 작업공간: ① 곡 검수 ② 멘트 다듬기 ③ 내보내기.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, lazy, Suspense } from "react";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, Lock, Moon, Redo2, RefreshCw, Settings2, Sparkles, Undo2, Zap } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import { ask, go, openSettings, setMode, toast, useApp, type WorkspaceMode } from "@/state/app";
@@ -21,9 +21,9 @@ import { SongList, sortSongs } from "./workspace/SongList";
 import { SongDetail, listenEnd, listenStart } from "./workspace/SongDetail";
 import { OverviewMap } from "./workspace/OverviewMap";
 import { Transport } from "./workspace/Transport";
-import { TalkEditor } from "./workspace/TalkEditor";
+const TalkEditor = lazy(() => import("./workspace/TalkEditor").then((m) => ({ default: m.TalkEditor })));
 import { selectMuteAndLoop } from "./workspace/DetailTimeline";
-import { ExportView } from "./workspace/ExportView";
+const ExportView = lazy(() => import("./workspace/ExportView").then((m) => ({ default: m.ExportView })));
 import { SetlistDialog } from "./workspace/SetlistDialog";
 
 function TrackPicker({ p }: { p: Project }) {
@@ -627,7 +627,9 @@ export function Workspace({ projectId }: { projectId: string }) {
           <div className="ws-body ws-talk">
             <SongList p={p} talk />
             <main className="ws-main">
-              <TalkEditor p={p} />
+              <Suspense fallback={null}>
+                <TalkEditor p={p} />
+              </Suspense>
             </main>
           </div>
           <Transport total={total} />
@@ -635,7 +637,9 @@ export function Workspace({ projectId }: { projectId: string }) {
       )}
       {mode === "export" && (
         <div className="ws-body export-body">
-          <ExportView p={p} />
+          <Suspense fallback={null}>
+            <ExportView p={p} />
+          </Suspense>
         </div>
       )}
       {ws.setlistOpen && <SetlistDialog p={p} />}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, HelpCircle, Info, X, XCircle } from "lucide-react";
 import { dismissToast, useApp } from "@/state/app";
 
@@ -18,6 +18,7 @@ export function Progress({ value, indeterminate, tone }: { value?: number | null
 
 export function Modal({ title, icon, children, footer, onClose, width, className }: { title: ReactNode; icon?: ReactNode; children: ReactNode; footer?: ReactNode; onClose?: () => void; width?: number; className?: string }) {
   const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     const first = ref.current?.querySelector<HTMLElement>("[autofocus], input, textarea, select, button.primary, button");
@@ -35,13 +36,30 @@ export function Modal({ title, icon, children, footer, onClose, width, className
           e.stopPropagation();
           onClose();
         }
+        if (e.key === "Tab" && ref.current) {
+          // keep focus inside the dialog
+          const items = [...ref.current.querySelectorAll<HTMLElement>("button, input, textarea, select, [tabindex]:not([tabindex='-1'])")].filter((x) => !(x as HTMLButtonElement).disabled);
+          if (items.length) {
+            const first = items[0];
+            const last = items[items.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+              e.preventDefault();
+              last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+              e.preventDefault();
+              first.focus();
+            }
+          }
+        }
         e.stopPropagation();
       }}
     >
-      <div className={`modal ${className ?? ""}`} ref={ref} style={width ? { width: `min(${width}px, calc(100vw - 48px))` } : undefined} role="dialog" aria-modal="true">
+      <div className={`modal ${className ?? ""}`} ref={ref} style={width ? { width: `min(${width}px, calc(100vw - 48px))` } : undefined} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header>
           {icon}
-          <span className="grow">{title}</span>
+          <span className="grow" id={titleId}>
+            {title}
+          </span>
           {onClose && (
             <button className="btn ghost icon sm" onClick={onClose} aria-label="닫기">
               <X size={16} />
@@ -101,7 +119,7 @@ export function Toasts() {
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((t) => (
-        <div key={t.id} className={`toast ${t.kind}`}>
+        <div key={t.id} className={`toast ${t.kind}`} role={t.kind === "error" ? "alert" : "status"}>
           {TOAST_ICON[t.kind]}
           <span className="grow">{t.text}</span>
           {t.action && (

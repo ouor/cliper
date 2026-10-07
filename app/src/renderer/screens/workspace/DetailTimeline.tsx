@@ -453,7 +453,7 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
         ))}
       </div>
       <div className="tl-canvas" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={() => !drag && setTip(null)} onWheel={onWheel}>
-        <canvas ref={ref} />
+        <canvas ref={ref} role="img" aria-label={`곡 상세 타임라인: 멘트 구간 ${s.mutes.length}개. 구간 목록에서 Tab으로 고를 수 있어요.`} />
         <div className="playhead" ref={playheadRef} />
         <div className={`mode-badge m${mode}`}>듣는 중 · {LISTEN_LABEL[mode]}</div>
         {tip && (

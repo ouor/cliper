@@ -1,4 +1,5 @@
-// Song-list edits expressed as songs.set replacements (the UI owns song editing).
+// Song and mute edits. Each helper is a pure edit of the song list; state/projects.ts applies it
+// optimistically and syncs it with per-item calls (one song) or an atomic songs.set (several).
 import type { Mute } from "@ipc/generated/Mute";
 import type { Song } from "@ipc/generated/Song";
 import { editSong, editSongs, getProject, rid, undo } from "@/state/projects";

@@ -541,7 +541,7 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
           const hit = hitSong(e.clientX - rect.left);
           if (hit) void player.play(Math.max(0, hit.s.start - useApp.getState().settings.listenPreroll));
         }}>
-          <canvas ref={ref} />
+          <canvas ref={ref} role="img" aria-label={`방송 전체 지도: 곡 ${p.songs.filter((s) => s.enabled).length}개, 후보 구간 ${p.detection?.candidates.length ?? 0}개. 곡 목록에서 같은 곡을 고를 수 있어요.`} />
           <div className="playhead" ref={playheadRef} />
           {hover && (
             <div className="map-tip" style={{ left: Math.min(hover.x + 12, w - 200), top: Math.max(0, hover.y - 34) }}>

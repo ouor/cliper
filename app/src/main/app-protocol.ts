@@ -53,7 +53,12 @@ export function createAppHandler(rendererDir: string) {
     try {
       const body = await fsp.readFile(file);
       const headers: Record<string, string> = { "content-type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream" };
-      if (file.endsWith(".html")) headers["content-security-policy"] = CSP;
+      // never reuse a cached index.html: after an app update it would point at chunks that no
+      // longer exist. Hashed assets can be cached as usual.
+      if (file.endsWith(".html")) {
+        headers["content-security-policy"] = CSP;
+        headers["cache-control"] = "no-store";
+      }
       return new Response(new Uint8Array(body), { status: 200, headers });
     } catch {
       return new Response("not found", { status: 404 });
