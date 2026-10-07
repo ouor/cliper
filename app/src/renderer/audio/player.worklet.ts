@@ -147,6 +147,25 @@ class CliperPlayer extends AudioWorkletProcessor {
       case "volume":
         this.volume = m.volume;
         break;
+      case "accRms": {
+        // exact accompaniment (orig − vocals) RMS in dBFS for each VOD range, null if not loaded
+        const out = (m.ranges as [number, number][]).map(([a, b]) => {
+          if (this.src !== "stems") return null;
+          const f0 = Math.max(0, Math.floor((a - this.origin) * sampleRate));
+          const f1 = Math.min(this.frames, Math.ceil((b - this.origin) * sampleRate));
+          if (f1 <= f0 || f1 > Math.min(this.loadedO, this.loadedV)) return null;
+          let acc = 0;
+          for (let f = f0; f < f1; f++) {
+            const l = (this.orig[f * 2] - this.voc[f * 2]) * I16;
+            const r = (this.orig[f * 2 + 1] - this.voc[f * 2 + 1]) * I16;
+            acc += l * l + r * r;
+          }
+          const rms = Math.sqrt(acc / ((f1 - f0) * 2));
+          return rms > 0 ? 20 * Math.log10(rms) : -120;
+        });
+        this.port.postMessage({ type: "accRms", id: m.id, out });
+        break;
+      }
       case "dbg":
         this.port.postMessage({ type: "dbg", src: this.src, origin: this.origin, frames: this.frames, loadedO: this.loadedO, loadedV: this.loadedV, pos: this.pos, chunks: [...this.chunks.keys()], playing: this.playing });
         break;

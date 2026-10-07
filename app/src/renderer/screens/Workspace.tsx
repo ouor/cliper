@@ -152,9 +152,14 @@ function NextBanner({ p }: { p: Project }) {
           </button>
         )}
         {reviewed.length > 0 && needVideo.length > 0 && (
-          <button className="btn sm subtle" onClick={() => void fetchSongs(p.id, needVideo.map((s) => s.id), `확인한 곡 영상 받기 ${needVideo.length}곡`)} disabled={!!clipsJob}>
-            확인한 {needVideo.length}곡 먼저 받기
-          </button>
+          <>
+            <button className="btn sm subtle" onClick={() => void fetchSongs(p.id, needVideo.map((s) => s.id), `확인한 곡 영상 받기 ${needVideo.length}곡`)} disabled={!!clipsJob}>
+              확인한 {needVideo.length}곡 먼저 받기
+            </button>
+            <button className="btn sm ghost" onClick={() => void askOvernight(p)} disabled={!!clipsJob} data-tip="확인한 곡만 처리해요" data-tip-pos="left">
+              <Moon size={13} /> 밤새 처리
+            </button>
+          </>
         )}
       </div>
     );

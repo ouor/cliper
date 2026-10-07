@@ -25,6 +25,9 @@ const MODE_TIP = [
   "분리된 반주 전체 (참고용)",
 ];
 
+/** accompaniment below this (dBFS) makes removal artefacts audible */
+const QUIET_DB = -36;
+
 const STRENGTHS: { label: string; v: number | null }[] = [
   { label: "완전 제거", v: null },
   { label: "-30dB", v: -30 },
@@ -77,11 +80,13 @@ function MuteRow({ p, s, m, selected, warn }: { p: Project; s: Song; m: Mute; se
       <span className="spacer" />
       {m.origin === "manual" && <Hand size={12} className="faint" aria-label="직접 만듦" />}
       {m.gain_db !== null && <span className="tag outline">{m.gain_db}dB</span>}
-      {warn.filter((w) => w !== "곡 밖").length > 0 && (
-        <span data-tip={warn.filter((w) => w !== "곡 밖").join(", ")} data-tip-pos="left">
-          <AlertTriangle size={13} color="var(--doubt)" />
-        </span>
-      )}
+      {warn
+        .filter((w) => w === "노래 겹침" || w === "조용한 반주" || w === "받은 영상 밖")
+        .map((w) => (
+          <span key={w} className="tag doubt">
+            <AlertTriangle size={10} /> {w}
+          </span>
+        ))}
       <span className={`tag ${m.confirmed ? "mute" : "suggest"}`}>{m.confirmed ? (m.origin === "manual" ? "직접 만듦" : "확인함") : "제안 · 확인 전"}</span>
       {void p}
     </button>
@@ -171,18 +176,37 @@ export function TalkEditor({ p }: { p: Project }) {
     return () => clearInterval(t);
   }, [s?.id, playing, mode, p.id, s]);
 
+  // 조용한 반주: exact accompaniment level inside each mute (computed in the worklet once loaded)
+  const [quiet, setQuiet] = useState<Set<string>>(new Set());
+  const stemsReady = !!stems && stems.progress >= 1 && !stems.error && stems.clipId === clip?.id;
+  const muteKey = s ? s.mutes.map((m) => `${m.id}:${m.start.toFixed(2)}:${m.end.toFixed(2)}`).join("|") : "";
+  useEffect(() => {
+    if (!s || !stemsReady) return;
+    let alive = true;
+    const ms = s.mutes;
+    void player.accompanimentRms(ms.map((m) => [m.start, m.end])).then((db) => {
+      if (!alive) return;
+      setQuiet(new Set(ms.filter((_, i) => db[i] !== null && (db[i] as number) < QUIET_DB).map((m) => m.id)));
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [muteKey, stemsReady]);
+
   const warnings = useMemo(() => {
     const out = new Map<string, string[]>();
     if (!s) return out;
     for (const m of s.mutes) {
       const w: string[] = [];
       if (singOverlap(m, probs) >= 0.3) w.push("노래 겹침");
+      if (quiet.has(m.id) && m.start < s.end && m.end > s.start) w.push("조용한 반주");
       if (muteOutsideClip(m, clip)) w.push("받은 영상 밖");
       if (m.end <= s.start || m.start >= s.end) w.push("곡 밖");
       out.set(m.id, w);
     }
     return out;
-  }, [s, probs, clip]);
+  }, [s, probs, clip, quiet]);
 
   if (!s) {
     return (
@@ -372,6 +396,12 @@ export function TalkEditor({ p }: { p: Project }) {
               <div className="banner warn mi-warn">
                 <AlertTriangle size={14} />
                 <span>이 구간에는 노래가 일부 포함되어 있어요. 노래도 함께 빠질 수 있어요. <b>E 지운 목소리</b>로 들어 보세요.</span>
+              </div>
+            )}
+            {selWarn.includes("조용한 반주") && (
+              <div className="banner warn mi-warn">
+                <AlertTriangle size={14} />
+                <span>이 구간은 반주가 조용해요. 지운 흔적이 들릴 수 있어요. 구간을 짧게 하거나 페이드를 길게, 또는 강도를 '줄이기'로 바꿔 보세요.</span>
               </div>
             )}
             {selWarn.includes("받은 영상 밖") && (

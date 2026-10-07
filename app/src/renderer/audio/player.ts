@@ -70,6 +70,18 @@ class Player {
   private listeners = new Set<(pos: number) => void>();
   private dbgResolve: ((v: unknown) => void) | null = null;
 
+  private rmsWaiters = new Map<number, (v: (number | null)[]) => void>();
+  private rmsId = 0;
+
+  /** Accompaniment level (dBFS) inside each VOD range of the loaded stems window. */
+  accompanimentRms(ranges: [number, number][]): Promise<(number | null)[]> {
+    const id = ++this.rmsId;
+    return new Promise((r) => {
+      this.rmsWaiters.set(id, r);
+      this.post({ type: "accRms", id, ranges });
+    });
+  }
+
   /** Worklet internals (QA). */
   debug(): Promise<unknown> {
     return new Promise((r) => {
@@ -109,6 +121,9 @@ class Player {
       if (st.playing !== m.playing || st.buffering !== m.buffering || m.force) {
         usePlayer.setState({ playing: m.playing, buffering: m.buffering, pos: m.pos });
       }
+    } else if (m.type === "accRms") {
+      this.rmsWaiters.get(m.id)?.(m.out);
+      this.rmsWaiters.delete(m.id);
     } else if (m.type === "dbg") {
       this.dbgResolve?.(m);
     } else if (m.type === "ended") {
