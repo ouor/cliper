@@ -566,7 +566,7 @@ export function Home() {
 
           <section className="home-section">
             <div className="section-title">최근 작업</div>
-            {summaries.length > 0 && (
+            {(filtered.length > 0 || search) && (
               <div className="row list-tools">
                 <div className="search">
                   <Search size={14} />
@@ -578,7 +578,7 @@ export function Home() {
               </div>
             )}
             {!listLoaded && engineReady && <div className="skeleton" style={{ height: 56 }} />}
-            {listLoaded && summaries.length === 0 && (
+            {listLoaded && filtered.length === 0 && !search && (
               <div className="empty-home">
                 <p>아직 작업한 방송이 없어요. 위에 링크를 붙여넣으면 시작돼요.</p>
                 <div className="steps3">

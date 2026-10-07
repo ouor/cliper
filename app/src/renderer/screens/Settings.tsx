@@ -257,7 +257,7 @@ export function SettingsScreen() {
               <>
                 <Row label="작업 폴더" hint="받은 소리와 영상, 작업을 저장하는 곳이에요.">
                   <span className="row grow">
-                    <input className="input sm grow" readOnly value={st.projectsRoot ?? ""} />
+                    <input className="input sm grow" style={{ minWidth: 340 }} readOnly value={st.projectsRoot ?? ""} title={st.projectsRoot ?? ""} />
                     <button className="btn sm subtle" onClick={() => void changeRoot()}>
                       <FolderOpen size={13} /> 바꾸기
                     </button>

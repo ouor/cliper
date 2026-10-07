@@ -60,7 +60,7 @@ export function SetlistDialog({ p }: { p: Project }) {
     >
       <p className="muted">방송 고정 댓글이나 팬이 정리한 타임스탬프를 그대로 붙여넣으세요. 시간이 있으면 가까운 곡에, 없으면 순서대로 맞춰요. 비어 있는 제목·원곡자만 채워요.</p>
       <textarea
-        className="textarea mono"
+        className="textarea"
         rows={8}
         placeholder={"00:23:10 아이돌 - YOASOBI\n00:31:40 밤양갱 - 비비\n…"}
         value={text}

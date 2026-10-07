@@ -12,6 +12,8 @@ import { fmtTime, parseTime } from "@/lib/format";
 import { hasUnsafeFileChars, hostClip, reviewStatus, songLabels, songNumbers, videoState } from "@/lib/song";
 import { mediaUrl } from "@/lib/peaks";
 import { fetchSongs } from "@/lib/pipeline";
+import { EdgeScopes } from "./EdgeScopes";
+import { useMapData } from "./OverviewMap";
 
 export function TimeField({ value, onCommit, label }: { value: number; onCommit: (v: number) => void; label: string }) {
   const [text, setText] = useState<string | null>(null);
@@ -177,6 +179,7 @@ function PendingPanel({ p, r }: { p: Project; r: [number, number] }) {
 
 export function SongDetail({ p }: { p: Project }) {
   const ws = useWs();
+  const { probs } = useMapData(p);
   const shortSec = useApp((s) => s.settings.shortSec);
   const margin = p.settings.margin_before;
   const jobs = useJobs();
@@ -213,7 +216,7 @@ export function SongDetail({ p }: { p: Project }) {
         </div>
         {hasUnsafeFileChars(s.title) && <div className="hint">파일 이름에 쓸 수 없는 문자(/ : ? * 등)는 내보낼 때 다른 문자로 바뀌어요.</div>}
         <div className="dp-labels">
-          <span className={`tag ${st === "reviewed" ? "ok" : st === "doubt" ? "doubt" : st === "excluded" ? "" : "outline"}`}>{{ reviewed: "확인", doubt: "확인 필요", unreviewed: "미확인", excluded: "제외됨" }[st]}</span>
+          <span className={`tag ${st === "reviewed" ? "ok" : st === "excluded" ? "" : "outline"}`}>{{ reviewed: "확인", doubt: "미확인", unreviewed: "미확인", excluded: "제외됨" }[st]}</span>
           {labels.map((l) => (
             <span key={l.text} className={`tag ${l.kind === "plain" ? "outline" : l.kind}`} data-tip={l.tip}>
               {l.text}
@@ -242,6 +245,7 @@ export function SongDetail({ p }: { p: Project }) {
           <span className="faint">길이</span> <span className="mono">{fmtTime(s.end - s.start, 1)}</span>
           <span className="faint">· 미세 조정</span> <kbd>Alt+←</kbd> <kbd>Alt+→</kbd> <span className="faint">0.1초 ({ws.lastEdge === "start" ? "시작" : "끝"})</span>
         </div>
+        <EdgeScopes p={p} s={s} probs={probs} />
         <TextField className="note-input" value={s.note} placeholder="메모 (M) · 예: 다시 부름, 메들리, 2:13 말소리 들림" field="note" maxLength={500} onCommit={(v) => void editSong(p.id, s.id, "메모", (x) => void (x.note = v))} />
 
         {vs === "refetch" && (

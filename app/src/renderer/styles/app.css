@@ -2196,3 +2196,45 @@
   left: auto;
   right: 0;
 }
+
+.link-input:focus-visible {
+  box-shadow: none;
+}
+
+/* 경계 확대 */
+.scopes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.scope {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.scope-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+}
+.scope.active .scope-head > span:first-child {
+  color: var(--accent);
+  font-weight: var(--fw-semibold);
+}
+.scope-canvas {
+  position: relative;
+  height: 74px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--line-1);
+  touch-action: none;
+}
+.scope-canvas canvas {
+  position: absolute;
+  inset: 0;
+}
+.scope.active .scope-canvas {
+  border-color: var(--accent-line);
+}

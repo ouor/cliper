@@ -96,7 +96,7 @@ function NextBanner({ p }: { p: Project }) {
     return (
       <div className="next-banner progress">
         <div className="spinner" />
-        <span className="nb-text">노래를 찾는 중이에요 · {detectJob.fraction !== null ? `${Math.floor(detectJob.fraction * 100)}%` : ""} {detectJob.eta !== null ? `· ${fmtEta(detectJob.eta)}` : "· 약 15초"}</span>
+        <span className="nb-text">노래를 찾는 중이에요{detectJob.fraction !== null ? ` · ${Math.floor(detectJob.fraction * 100)}%` : ""} · {detectJob.eta !== null ? fmtEta(detectJob.eta) : "약 15초"}</span>
         <div className="nb-progress">
           <Progress value={detectJob.fraction} />
         </div>
@@ -215,22 +215,27 @@ export function Workspace({ projectId }: { projectId: string }) {
   const ws = useWs();
   const [err, setErr] = useState<string | null>(null);
 
+  // new project: reset the workspace UI; leaving: stop playback
   useEffect(() => {
     resetWs(projectId);
-    if (engineReady) {
-      loadProject(projectId)
-        .then((proj) => {
-          const last = projectUi(projectId).lastSongId;
-          const first = last && proj.songs.some((s) => s.id === last) ? last : sortSongs(proj, "attention", "")[0]?.id ?? null;
-          useWs.setState({ selected: first });
-        })
-        .catch((e) => setErr(friendly(e).title));
-    }
     return () => {
       player.pause();
       void player.clearSource();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  // (re)load whenever the engine is ready (also after an engine restart) — keep the selection
+  useEffect(() => {
+    if (!engineReady) return;
+    loadProject(projectId)
+      .then((proj) => {
+        const cur = useWs.getState().selected;
+        if (cur && proj.songs.some((s) => s.id === cur)) return;
+        const last = projectUi(projectId).lastSongId;
+        const first = last && proj.songs.some((s) => s.id === last) ? last : sortSongs(proj, "attention", "")[0]?.id ?? null;
+        useWs.setState({ selected: first });
+      })
+      .catch((e) => setErr(friendly(e).title));
   }, [projectId, engineReady]);
 
   // select the first song to check once songs appear (e.g. right after 곡 찾기)
