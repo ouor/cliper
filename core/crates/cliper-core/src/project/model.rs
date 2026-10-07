@@ -15,6 +15,7 @@ use crate::stems::Stems;
 pub const SCHEMA: &str = "cliper/project@1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Project {
     pub schema: String,
     pub id: String,
@@ -31,6 +32,7 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AudioState {
     /// file name inside the project dir (ADTS)
     pub file: String,
@@ -59,6 +61,7 @@ impl AudioState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Detection {
     /// CLPROBS1 file inside the project dir
     pub probs_file: String,
@@ -69,6 +72,7 @@ pub struct Detection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(default)]
 pub struct Settings {
     /// seconds of video fetched before each song
@@ -103,6 +107,7 @@ impl Default for Settings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
     /// produced by the detector / suggester
@@ -112,6 +117,7 @@ pub enum Origin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Song {
     pub id: String,
     pub title: String,
@@ -134,6 +140,7 @@ fn yes() -> bool {
 /// Vocal-mute region: inside `[start, end]` the vocal stem is removed, ramping
 /// with raised-cosine fades of `fade_in` / `fade_out` *inside* the region.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Mute {
     pub id: String,
     pub start: f64,
@@ -144,6 +151,7 @@ pub struct Mute {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ExportInfo {
     pub path: String,
     pub exported_at: String,
@@ -151,6 +159,7 @@ pub struct ExportInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Clip {
     pub id: String,
     /// requested VOD range (songs ± margins, merged)

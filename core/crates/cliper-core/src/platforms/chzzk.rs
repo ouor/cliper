@@ -179,11 +179,10 @@ async fn resolve_ts(http: Http, content: Value, video_id: &str) -> Result<Source
     let mut audio_fallbacks = Vec::new();
     let mut others: Vec<&m3u8::Variant> = variants.iter().filter(|v| v.url != vurl).collect();
     others.sort_by_key(|v| v.pixels());
-    if let Some(v) = others.first() {
-        if let Some(fb) = crate::source::load_fallback(&http, v, &playlist, token.as_deref()).await {
+    if let Some(v) = others.first()
+        && let Some(fb) = crate::source::load_fallback(&http, v, &playlist, token.as_deref()).await {
             audio_fallbacks.push(fb);
         }
-    }
     if playlist.segments.is_empty() {
         return Err(ResolveError::Malformed(format!(
             "chzzk VOD {video_id}: media playlist missing segments (playback token may have expired)."

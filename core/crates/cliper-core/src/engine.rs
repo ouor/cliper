@@ -42,6 +42,7 @@ pub struct EngineConfig {
 
 /// Machine-readable error for clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ApiError {
     /// INVALID_PARAMS | NOT_FOUND | BUSY | UNRECOGNIZED_INPUT | AUTH_REQUIRED | VOD_NOT_FOUND |
     /// NETWORK | CDN_TRUNCATED | FORMAT | FFMPEG_MISSING | FFMPEG_FAILED | MODEL_MISSING |
@@ -138,6 +139,7 @@ api_from!(tokio::task::JoinError, |e| ApiError::new("INTERNAL", e));
 
 /// Notifications pushed to the client.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     JobStarted { job_id: String, kind: String, project_id: String },
@@ -148,6 +150,7 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobInfo {
     pub job_id: String,
     pub kind: String,
@@ -169,6 +172,7 @@ pub struct JobCtx {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SystemInfo {
     pub version: String,
     pub projects_root: PathBuf,
@@ -180,6 +184,7 @@ pub struct SystemInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProjectSummary {
     pub id: String,
     pub title: Option<String>,
@@ -410,11 +415,10 @@ impl Engine {
     async fn source(&self, p: &Project) -> ApiResult<Source> {
         {
             let cache = self.sources.lock().await;
-            if let Some((s, at)) = cache.get(&p.id) {
-                if at.elapsed() < SOURCE_TTL {
+            if let Some((s, at)) = cache.get(&p.id)
+                && at.elapsed() < SOURCE_TTL {
                     return Ok(s.clone());
                 }
-            }
         }
         let src = self.resolve_fresh(&p.input).await?;
         if let Some(a) = &p.audio {

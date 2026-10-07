@@ -210,11 +210,10 @@ pub fn runs_in_moof(buf: &[u8], moof_local: usize, base_abs: u64) -> Option<(Vec
 pub fn iter_segment_runs(seg: &[u8]) -> Vec<Run> {
     let mut runs = Vec::new();
     for (typ, b) in iter_boxes(seg, 0, seg.len()) {
-        if &typ == b"moof" {
-            if let Some((r, _)) = runs_in_moof(seg, b.start, 0) {
+        if &typ == b"moof"
+            && let Some((r, _)) = runs_in_moof(seg, b.start, 0) {
                 runs.extend(r);
             }
-        }
     }
     runs
 }
@@ -247,6 +246,7 @@ pub const SAMPLE_RATES: [u32; 13] = [96000, 88200, 64000, 48000, 44100, 32000, 2
 
 /// Parameters needed to wrap raw AAC access units in ADTS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AudioConfig {
     /// AudioObjectType (AAC-LC = 2)
     pub aot: u8,

@@ -37,6 +37,7 @@ pub enum ExtractError {
 
 /// Per-segment placement on the audio timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SegIndex {
     /// first segment index (in the audio variant's playlist) that was extracted
     pub first_segment: usize,
@@ -124,11 +125,10 @@ async fn extract_ranged_inner(http: &Http, url: &str, tid: u32, head: u64, retri
         if runs.is_empty() {
             return Ok(None);
         }
-        if let Some(size) = seg_size {
-            if let Some(need) = runs.iter().map(|r| r.end()).max().filter(|&e| e > size) {
+        if let Some(size) = seg_size
+            && let Some(need) = runs.iter().map(|r| r.end()).max().filter(|&e| e > size) {
                 return Err(NetError::Truncated { have: size, need, url: crate::http::redact(url) });
             }
-        }
         let win_end = base + win.len() as u64;
         for r in runs.iter().filter(|r| r.track_id == tid) {
             let got = if r.start >= base && r.end() <= win_end {

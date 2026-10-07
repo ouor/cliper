@@ -14,6 +14,7 @@ use crate::progress::{CancellationToken, Progress, ProgressFn};
 pub const STEM_RATE: u32 = 48000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Stems {
     pub orig: PathBuf,
     pub vocals: PathBuf,

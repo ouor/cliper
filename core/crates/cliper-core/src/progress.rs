@@ -6,14 +6,17 @@ use serde::Serialize;
 pub use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Progress {
     pub stage: String,
     pub done: u64,
     pub total: u64,
     /// network bytes so far (if relevant)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub message: Option<String>,
 }
 

@@ -58,11 +58,10 @@ impl Http {
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            if !s.is_empty() {
-                if let Ok(v) = HeaderValue::from_str(&s) {
+            if !s.is_empty()
+                && let Ok(v) = HeaderValue::from_str(&s) {
                     map.insert(COOKIE, v);
                 }
-            }
         }
         let client = reqwest::Client::builder()
             .default_headers(map)

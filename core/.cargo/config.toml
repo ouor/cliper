@@ -1,0 +1,5 @@
+[env]
+# ts-rs: emit IPC TypeScript types into the repo (consumed by the Electron app)
+TS_RS_EXPORT_DIR = { value = "../app/src/ipc/generated", relative = true }
+# JSON numbers are JS numbers, not bigint
+TS_RS_LARGE_INT = "number"

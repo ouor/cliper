@@ -33,6 +33,7 @@ pub struct ExportSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ExportResult {
     pub path: PathBuf,
     pub duration: f64,
@@ -96,11 +97,10 @@ fn run_with_progress(mut cmd: std::process::Command, dur: f64, progress: &Progre
             return Err(Cancelled.into());
         }
         let line = line?;
-        if let Some(v) = line.strip_prefix("out_time_us=").or_else(|| line.strip_prefix("out_time_ms=")) {
-            if let Ok(us) = v.trim().parse::<u64>() {
+        if let Some(v) = line.strip_prefix("out_time_us=").or_else(|| line.strip_prefix("out_time_ms="))
+            && let Ok(us) = v.trim().parse::<u64>() {
                 progress(Progress::new("export.encode", (us / 1000).min(total_ms), total_ms));
             }
-        }
     }
     let st = child.wait()?;
     let err = err_thread.join().unwrap_or_default();

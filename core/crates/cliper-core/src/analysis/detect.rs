@@ -14,6 +14,7 @@ use crate::ml::panns::Probs;
 pub type Seg = (f64, f64);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(default)]
 pub struct Params {
     pub pann_smooth_sec: f64,

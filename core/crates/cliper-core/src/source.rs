@@ -7,6 +7,7 @@ use crate::hls::m3u8::{self, MediaPlaylist, Variant};
 use crate::http::{Http, NetError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     Chzzk,
@@ -23,6 +24,7 @@ impl Platform {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Container {
     /// fragmented MP4 (moof/mdat) — audio runs range-fetchable
@@ -32,6 +34,7 @@ pub enum Container {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Channel {
     pub id: Option<String>,
     pub name: Option<String>,
@@ -40,6 +43,7 @@ pub struct Channel {
 
 /// Normalized catalog fields (metadata sidecar `source` block, docs/06).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Catalog {
     #[serde(rename = "type")]
     pub kind: Option<String>,
@@ -68,6 +72,7 @@ pub enum ResolveError {
 
 /// Serializable snapshot of a resolved VOD (stored in project.json).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SourceInfo {
     pub platform: Platform,
     pub video_id: String,

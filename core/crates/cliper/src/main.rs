@@ -151,7 +151,7 @@ async fn main() -> Result<()> {
             let progress = Arc::new(|p: Progress| {
                 if let Some(m) = p.message {
                     eprintln!("\nnote: {m}");
-                } else if p.done % 50 == 0 || p.done == p.total {
+                } else if p.done.is_multiple_of(50) || p.done == p.total {
                     eprint!("\r{} {}/{} ({:.1} MB)", p.stage, p.done, p.total, p.bytes.unwrap_or(0) as f64 / 1e6);
                 }
             });

@@ -29,8 +29,8 @@ fn candidate_dirs() -> Vec<PathBuf> {
     if let Some(d) = std::env::var_os("CLIPER_CUDA_DIR") {
         out.push(PathBuf::from(d));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             out.push(dir.join("cuda"));
             for anc in dir.ancestors() {
                 let p = anc.join("runtime").join("cuda");
@@ -40,7 +40,6 @@ fn candidate_dirs() -> Vec<PathBuf> {
                 }
             }
         }
-    }
     if let Some(cp) = std::env::var_os("CUDA_PATH") {
         let cp = PathBuf::from(cp);
         out.push(cp.join("bin").join("x64"));
@@ -68,6 +67,7 @@ pub fn init() -> &'static RuntimeInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum Device {
     Cuda,

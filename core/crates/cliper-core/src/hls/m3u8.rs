@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Variant {
     pub width: u32,
     pub height: u32,
@@ -80,6 +81,7 @@ impl MediaPlaylist {
 
 /// Segments `[first, last)`; `seg_start` = VOD time of segment `first`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SegRange {
     pub first: usize,
     pub last: usize,
