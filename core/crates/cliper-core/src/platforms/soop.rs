@@ -28,8 +28,10 @@ const DEFAULT_AUDIO_HEIGHT: u32 = 720;
 
 /// Recognize a sooplive VOD URL or `soop:<titleNo>` (bare numbers go to chzzk).
 pub fn matches(video: &str) -> Option<String> {
-    for pat in [r"sooplive\.com/player/(\d+)", r"vod\.sooplive\.com/.*?(\d{6,})", r"^soop:\s*(\d+)\s*$"] {
-        if let Some(c) = Regex::new(pat).unwrap().captures(video.trim()) {
+    // sooplive.com, plus the older sooplive.co.kr / afreecatv.com domains
+    let host = r"(?:sooplive\.com|sooplive\.co\.kr|afreecatv\.com)";
+    for pat in [format!(r"{host}/player/(\d+)"), format!(r"vod\.{host}/.*?(\d{{6,}})"), r"^soop:\s*(\d+)\s*$".to_string()] {
+        if let Some(c) = Regex::new(&pat).unwrap().captures(video.trim()) {
             return Some(c[1].to_string());
         }
     }
@@ -184,6 +186,8 @@ mod tests {
     #[test]
     fn matches() {
         assert_eq!(super::matches("https://vod.sooplive.com/player/198140749").as_deref(), Some("198140749"));
+        assert_eq!(super::matches("https://vod.sooplive.co.kr/player/198140749").as_deref(), Some("198140749"));
+        assert_eq!(super::matches("https://vod.afreecatv.com/player/198140749/catch").as_deref(), Some("198140749"));
         assert_eq!(super::matches("soop:198140749").as_deref(), Some("198140749"));
         assert_eq!(super::matches("198140749"), None);
     }
