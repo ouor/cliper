@@ -113,6 +113,24 @@ struct ExportArg {
     opts: crate::engine::ExportOptions,
 }
 #[derive(Deserialize)]
+struct SetlistArg {
+    id: String,
+    text: String,
+    tolerance: Option<f64>,
+    #[serde(default)]
+    apply: bool,
+    #[serde(default)]
+    overwrite: bool,
+}
+#[derive(Deserialize)]
+struct MetaArg {
+    id: String,
+    format: crate::project::report::ReportFormat,
+    #[serde(default)]
+    include_disabled: bool,
+    path: Option<String>,
+}
+#[derive(Deserialize)]
 struct JobArg {
     job_id: String,
 }
@@ -138,6 +156,14 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         "songs.set" => {
             let a: SongsArg = p(&params)?;
             to_json(eng.set_songs(&a.id, a.songs).await?)
+        }
+        "songs.match_setlist" => {
+            let a: SetlistArg = p(&params)?;
+            to_json(eng.match_setlist(&a.id, &a.text, a.tolerance, a.apply, a.overwrite).await?)
+        }
+        "project.export_metadata" => {
+            let a: MetaArg = p(&params)?;
+            eng.export_metadata(&a.id, a.format, a.include_disabled, a.path.as_deref())
         }
         "clips.plan" => to_json(eng.plan(&p::<IdArg>(&params)?.id).await?),
         "clip.extend" => {

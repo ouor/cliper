@@ -3,6 +3,8 @@
 pub mod model;
 pub mod naming;
 pub mod plan;
+pub mod report;
+pub mod setlist;
 pub mod store;
 
 pub use model::*;

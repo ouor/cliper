@@ -26,6 +26,8 @@ use crate::ml::panns::{self, Probs, Tagger};
 use crate::ml::runtime;
 use crate::ml::separator::ModelSpec;
 use crate::progress::{CancellationToken, Progress, ProgressFn};
+use crate::project::report::{self, ReportFormat};
+use crate::project::setlist::{self, SetlistMatch};
 use crate::project::{self, Detection, naming, Mute, Origin, Project, Settings, Song, Store, plan};
 use crate::render::MuteSpan;
 use crate::source::{ResolveError, Source};
@@ -473,6 +475,38 @@ impl Engine {
             Ok(())
         })
         .await
+    }
+
+    /// Match a pasted setlist / fan timestamps to the songs. `apply` writes
+    /// titles/artists (empty fields only unless `overwrite`).
+    pub async fn match_setlist(&self, id: &str, text: &str, tolerance: Option<f64>, apply: bool, overwrite: bool) -> ApiResult<SetlistMatch> {
+        let tol = tolerance.unwrap_or(150.0).max(0.0);
+        if !apply {
+            let mut p = self.get(id)?;
+            return Ok(setlist::apply(&mut p, text, tol, false, false));
+        }
+        let mut out = None;
+        self.mutate(id, |p| {
+            out = Some(setlist::apply(p, text, tol, true, overwrite));
+            Ok(())
+        })
+        .await?;
+        Ok(out.unwrap())
+    }
+
+    /// Song list as CSV / JSON / YouTube chapters / timestamp text; optionally
+    /// also written to `path`.
+    pub fn export_metadata(&self, id: &str, format: ReportFormat, include_disabled: bool, path: Option<&str>) -> ApiResult<serde_json::Value> {
+        let p = self.get(id)?;
+        let text = report::render(&p, format, include_disabled);
+        if let Some(path) = path {
+            let path = Path::new(path);
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(path, &text)?;
+        }
+        Ok(json!({ "text": text, "path": path }))
     }
 
     pub async fn plan(&self, id: &str) -> ApiResult<Project> {
