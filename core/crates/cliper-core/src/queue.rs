@@ -194,7 +194,7 @@ impl Engine {
         }
         let p = self.get(&p.id)?;
         if p.clips.iter().any(|c| c.video.is_none() || c.stems.is_none()) {
-            let j = self.job_fetch_clips(&p.id, None, None)?;
+            let j = self.job_fetch_clips(&p.id, None, None, false).await?;
             step("clips.fetch", j.clone());
             self.wait_job(&j).await?;
         }

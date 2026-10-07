@@ -57,6 +57,19 @@ fn catalog(c: &Value) -> Catalog {
     }
 }
 
+/// Are these cookies logged in? Returns (logged in, nickname).
+pub async fn check_login(cookies: &BTreeMap<String, String>) -> Result<(bool, Option<String>), crate::http::NetError> {
+    let http = Http::new(HEADERS, Some(cookies));
+    let url = "https://comm-api.game.naver.com/nng_main/v1/user/getUserStatus";
+    let resp = http.client().get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(crate::http::NetError::Status { status: resp.status().as_u16(), url: url.into() });
+    }
+    let body: Value = resp.json().await?;
+    let c = &body["content"];
+    Ok((c["loggedIn"].as_bool().unwrap_or(false), c["nickname"].as_str().map(str::to_string)))
+}
+
 pub async fn resolve(video_id: &str, cookies: Option<&BTreeMap<String, String>>) -> Result<Source, ResolveError> {
     let http = Http::new(HEADERS, cookies);
     let resp = http
@@ -103,6 +116,7 @@ fn info(content: &Value, video_id: &str, container: Container, variants: Vec<m3u
         audio_variant,
         catalog: catalog(content),
         notes: Vec::new(),
+        audio_tracks: Vec::new(),
     }
 }
 

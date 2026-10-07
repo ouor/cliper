@@ -8,4 +8,4 @@ import type { JsonValue } from "./serde_json/JsonValue";
 /**
  * Notifications pushed to the client.
  */
-export type Event = { "event": "job_started", job_id: string, kind: string, project_id: string, } | { "event": "job_progress", job_id: string, kind: string, project_id: string, progress: Progress, } | { "event": "job_done", job_id: string, kind: string, project_id: string, result: JsonValue, } | { "event": "job_failed", job_id: string, kind: string, project_id: string, error: ApiError, } | { "event": "project_changed", project: Project, } | { "event": "queue_changed", queue: Array<QueueEntry>, };
+export type Event = { "event": "job_started", job_id: string, kind: string, project_id: string, items: Array<string>, } | { "event": "job_progress", job_id: string, kind: string, project_id: string, progress: Progress, } | { "event": "job_done", job_id: string, kind: string, project_id: string, result: JsonValue, } | { "event": "job_failed", job_id: string, kind: string, project_id: string, error: ApiError, } | { "event": "project_changed", project: Project, } | { "event": "queue_changed", queue: Array<QueueEntry>, };

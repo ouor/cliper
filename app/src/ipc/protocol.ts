@@ -6,6 +6,8 @@
 
 import type { ApiError } from "./generated/ApiError";
 import type { AudioState } from "./generated/AudioState";
+import type { CookieStatus } from "./generated/CookieStatus";
+import type { Mute } from "./generated/Mute";
 import type { Event } from "./generated/Event";
 import type { ExportOptions } from "./generated/ExportOptions";
 import type { ExportResult } from "./generated/ExportResult";
@@ -22,7 +24,7 @@ import type { Song } from "./generated/Song";
 import type { StemsResult } from "./generated/StemsResult";
 import type { SystemInfo } from "./generated/SystemInfo";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Returned by every long-running method; follow it via job.* notifications. */
 export interface JobHandle {
@@ -33,8 +35,16 @@ type NoParams = Record<string, never>;
 
 export interface Methods {
   "system.info": { params: NoParams; result: SystemInfo };
-  /** Login cookies for private/membership VODs (e.g. chzzk NID_AUT/NID_SES); null clears. */
-  "system.set_cookies": { params: { cookies: Record<string, string> | null }; result: true };
+  /** Start the CUDA provider now (loads the detection model, a few s); gpu.cuda_ok becomes known. */
+  "system.probe_gpu": { params: NoParams; result: SystemInfo };
+  /** Login cookies for private/membership VODs (e.g. chzzk NID_AUT/NID_SES); null clears.
+   *  Stored encrypted (DPAPI) and kept across restarts. */
+  "system.set_cookies": { params: { cookies: Record<string, string> | null }; result: CookieStatus };
+  "system.cookies_status": { params: NoParams; result: CookieStatus };
+  /** chzzk: is the login still valid? (SOOP: valid stays null) */
+  "system.check_cookies": { params: NoParams; result: CookieStatus };
+  /** Keep the PC awake while jobs run (persisted). */
+  "system.set_keep_awake": { params: { enabled: boolean }; result: true };
 
   "project.list": { params: NoParams; result: ProjectSummary[] };
   /** Resolve a VOD (URL, chzzk number, "soop:<id>") or open a local recording (absolute
@@ -51,9 +61,23 @@ export interface Methods {
     result: { text: string; path: string | null };
   };
 
-  /** The UI owns song editing: send the whole list (new songs/mutes may use id "").
-   *  Validated; manual mutes become confirmed; clips are re-planned. */
-  "songs.set": { params: { id: string; songs: Song[] }; result: Project };
+  /** Whole-list replacement (bulk edits, undo). New songs/mutes may use id "".
+   *  Validated; manual mutes become confirmed; clips are re-planned.
+   *  `base_revision` = project.revision the edit was based on (CONFLICT if stale). */
+  "songs.set": { params: { id: string; songs: Song[]; base_revision?: number | null }; result: Project };
+  /** Change some fields of one song (not id / clip_id / export / confidence). */
+  "song.update": {
+    params: { id: string; song_id: string; patch: Partial<Song>; base_revision?: number | null };
+    result: Project;
+  };
+  "song.add": { params: { id: string; song: Song; base_revision?: number | null }; result: { project: Project; song_id: string } };
+  "song.remove": { params: { id: string; song_id: string; base_revision?: number | null }; result: Project };
+  /** Add (id "" or unknown) or replace one mute. */
+  "mute.upsert": {
+    params: { id: string; song_id: string; mute: Mute; base_revision?: number | null };
+    result: { project: Project; mute_id: string };
+  };
+  "mute.remove": { params: { id: string; song_id: string; mute_id: string; base_revision?: number | null }; result: Project };
   /** Paste a setlist / fan timestamps. `apply: false` previews the matching;
    *  `apply: true` writes titles/artists (empty fields only unless `overwrite`). */
   "songs.match_setlist": {
@@ -63,6 +87,14 @@ export interface Methods {
   "clips.plan": { params: { id: string }; result: Project };
   /** Change a clip's VOD range; drops its video/stems so clips.fetch re-downloads it. */
   "clip.extend": { params: { id: string; clip_id: string; start: number; end: number }; result: Project };
+  /** Delete downloaded video + stems (songs, mutes and edits stay). */
+  "clip.drop_media": { params: { id: string; clip_id: string }; result: { project: Project; freed_bytes: number } };
+  "project.drop_media": { params: { id: string }; result: { project: Project; freed_bytes: number } };
+  /** Sample-exact float32 WAV of the analysis audio, [start, start+duration) VOD seconds. */
+  "audio.window": {
+    params: { id: string; start: number; duration: number; sample_rate?: number; channels?: 1 | 2 };
+    result: { path: string; file: string; start: number; duration: number; sample_rate: number; channels: number };
+  };
 
   "detect.default_params": { params: NoParams; result: Params };
   /** Re-run the segmenter on cached probabilities (instant). */
@@ -74,8 +106,12 @@ export interface Methods {
   /** PANNs tagging (+ overview.peaks) then detection. */
   "detect.run": { params: { id: string; params?: Params | null; retag?: boolean }; result: JobHandle };
   /** Per clip: video → align → stems → talk → mute suggestions. Select by clip_ids or
-   *  song_ids (their clips); neither = every clip missing video or stems. */
-  "clips.fetch": { params: { id: string; clip_ids?: string[] | null; song_ids?: string[] | null }; result: JobHandle };
+   *  song_ids (their clips); neither = every clip missing video or stems.
+   *  `exact` + song_ids: clips covering only those songs (± margins), no neighbours. */
+  "clips.fetch": {
+    params: { id: string; clip_ids?: string[] | null; song_ids?: string[] | null; exact?: boolean };
+    result: JobHandle;
+  };
   /** Render + encode enabled songs (default: all), or write editor/DAW stems. */
   "export.run": { params: { id: string } & Partial<ExportOptions>; result: JobHandle };
   "job.list": { params: NoParams; result: JobInfo[] };
@@ -114,7 +150,8 @@ type Variant<E extends Event["event"]> = Omit<Extract<Event, { event: E }>, "eve
 export interface Notifications {
   "engine.ready": { protocol: number; system: SystemInfo };
   "job.started": Variant<"job_started">;
-  /** `progress.item` = clip id (clips.fetch) or song id (export.run) when the event is about one. */
+  /** `progress.item` = clip id (clips.fetch) or song id (export.run); `item_index`/`items_total`
+   *  place it in job.started's `items`. Show `note` (code + args), not `message`. */
   "job.progress": Variant<"job_progress">;
   "job.done": Variant<"job_done">;
   "job.failed": Variant<"job_failed">;

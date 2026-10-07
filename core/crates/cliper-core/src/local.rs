@@ -13,7 +13,7 @@ use crate::audio::ffmpeg;
 use crate::export::keyframe_before;
 use crate::hls::m3u8::{SegRange, Variant};
 use crate::hls::video_fetch::VideoClip;
-use crate::source::{Catalog, Channel, Container, Platform, SourceInfo};
+use crate::source::{AudioTrack, Catalog, Channel, Container, Platform, SourceInfo};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LocalError {
@@ -33,8 +33,8 @@ pub struct Probe {
     pub width: u32,
     pub height: u32,
     pub has_video: bool,
-    /// audio streams in file order (codec names)
-    pub audio_tracks: Vec<String>,
+    /// audio streams in file order
+    pub audio_tracks: Vec<AudioTrack>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +43,9 @@ struct FfStream {
     codec_name: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
+    channels: Option<u32>,
+    #[serde(default)]
+    tags: std::collections::BTreeMap<String, String>,
 }
 #[derive(Deserialize)]
 struct FfFormat {
@@ -68,17 +71,25 @@ pub fn probe(path: &Path) -> Result<Probe, LocalError> {
         return Err(LocalError::Missing(path.to_path_buf()));
     }
     let out = std::process::Command::new(ffprobe_path())
-        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height", "-of", "json"])
+        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,channels:stream_tags=title,language", "-of", "json"])
         .arg(path)
         .output()
         .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { ffmpeg::FfmpegError::Missing } else { e.into() })?;
     let v: FfOut = serde_json::from_slice(&out.stdout).map_err(|_| LocalError::NoAudio(path.to_path_buf()))?;
     let video = v.streams.iter().find(|s| s.codec_type.as_deref() == Some("video"));
-    let audio_tracks: Vec<String> = v
+    let tag = |s: &FfStream, k: &str| s.tags.iter().find(|(t, _)| t.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone()).filter(|v| !v.is_empty());
+    let audio_tracks: Vec<AudioTrack> = v
         .streams
         .iter()
         .filter(|s| s.codec_type.as_deref() == Some("audio"))
-        .map(|s| s.codec_name.clone().unwrap_or_default())
+        .enumerate()
+        .map(|(i, s)| AudioTrack {
+            index: i as u32,
+            codec: s.codec_name.clone().unwrap_or_default(),
+            channels: s.channels.unwrap_or(0),
+            title: tag(s, "title"),
+            language: tag(s, "language").filter(|l| l != "und"),
+        })
         .collect();
     if audio_tracks.is_empty() {
         return Err(LocalError::NoAudio(path.to_path_buf()));
@@ -144,11 +155,15 @@ pub fn source_info(path: &Path) -> Result<SourceInfo, LocalError> {
         audio_variant: 0,
         catalog: Catalog { published_at: modified, channel: Channel::default(), ..Default::default() },
         notes,
+        audio_tracks: pr.audio_tracks,
     })
 }
 
 /// Copy one audio track out (no re-encode) into a Matroska audio file.
 pub fn extract_audio(path: &Path, track: u32, out: &Path) -> Result<(), LocalError> {
+    if !path.is_file() {
+        return Err(LocalError::Missing(path.to_path_buf()));
+    }
     let mut c = ffmpeg::command();
     c.arg("-y").arg("-i").arg(path).args(["-map", &format!("0:a:{track}"), "-vn", "-c:a", "copy"]).arg(out);
     ffmpeg::run(c)?;

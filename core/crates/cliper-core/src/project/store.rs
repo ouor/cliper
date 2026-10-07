@@ -67,6 +67,7 @@ impl Store {
     /// a half-written project.json.
     pub fn save(&self, p: &mut Project) -> Result<(), StoreError> {
         p.updated_at = now();
+        p.revision += 1;
         self.save_raw(p)
     }
 

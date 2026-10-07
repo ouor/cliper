@@ -2,6 +2,7 @@
 import type { AudioState } from "./AudioState";
 import type { Clip } from "./Clip";
 import type { Detection } from "./Detection";
+import type { JobError } from "./JobError";
 import type { Settings } from "./Settings";
 import type { Song } from "./Song";
 import type { SourceInfo } from "./SourceInfo";
@@ -10,4 +11,13 @@ export type Project = { schema: string, id: string,
 /**
  * what the user typed (URL / id)
  */
-input: string, created_at: string, updated_at: string, source: SourceInfo | null, audio: AudioState | null, detection: Detection | null, settings: Settings, songs: Array<Song>, clips: Array<Clip>, };
+input: string, created_at: string, updated_at: string, 
+/**
+ * bumped on every save; pass it back as `base_revision` to detect
+ * concurrent changes (optimistic concurrency)
+ */
+revision: number, source: SourceInfo | null, audio: AudioState | null, detection: Detection | null, settings: Settings, songs: Array<Song>, clips: Array<Clip>, 
+/**
+ * last failed job of this project (cleared when a job of that kind succeeds)
+ */
+last_error: JobError | null, };

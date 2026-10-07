@@ -15,9 +15,9 @@ use tokio::sync::mpsc;
 
 use crate::analysis::detect::Params;
 use crate::engine::{ApiError, Engine, EngineConfig, Event};
-use crate::project::{Settings, Song};
+use crate::project::{Mute, Settings, Song};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 fn rpc_error(code: i64, message: &str, data: Option<Value>) -> Value {
     let mut e = json!({ "code": code, "message": message });
@@ -81,6 +81,57 @@ struct SettingsArg {
 struct SongsArg {
     id: String,
     songs: Vec<Song>,
+    base_revision: Option<u64>,
+}
+#[derive(Deserialize)]
+struct SongUpdateArg {
+    id: String,
+    song_id: String,
+    patch: Value,
+    base_revision: Option<u64>,
+}
+#[derive(Deserialize)]
+struct SongAddArg {
+    id: String,
+    song: Song,
+    base_revision: Option<u64>,
+}
+#[derive(Deserialize)]
+struct SongIdArg {
+    id: String,
+    song_id: String,
+    base_revision: Option<u64>,
+}
+#[derive(Deserialize)]
+struct MuteUpsertArg {
+    id: String,
+    song_id: String,
+    mute: Mute,
+    base_revision: Option<u64>,
+}
+#[derive(Deserialize)]
+struct MuteRemoveArg {
+    id: String,
+    song_id: String,
+    mute_id: String,
+    base_revision: Option<u64>,
+}
+#[derive(Deserialize)]
+struct DropMediaArg {
+    id: String,
+    clip_id: Option<String>,
+}
+#[derive(Deserialize)]
+struct WindowArg {
+    id: String,
+    start: f64,
+    duration: f64,
+    sample_rate: Option<u32>,
+    channels: Option<u32>,
+}
+#[derive(Deserialize)]
+struct KeepAwakeArg {
+    enabled: bool,
 }
 #[derive(Deserialize)]
 struct ExtendArg {
@@ -106,6 +157,8 @@ struct ClipsArg {
     id: String,
     clip_ids: Option<Vec<String>>,
     song_ids: Option<Vec<String>>,
+    #[serde(default)]
+    exact: bool,
 }
 #[derive(Deserialize)]
 struct ExportArg {
@@ -149,8 +202,12 @@ struct JobArg {
 pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<Value, ApiError> {
     match method {
         "system.info" => to_json(eng.system_info()),
-        "system.set_cookies" => {
-            eng.set_cookies(p::<CookiesArg>(&params)?.cookies)?;
+        "system.probe_gpu" => to_json(eng.probe_gpu().await?),
+        "system.set_cookies" => to_json(eng.set_cookies(p::<CookiesArg>(&params)?.cookies)?),
+        "system.cookies_status" => to_json(eng.cookies_status()),
+        "system.check_cookies" => to_json(eng.check_cookies().await?),
+        "system.set_keep_awake" => {
+            eng.set_keep_awake(p::<KeepAwakeArg>(&params)?.enabled)?;
             Ok(json!(true))
         }
         "project.list" => to_json(eng.list()),
@@ -166,7 +223,41 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         }
         "songs.set" => {
             let a: SongsArg = p(&params)?;
-            to_json(eng.set_songs(&a.id, a.songs).await?)
+            to_json(eng.set_songs(&a.id, a.songs, a.base_revision).await?)
+        }
+        "song.update" => {
+            let a: SongUpdateArg = p(&params)?;
+            to_json(eng.update_song(&a.id, &a.song_id, a.patch, a.base_revision).await?)
+        }
+        "song.add" => {
+            let a: SongAddArg = p(&params)?;
+            let (project, song_id) = eng.add_song(&a.id, a.song, a.base_revision).await?;
+            Ok(json!({ "project": project, "song_id": song_id }))
+        }
+        "song.remove" => {
+            let a: SongIdArg = p(&params)?;
+            to_json(eng.remove_song(&a.id, &a.song_id, a.base_revision).await?)
+        }
+        "mute.upsert" => {
+            let a: MuteUpsertArg = p(&params)?;
+            let (project, mute_id) = eng.upsert_mute(&a.id, &a.song_id, a.mute, a.base_revision).await?;
+            Ok(json!({ "project": project, "mute_id": mute_id }))
+        }
+        "mute.remove" => {
+            let a: MuteRemoveArg = p(&params)?;
+            to_json(eng.remove_mute(&a.id, &a.song_id, &a.mute_id, a.base_revision).await?)
+        }
+        "project.drop_media" | "clip.drop_media" => {
+            let a: DropMediaArg = p(&params)?;
+            if method == "clip.drop_media" && a.clip_id.is_none() {
+                return Err(ApiError::new("INVALID_PARAMS", "clip_id is required"));
+            }
+            let (project, freed) = eng.drop_media(&a.id, a.clip_id.as_deref()).await?;
+            Ok(json!({ "project": project, "freed_bytes": freed }))
+        }
+        "audio.window" => {
+            let a: WindowArg = p(&params)?;
+            eng.audio_window(&a.id, a.start, a.duration, a.sample_rate, a.channels).await
         }
         "songs.match_setlist" => {
             let a: SetlistArg = p(&params)?;
@@ -193,7 +284,7 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         }
         "clips.fetch" => {
             let a: ClipsArg = p(&params)?;
-            job(eng.job_fetch_clips(&a.id, a.clip_ids, a.song_ids))
+            job(eng.job_fetch_clips(&a.id, a.clip_ids, a.song_ids, a.exact).await)
         }
         "export.run" => {
             let a: ExportArg = p(&params)?;

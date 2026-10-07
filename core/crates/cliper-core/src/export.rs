@@ -214,7 +214,7 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
     let in_t = if copy { keyframe_before(&spec.source_mp4, spec.in_t)? } else { spec.in_t };
     let dur = spec.out_t - in_t;
 
-    progress(Progress::note("export.render", "rendering audio"));
+    progress(Progress::note("export.render", "render_audio", "rendering audio"));
     let (rate, audio) = match &spec.audio_override {
         Some(path) => {
             let pcm = ffmpeg::decode(path, crate::stems::STEM_RATE, 2, None, None)?.read_all()?;
@@ -239,7 +239,7 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
     drop(audio);
 
     // loudness: always measured (shown to the user), applied only when requested
-    progress(Progress::note("export.render", "measuring loudness"));
+    progress(Progress::note("export.render", "measure_loudness", "measuring loudness"));
     let m = measure(&tmp_wav, spec.loudness).ok();
     let report = m.as_ref().map(|m| LoudnessReport {
         integrated: m.i,
@@ -381,7 +381,7 @@ fn hms_ms(t: f64) -> String {
 /// a Reaper project laying them out, for finishing in an editor / DAW.
 pub fn export_stems(spec: &StemsSpec, progress: &ProgressFn) -> Result<StemsResult, ExportError> {
     std::fs::create_dir_all(&spec.dir)?;
-    progress(Progress::note("export.stems", "writing stems"));
+    progress(Progress::note("export.stems", "write_stems", "writing stems"));
     let orig = wav::read_f32(&spec.orig_wav)?;
     let voc = wav::read_f32(&spec.vocals_wav)?;
     let rate = orig.sample_rate;
@@ -430,7 +430,7 @@ pub fn export_stems(spec: &StemsSpec, progress: &ProgressFn) -> Result<StemsResu
     std::fs::write(&reaper_project, rpp)?;
 
     let reference_video = if spec.reference_video {
-        progress(Progress::note("export.stems", "writing reference video"));
+        progress(Progress::note("export.stems", "write_reference_video", "writing reference video"));
         let p = spec.dir.join(format!("{}_reference.mp4", spec.name));
         let mut c = ffmpeg::command();
         c.arg("-y").args(["-ss", &format!("{a:.6}")]).arg("-i").arg(&spec.source_mp4);

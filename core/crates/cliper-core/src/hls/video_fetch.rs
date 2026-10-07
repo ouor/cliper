@@ -159,10 +159,11 @@ pub async fn fetch_video(
         match fetch_raw(src, &pl, range, &raw, workers, &progress, &cancel).await {
             Ok(_) => {}
             Err(VideoError::Net(NetError::Truncated { .. })) => {
-                progress(Progress::note(
-                    "video.fetch",
-                    format!("{} copy is truncated on the CDN; trying a lower rendition", src.info.variants[v].resolution()),
-                ));
+                let res = src.info.variants[v].resolution();
+                progress(
+                    Progress::note("video.fetch", "variant_truncated", format!("{res} copy is truncated on the CDN; trying a lower rendition"))
+                        .arg("resolution", res),
+                );
                 skipped.push(v);
                 continue;
             }
@@ -171,7 +172,7 @@ pub async fn fetch_video(
                 return Err(e);
             }
         }
-        progress(Progress::note("video.remux", "remuxing"));
+        progress(Progress::note("video.remux", "remux", "remuxing"));
         let (raw_c, out_c) = (raw.clone(), out.to_path_buf());
         tokio::task::spawn_blocking(move || {
             let mut c = ffmpeg::command();

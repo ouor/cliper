@@ -24,7 +24,7 @@ rayon = "1"
 ts-rs = { version = "12", optional = true, features = ["serde-json-impl", "no-serde-warnings"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_Security_Cryptography", "Win32_Foundation"] }
 
 [features]
 # `cargo test -p cliper-core --features ts export_bindings` writes TypeScript types

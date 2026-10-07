@@ -138,6 +138,7 @@ pub async fn resolve(video_id: &str, cookies: Option<&BTreeMap<String, String>>)
             audio_variant: av,
             catalog,
             notes,
+            audio_tracks: Vec::new(),
         },
         playlist,
         init,

@@ -50,14 +50,19 @@ queue.add {inputs, through}       batch: audio → detect (→ clips) for many V
   excluded but kept, so detection reruns don't bring it back), `note`, `artist`,
   and `confidence` from the detector (`doubts`: `short`, `long`, `weak_singing`,
   `talk_inside`, `resplit` — show "애매함" when non-empty; `null` for manual songs).
-  `detect.rerun` / `detect.run` replace only untouched auto songs (not reviewed,
-  no title/note/mutes/clip, still enabled).
+  `detect.rerun` / `detect.run` replace only untouched auto songs: not reviewed,
+  no title/artist/note/mutes, enabled, `mute_enabled`, no own fades, not
+  exported, and not inside a clip whose video was downloaded (a merely
+  *planned* clip doesn't count).
+- **Per-song switches**: `mute_enabled: false` exports the original audio
+  (mutes are kept for later); `fade_in` / `fade_out` override
+  `settings.song_fade_in/out` for that song (`null` = project default).
 - **Candidates**: `detection.candidates` are music-like stretches the detector
   rejected (`too_short`, `no_singing`, `talk`) — draw them as dashed "maybe a
-  missed song" bars; adding one = `songs.set` with a new manual song.
+  missed song" bars; adding one = `song.add` with a new manual song.
 - **Mutes**: suggestions arrive with `origin: "auto", confirmed: false`.
   **Export applies only confirmed mutes** (unless `include_unconfirmed`).
-  Confirm = `songs.set` with `confirmed: true`. Mutes created by the user
+  Confirm = `mute.upsert` with `confirmed: true`. Mutes created by the user
   (`origin: "manual"`) are confirmed automatically. Re-running `clips.fetch`
   refreshes only unconfirmed suggestions.
 - **Mute strength**: `gain_db: null` removes the voice; a negative number only
@@ -66,10 +71,27 @@ queue.add {inputs, through}       batch: audio → detect (→ clips) for many V
 Every mutation — from a request or a job — is followed by `project.changed`
 with the full new `Project`. The UI can treat that as the single source of truth.
 
+### Editing without races
+
+Prefer the **per-item methods** (`song.update` / `song.add` / `song.remove`,
+`mute.upsert` / `mute.remove`): they change only what they name, so a job that
+adds mute suggestions at the same moment is never overwritten. `songs.set`
+(whole-list replacement) is still there for bulk edits and undo.
+
+Every editing method accepts `base_revision`: the `revision` of the project
+the client edited. If the project changed since (`project.revision` is bumped
+on every save), the call fails with `CONFLICT` and nothing is written — reload
+(or take the latest `project.changed`) and reapply.
+
 ## Time model
 
 - **All times in `Project` are seconds on the VOD timeline** (song `start/end`,
   mute `start/end`, clip `start/end`, `clip.talk`).
+- VOD time *t* is sample *t·rate* of the **fully decoded analysis audio**
+  (`audio.aac` / `audio.mka` decoded from its start). The detector, the
+  overview peaks and clip alignment all use that timeline. `audio.window`
+  returns sample-exact windows of it (verified identical to a full decode), so
+  songs can be previewed before any video is fetched.
 - A clip's files (`source.mp4`, `orig.wav`, `vocals.wav`, peaks) have their own
   time base starting at 0. Convert with
   `clip_time = vod_time − clip.video.vod_start − clip.offset`
@@ -85,7 +107,8 @@ Project directory: `<projects>/<project id>/`
 | file | content |
 |------|---------|
 | `project.json` | state (do not write it from the UI — use the API) |
-| `overview.peaks` | whole-VOD waveform, 20 peaks/s (after `detect.run`) |
+| `overview.peaks` | whole-VOD waveform, 20 peaks/s — grows **during** `audio.fetch` (re-read when `progress.peaks_until` advances), final after the job; rewritten by `detect.run` |
+| `cache/window_*.wav` | `audio.window` results (the 24 newest are kept) |
 | `probs.bin` | PANNs curves (CLPROBS1) — for a diagnostic lane |
 | `clips/<clip id>/source.mp4` | video for preview (`<video>`) |
 | `clips/<clip id>/orig.wav`, `vocals.wav` | 48 kHz stereo float32 WAV stems (paths also in `clip.stems`) |
@@ -138,17 +161,28 @@ See `protocol.ts` for exact shapes.
 
 | method | kind | notes |
 |--------|------|-------|
-| `system.info` | request | versions, ffmpeg, CUDA dirs, model presence |
-| `system.set_cookies` | request | `{cookies: {NID_AUT, NID_SES} \| null}` for private/membership VODs |
-| `project.list` / `get` / `create` / `delete` | request | `create` takes a URL, chzzk number or `soop:<id>` |
-| `project.update_settings` | request | margins, rendition height, mute fade, encoder, output dir |
-| `songs.set` | request | full replacement of `songs` (keep ids; new = `""`); validated |
-| `clips.plan` | request | re-plan clips (normally automatic) |
+| `system.info` | request | versions, ffmpeg, CUDA dirs, model presence, `gpu` (`{name, vram_mb, cuda_ok, reason}`; `cuda_ok: null` until tried), `keep_awake`, `cookies` |
+| `system.probe_gpu` | request | starts the CUDA provider now (loads the detection model, a few s) → `SystemInfo` with `gpu.cuda_ok` known |
+| `system.set_cookies` | request | `{cookies: {NID_AUT, NID_SES, …} \| null}` for private/membership VODs → `CookieStatus`. Stored encrypted for the Windows user (DPAPI); survive restarts |
+| `system.cookies_status` | request | → `CookieStatus` (`set, names, platforms, saved_at, encrypted, valid, checked_at, account`) — values are never returned |
+| `system.check_cookies` | request | asks chzzk whether the cookies are still logged in → `CookieStatus` (`valid`, `account`). SOOP can't be checked (`valid: null`) |
+| `system.set_keep_awake` | request | `{enabled}` keep the PC awake while jobs run (persisted; `serve --no-keep-awake` overrides) |
+| `project.list` / `get` / `create` / `delete` | request | `create` takes a URL, chzzk number, `soop:<id>` or a local file path (`source.audio_tracks` lists its audio streams). `list` → `ProjectSummary` with `unreviewed`, `unconfirmed_mutes`, `clips_ready`, `has_audio`, `has_detection`, `last_error` |
+| `project.update_settings` | request | margins, rendition height, mute fade, encoder, output dir, `audio_track` (local; run `audio.fetch` again after changing it) |
+| `song.update` | request | `{song_id, patch, base_revision?}` partial Song (not `id/clip_id/export/confidence`; `mutes` replaces the list) → Project |
+| `song.add` | request | `{song, base_revision?}` → `{project, song_id}` |
+| `song.remove` | request | `{song_id, base_revision?}` → Project |
+| `mute.upsert` | request | `{song_id, mute, base_revision?}` add (id `""`/unknown) or replace → `{project, mute_id}` |
+| `mute.remove` | request | `{song_id, mute_id, base_revision?}` → Project |
+| `songs.set` | request | full replacement of `songs` (keep ids; new = `""`); validated; `base_revision?` |
+| `clips.plan` | request | re-plan clips (normally automatic). `clip.song_ids` lists the songs a clip holds — show "neighbouring songs come along" before fetching. Planned clip ids stay stable across re-planning |
 | `clip.extend` | request | new VOD range for a clip; clears its media |
+| `clip.drop_media` / `project.drop_media` | request | `{clip_id}` / `{}` delete downloaded video + stems (songs, mutes, edits stay) → `{project, freed_bytes}` |
+| `audio.window` | request | `{start, duration, sample_rate?=48000, channels?=2}` VOD seconds → `{path, file, …}` float32 WAV of the analysis audio, sample-exact |
 | `detect.default_params` / `detect.rerun` | request | rerun is instant (cached probabilities) |
 | `audio.fetch` | job | |
 | `detect.run` | job | `{params?, retag?}` |
-| `clips.fetch` | job | `{clip_ids?, song_ids?}` default: clips missing video or stems |
+| `clips.fetch` | job | `{clip_ids?, song_ids?, exact?}` default: clips missing video or stems. `exact` + `song_ids`: plan clips covering only those songs (± margins) so close neighbours aren't fetched along (such clips are `pinned`) |
 | `export.run` | job | `ExportOptions`: `song_ids?`, `format?` (mp4/wav/flac/mp3), `video_codec?` ("copy" = fast), `include_unconfirmed?`, `stems?` + `also_render?`, `handles?`, `reference_video?`, `audio_overrides?` (song id → audio file aligned to clip start) |
 | `songs.match_setlist` | request | `{text, tolerance?=150, apply?, overwrite?}` → `SetlistMatch` |
 | `project.export_metadata` | request | `{format: csv/json/chapters/timestamps, include_disabled?, path?}` → `{text, path}` |
@@ -163,8 +197,8 @@ Only one job **per kind per project** runs at a time (`BUSY` otherwise).
 | method | params |
 |--------|--------|
 | `engine.ready` | `{protocol, system}` |
-| `job.started` | `{job_id, kind, project_id}` |
-| `job.progress` | `{job_id, kind, project_id, progress: {stage, done, total, bytes?, message?}}` — ≤10/s per job; `message` = human note |
+| `job.started` | `{job_id, kind, project_id, items}` — `items`: clip ids (`clips.fetch`) / song ids (`export.run`) in processing order, else `[]` |
+| `job.progress` | `{job_id, kind, project_id, progress}` — ≤10/s per job (notes always pass). `progress`: `stage, done, total, bytes?, item?, item_index?, items_total?, eta_sec?` (current stage), `peaks_until?` (audio.fetch), `note?` `{code, args?}`, `message?` (English, for logs — don't show it) |
 | `job.done` | `{job_id, kind, project_id, result}` (see `JobResults`) |
 | `job.failed` | `{job_id, kind, project_id, error: {code, message}}` |
 | `project.changed` | `{project}` |
@@ -175,7 +209,24 @@ event is about, so per-song progress can be shown. Progress `stage` values: `aud
 `video.remux`, `separate`, `talk`, `clips.fetch`, `export.run`,
 `export.render`, `export.encode` (done/total in ms), `export.stems`.
 
-While any job runs the engine keeps Windows from going to sleep.
+Note codes: `copy_audio_track`, `cut_recording`, `find_talk`,
+`fallback_segments {count}`, `variant_truncated {resolution}`, `remux`,
+`render_audio`, `measure_loudness`, `write_stems`, `write_reference_video`,
+`decode`. Unknown codes may appear later — ignore them.
+
+While any job runs the engine keeps Windows from going to sleep (unless
+`system.set_keep_awake {enabled: false}`).
+
+A failed job (not a cancelled one) is also stored as `project.last_error`
+(`{kind, code, message, at}`) and cleared when a job of that kind succeeds.
+
+### Resuming after a restart
+
+Jobs don't survive the engine. What is kept: `audio.fetch` restarts from
+scratch (about a minute for 4 h); `clips.fetch` skips clips that already have
+video and stems (a half-downloaded clip starts over); `export.run` redoes the
+songs it is asked for (finished ones have `song.export`). So re-issuing the
+same requests resumes the work.
 
 ## Errors
 
@@ -187,6 +238,7 @@ params, −32601 for unknown methods, −32000 otherwise. `data.code` is the eng
 | `INVALID_PARAMS` | bug or bad input |
 | `NOT_FOUND` | project/clip id unknown |
 | `BUSY` | same job already running |
+| `CONFLICT` | `base_revision` is stale — reload and reapply |
 | `PRECONDITION` | step order (e.g. export before clips.fetch) — show what to do next |
 | `UNRECOGNIZED_INPUT` | not a chzzk/SOOP VOD reference |
 | `VOD_NOT_FOUND` | deleted/unknown VOD |

@@ -47,7 +47,7 @@ pub fn separate_clip(
 ) -> Result<Stems, StemError> {
     let t0 = std::time::Instant::now();
     std::fs::create_dir_all(out_dir)?;
-    progress(Progress::note("separate", "decoding"));
+    progress(Progress::note("separate", "decode", "decoding"));
     let orig = ffmpeg::decode(clip, STEM_RATE, 2, None, None)?.read_all()?;
     let frames = (orig.len() / 2) as u64;
     let orig_path = out_dir.join("orig.wav");

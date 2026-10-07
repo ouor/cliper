@@ -152,6 +152,9 @@ mod tests {
             confidence: None,
             clip_id: None,
             mutes: vec![],
+            mute_enabled: true,
+            fade_in: None,
+            fade_out: None,
             export: None,
         });
         let c = render(&p, ReportFormat::Chapters, false);

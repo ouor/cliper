@@ -10,7 +10,7 @@
 //!   4. `$CUDA_PATH/bin/x64`, `$CUDA_PATH/bin`
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use ort::ep;
 use ort::session::Session;
@@ -88,6 +88,35 @@ impl<T> From<ort::Error<T>> for ModelError {
     }
 }
 
+/// Outcome of the most recent attempt to start the CUDA execution provider
+/// (None until a session has been opened with CUDA allowed).
+#[derive(Debug, Clone, Serialize)]
+pub struct CudaStatus {
+    pub ok: bool,
+    pub reason: Option<String>,
+}
+
+static CUDA_STATUS: Mutex<Option<CudaStatus>> = Mutex::new(None);
+
+pub fn cuda_status() -> Option<CudaStatus> {
+    CUDA_STATUS.lock().unwrap().clone()
+}
+
+/// GPU name and memory from `nvidia-smi` (first GPU), if available.
+pub fn gpu_name() -> Option<(String, u64)> {
+    let mut c = std::process::Command::new("nvidia-smi");
+    c.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let out = c.output().ok().filter(|o| o.status.success())?;
+    let line = String::from_utf8_lossy(&out.stdout).lines().next()?.to_string();
+    let (name, mem) = line.rsplit_once(',')?;
+    Some((name.trim().to_string(), mem.trim().parse().unwrap_or(0)))
+}
+
 /// Open `model`, preferring CUDA unless `prefer_cpu`. Returns the device used.
 pub fn open_session(model: &Path, prefer_cpu: bool) -> Result<(Session, Device), ModelError> {
     if !model.is_file() {
@@ -103,8 +132,14 @@ pub fn open_session(model: &Path, prefer_cpu: bool) -> Result<(Session, Device),
     };
     if !prefer_cpu {
         match build(true) {
-            Ok(s) => return Ok((s, Device::Cuda)),
-            Err(e) => tracing::warn!("CUDA execution provider unavailable, falling back to CPU: {e}"),
+            Ok(s) => {
+                *CUDA_STATUS.lock().unwrap() = Some(CudaStatus { ok: true, reason: None });
+                return Ok((s, Device::Cuda));
+            }
+            Err(e) => {
+                tracing::warn!("CUDA execution provider unavailable, falling back to CPU: {e}");
+                *CUDA_STATUS.lock().unwrap() = Some(CudaStatus { ok: false, reason: Some(e.to_string()) });
+            }
         }
     }
     let s = build(false)?;

@@ -90,6 +90,20 @@ pub struct SourceInfo {
     pub audio_variant: usize,
     pub catalog: Catalog,
     pub notes: Vec<String>,
+    /// local recordings: audio streams in file order (`settings.audio_track` indexes this)
+    #[serde(default)]
+    pub audio_tracks: Vec<AudioTrack>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AudioTrack {
+    /// audio stream number (0 = first audio stream)
+    pub index: u32,
+    pub codec: String,
+    pub channels: u32,
+    pub title: Option<String>,
+    pub language: Option<String>,
 }
 
 #[derive(Clone)]

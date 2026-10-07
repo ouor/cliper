@@ -330,7 +330,7 @@ pub async fn extract_audio(
     }
     file.flush().await?;
     if fallbacks > 0 {
-        progress(Progress::note("audio.fetch", format!("{fallbacks} segment(s) recovered via a fallback variant")));
+        progress(Progress::note("audio.fetch", "fallback_segments", format!("{fallbacks} segment(s) recovered via a fallback variant")).arg("count", fallbacks));
     }
 
     Ok(AudioResult {

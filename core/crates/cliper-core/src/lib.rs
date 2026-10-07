@@ -3,6 +3,7 @@
 pub mod analysis;
 pub mod export;
 pub mod audio;
+pub mod cookies;
 pub mod engine;
 pub mod hls;
 pub mod http;

@@ -25,6 +25,9 @@ enum Cmd {
         models: PathBuf,
         #[arg(long)]
         cpu: bool,
+        /// don't keep the PC awake while jobs run (overrides the saved preference)
+        #[arg(long)]
+        no_keep_awake: bool,
     },
     /// Headless batch: create projects for VODs / recordings and run audio +
     /// detection (and optionally clips + export). One JSON line per input on stdout.
@@ -177,15 +180,20 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     match Cli::parse().cmd {
-        Cmd::Serve { projects, models, cpu } => {
-            let cfg = cliper_core::engine::EngineConfig { projects_root: projects, models_dir: models, prefer_cpu: cpu };
+        Cmd::Serve { projects, models, cpu, no_keep_awake } => {
+            let cfg = cliper_core::engine::EngineConfig {
+                projects_root: projects,
+                models_dir: models,
+                prefer_cpu: cpu,
+                keep_awake: no_keep_awake.then_some(false),
+            };
             cliper_core::ipc::server::serve(cfg).await?;
         }
         Cmd::Process { inputs, projects, models, cpu, clips, export, format } => {
             use cliper_core::engine::{Engine, EngineConfig, Event, ExportOptions};
             use cliper_core::queue::{QueueStatus, QueueThrough};
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-            let eng = Engine::new(EngineConfig { projects_root: projects, models_dir: models, prefer_cpu: cpu }, tx);
+            let eng = Engine::new(EngineConfig { projects_root: projects, models_dir: models, prefer_cpu: cpu, keep_awake: None }, tx);
             // progress → stderr (one line per stage change / note)
             tokio::spawn(async move {
                 let mut last = String::new();

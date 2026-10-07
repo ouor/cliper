@@ -51,6 +51,11 @@ impl PeakBuilder {
         self.acc_n = 0;
     }
 
+    /// Peaks so far (the partial peak in progress is left out).
+    pub fn snapshot(&self) -> Peaks {
+        Peaks { rate: self.rate, data: self.out.clone() }
+    }
+
     pub fn finish(mut self) -> Peaks {
         if self.acc_n > 0 {
             self.flush();

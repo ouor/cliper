@@ -24,4 +24,13 @@ note: string,
 /**
  * detector confidence (auto songs; None for manual songs)
  */
-confidence: Confidence | null, clip_id: string | null, mutes: Array<Mute>, export: ExportInfo | null, };
+confidence: Confidence | null, clip_id: string | null, mutes: Array<Mute>, 
+/**
+ * apply this song's confirmed mutes on export (false = keep the original
+ * audio, mutes are kept for later)
+ */
+mute_enabled: boolean, 
+/**
+ * fade at the song's start / end on export (None = settings.song_fade_in/out)
+ */
+fade_in: number | null, fade_out: number | null, export: ExportInfo | null, };

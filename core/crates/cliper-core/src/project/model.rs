@@ -23,12 +23,28 @@ pub struct Project {
     pub input: String,
     pub created_at: String,
     pub updated_at: String,
+    /// bumped on every save; pass it back as `base_revision` to detect
+    /// concurrent changes (optimistic concurrency)
+    #[serde(default)]
+    pub revision: u64,
     pub source: Option<SourceInfo>,
     pub audio: Option<AudioState>,
     pub detection: Option<Detection>,
     pub settings: Settings,
     pub songs: Vec<Song>,
     pub clips: Vec<Clip>,
+    /// last failed job of this project (cleared when a job of that kind succeeds)
+    #[serde(default)]
+    pub last_error: Option<JobError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct JobError {
+    pub kind: String,
+    pub code: String,
+    pub message: String,
+    pub at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +196,15 @@ pub struct Song {
     pub clip_id: Option<String>,
     #[serde(default)]
     pub mutes: Vec<Mute>,
+    /// apply this song's confirmed mutes on export (false = keep the original
+    /// audio, mutes are kept for later)
+    #[serde(default = "yes")]
+    pub mute_enabled: bool,
+    /// fade at the song's start / end on export (None = settings.song_fade_in/out)
+    #[serde(default)]
+    pub fade_in: Option<f64>,
+    #[serde(default)]
+    pub fade_out: Option<f64>,
     pub export: Option<ExportInfo>,
 }
 
@@ -230,6 +255,13 @@ pub struct Clip {
     /// talk regions found in the vocal stem (VOD time), mute suggestions
     #[serde(default)]
     pub talk: Vec<(f64, f64)>,
+    /// songs assigned to this clip (maintained by clip planning)
+    #[serde(default)]
+    pub song_ids: Vec<String>,
+    /// planned for specific songs (`clips.fetch {exact}`): kept by re-planning
+    /// even before its video exists
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Clip {
@@ -269,12 +301,14 @@ impl Project {
             input: input.to_string(),
             created_at: now.clone(),
             updated_at: now,
+            revision: 0,
             source: None,
             audio: None,
             detection: None,
             settings: Settings::default(),
             songs: Vec::new(),
             clips: Vec::new(),
+            last_error: None,
         }
     }
 
@@ -291,22 +325,29 @@ impl Project {
         self.clips.iter_mut().find(|c| c.id == id)
     }
 
-    /// Replace auto songs with fresh detector output, keeping manual songs and
-    /// any auto song the user touched (reviewed, titled, muted, disabled, fetched).
+    /// Does this song carry user work that detection must not throw away?
+    /// (manual, reviewed, titled, noted, muted, disabled, or inside a clip whose
+    /// video was already downloaded — a merely *planned* clip doesn't count)
+    pub fn is_touched(&self, s: &Song) -> bool {
+        s.origin == Origin::Manual
+            || s.reviewed
+            || !s.enabled
+            || !s.title.is_empty()
+            || !s.artist.is_empty()
+            || !s.note.is_empty()
+            || !s.mutes.is_empty()
+            || !s.mute_enabled
+            || s.fade_in.is_some()
+            || s.fade_out.is_some()
+            || s.export.is_some()
+            || s.clip_id.as_deref().and_then(|c| self.clip(c)).is_some_and(|c| c.video.is_some())
+    }
+
+    /// Replace untouched auto songs with fresh detector output, keeping manual
+    /// songs and every song the user touched (see [`Project::is_touched`]).
     pub fn apply_detection(&mut self, a: &Analysis) {
-        let keep: Vec<Song> = self
-            .songs
-            .drain(..)
-            .filter(|s| {
-                s.origin == Origin::Manual
-                    || s.reviewed
-                    || !s.enabled
-                    || !s.title.is_empty()
-                    || !s.note.is_empty()
-                    || !s.mutes.is_empty()
-                    || s.clip_id.is_some()
-            })
-            .collect();
+        let touched: Vec<bool> = self.songs.iter().map(|s| self.is_touched(s)).collect();
+        let keep: Vec<Song> = self.songs.drain(..).zip(touched).filter(|(_, t)| *t).map(|(s, _)| s).collect();
         let overlaps = |a: (f64, f64), b: (f64, f64)| a.0 < b.1 && b.0 < a.1;
         let mut songs = keep;
         for (k, &seg) in a.segments.iter().enumerate() {
@@ -326,6 +367,9 @@ impl Project {
                 confidence: a.confidence.get(k).cloned(),
                 clip_id: None,
                 mutes: Vec::new(),
+                mute_enabled: true,
+                fade_in: None,
+                fade_out: None,
                 export: None,
             });
         }

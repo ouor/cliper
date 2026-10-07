@@ -14,4 +14,13 @@ offset: number, stems: Stems | null,
 /**
  * talk regions found in the vocal stem (VOD time), mute suggestions
  */
-talk: Array<[number, number]>, };
+talk: Array<[number, number]>, 
+/**
+ * songs assigned to this clip (maintained by clip planning)
+ */
+song_ids: Array<string>, 
+/**
+ * planned for specific songs (`clips.fetch {exact}`): kept by re-planning
+ * even before its video exists
+ */
+pinned: boolean, };
