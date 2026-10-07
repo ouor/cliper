@@ -541,7 +541,7 @@ export function Workspace({ projectId }: { projectId: string }) {
       {mode === "review" && (
         <>
           <NextBanner p={p} />
-          <div className="ws-body review">
+          <div className="ws-body ws-review">
             <SongList p={p} />
             <main className="ws-main">
               <SongDetail p={p} />
@@ -553,7 +553,7 @@ export function Workspace({ projectId }: { projectId: string }) {
       )}
       {mode === "talk" && (
         <>
-          <div className="ws-body talk">
+          <div className="ws-body ws-talk">
             <SongList p={p} talk />
             <main className="ws-main">
               <TalkEditor p={p} />

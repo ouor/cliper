@@ -65,7 +65,8 @@ export async function updateSettings(patch: Partial<AppSettings>) {
 let toastId = 0;
 export function toast(text: string, opts: Partial<Omit<Toast, "id" | "text">> = {}) {
   const t: Toast = { id: ++toastId, kind: opts.kind ?? "info", text, action: opts.action, ttl: opts.ttl ?? (opts.action ? 8000 : 4000) };
-  useApp.setState((s) => ({ toasts: [...s.toasts.slice(-3), t] }));
+  // identical text replaces the previous toast instead of stacking
+  useApp.setState((s) => ({ toasts: [...s.toasts.filter((x) => x.text !== text).slice(-2), t] }));
   setTimeout(() => dismissToast(t.id), t.ttl);
 }
 export function dismissToast(id: number) {

@@ -1633,12 +1633,11 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  border: 2px solid var(--suggest);
-  background: repeating-linear-gradient(45deg, var(--suggest) 0 2px, transparent 2px 4px);
+  border: 2px dashed var(--suggest);
   flex: none;
 }
 .mute-dot.on {
-  border-color: var(--mute);
+  border: 2px solid var(--mute);
   background: var(--mute);
 }
 .mr-pos {
@@ -2187,4 +2186,12 @@
   .video-box {
     width: min(38%, 440px);
   }
+}
+
+/* popovers anchored in the bottom map open upwards */
+.map-head .popover {
+  top: auto;
+  bottom: calc(100% + 6px);
+  left: auto;
+  right: 0;
 }

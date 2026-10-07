@@ -86,7 +86,7 @@ export function fmtTick(t: number, step: number): string {
 }
 
 /** Time ruler along the bottom (or top) of a band. `label(t)` customises text. */
-export function drawRuler(ctx: CanvasRenderingContext2D, t0: number, t1: number, w: number, y: number, h: number, c: Colors, label?: (t: number, step: number) => string) {
+export function drawRuler(ctx: CanvasRenderingContext2D, t0: number, t1: number, w: number, y: number, h: number, c: Colors, label?: (t: number, step: number) => string, zero = 0) {
   const span = t1 - t0;
   const step = tickStep(span, w);
   const minor = step / 5;
@@ -100,25 +100,27 @@ export function drawRuler(ctx: CanvasRenderingContext2D, t0: number, t1: number,
   ctx.font = `10px ${c.font}`;
   ctx.textBaseline = "middle";
   ctx.fillStyle = c["text-3"];
-  const first = Math.ceil(t0 / minor) * minor;
+  // ticks are aligned to multiples of the step measured from `zero`
+  const first = Math.ceil((t0 - zero) / minor) * minor + zero;
   ctx.beginPath();
   for (let t = first; t <= t1; t += minor) {
     const x = Math.round(((t - t0) / span) * w) + 0.5;
-    const major = Math.abs(t / step - Math.round(t / step)) < 1e-6;
+    const rel = (t - zero) / step;
+    const major = Math.abs(rel - Math.round(rel)) < 1e-6;
     ctx.moveTo(x, y);
     ctx.lineTo(x, y + (major ? 6 : 3));
-    if (major) ctx.fillText((label ?? fmtTick)(Math.round(t / step) * step, step), x + 3, y + h / 2 + 2);
+    if (major) ctx.fillText((label ?? fmtTick)(Math.round(rel) * step + zero, step), x + 3, y + h / 2 + 2);
   }
   ctx.strokeStyle = c["line-3"];
   ctx.stroke();
 }
 
-export function drawGrid(ctx: CanvasRenderingContext2D, t0: number, t1: number, w: number, y: number, h: number, c: Colors) {
+export function drawGrid(ctx: CanvasRenderingContext2D, t0: number, t1: number, w: number, y: number, h: number, c: Colors, zero = 0) {
   const span = t1 - t0;
   const step = tickStep(span, w);
   ctx.strokeStyle = c.grid;
   ctx.beginPath();
-  for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) {
+  for (let t = Math.ceil((t0 - zero) / step) * step + zero; t <= t1; t += step) {
     const x = Math.round(((t - t0) / span) * w) + 0.5;
     ctx.moveTo(x, y);
     ctx.lineTo(x, y + h);

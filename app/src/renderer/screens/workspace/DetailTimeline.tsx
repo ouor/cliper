@@ -68,7 +68,7 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
     const [t0, t1] = view;
     ctx.fillStyle = col["bg-0"];
     ctx.fillRect(0, 0, w, h);
-    drawGrid(ctx, t0, t1, w, 0, yRuler, col);
+    drawGrid(ctx, t0, t1, w, 0, yRuler, col, s.start);
 
     // song range (outside is dimmed after drawing)
     let sa = s.start;
@@ -242,7 +242,7 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
       ctx.lineTo(w, y + 0.5);
     }
     ctx.stroke();
-    drawRuler(ctx, t0, t1, w, yRuler, RULER, col, (t, step) => fmtTime(t - s.start, step < 0.1 ? 2 : step < 1 ? 1 : 0));
+    drawRuler(ctx, t0, t1, w, yRuler, RULER, col, (t, step) => fmtTime(t - s.start, step < 0.1 ? 2 : step < 1 ? 1 : 0), s.start);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p, s, orig, voc, probs, view, w, h, dpr, drag, ws.selectedMute, ws.markStart, theme, muteOn, loop, loopOn]);
 

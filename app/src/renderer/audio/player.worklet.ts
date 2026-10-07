@@ -147,6 +147,9 @@ class CliperPlayer extends AudioWorkletProcessor {
       case "volume":
         this.volume = m.volume;
         break;
+      case "dbg":
+        this.port.postMessage({ type: "dbg", src: this.src, origin: this.origin, frames: this.frames, loadedO: this.loadedO, loadedV: this.loadedV, pos: this.pos, chunks: [...this.chunks.keys()], playing: this.playing });
+        break;
     }
   }
 
@@ -226,25 +229,33 @@ class CliperPlayer extends AudioWorkletProcessor {
       let vR = 0;
       if (this.src === "stems") {
         const f = (t - this.origin) * sampleRate;
-        if (f < 0 || f >= this.frames - 1) {
+        if (f >= this.frames - 1 && !(this.loop && step > 0)) {
           ended = true;
           L.fill(0, i);
           R.fill(0, i);
           break;
         }
-        const fi = Math.floor(f);
-        if (fi + 1 >= this.loadedO || fi + 1 >= this.loadedV) {
-          stalled = true;
+        if (f >= 0 && f < this.frames - 1) {
+          const fi = Math.floor(f);
+          if (fi + 1 >= this.loadedO || fi + 1 >= this.loadedV) {
+            stalled = true;
+            L.fill(0, i);
+            R.fill(0, i);
+            break;
+          }
+          const a = f - fi;
+          const j = fi * 2;
+          oL = (this.orig[j] + (this.orig[j + 2] - this.orig[j]) * a) * I16;
+          oR = (this.orig[j + 1] + (this.orig[j + 3] - this.orig[j + 1]) * a) * I16;
+          vL = (this.voc[j] + (this.voc[j + 2] - this.voc[j]) * a) * I16;
+          vR = (this.voc[j + 1] + (this.voc[j + 3] - this.voc[j + 1]) * a) * I16;
+        } else if (f < 0 && step < 0) {
+          ended = true;
           L.fill(0, i);
           R.fill(0, i);
           break;
         }
-        const a = f - fi;
-        const j = fi * 2;
-        oL = (this.orig[j] + (this.orig[j + 2] - this.orig[j]) * a) * I16;
-        oR = (this.orig[j + 1] + (this.orig[j + 3] - this.orig[j + 1]) * a) * I16;
-        vL = (this.voc[j] + (this.voc[j + 2] - this.voc[j]) * a) * I16;
-        vR = (this.voc[j + 1] + (this.voc[j + 3] - this.voc[j + 1]) * a) * I16;
+        // outside the loaded window (e.g. loop padding before it): silence, keep moving
       } else {
         if (t < 0 || t >= this.duration) {
           ended = true;

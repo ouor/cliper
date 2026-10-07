@@ -12,7 +12,6 @@ import { fmtTime, parseTime } from "@/lib/format";
 import { hasUnsafeFileChars, hostClip, reviewStatus, songLabels, songNumbers, videoState } from "@/lib/song";
 import { mediaUrl } from "@/lib/peaks";
 import { fetchSongs } from "@/lib/pipeline";
-import { requestFocus } from "@/state/ws";
 
 export function TimeField({ value, onCommit, label }: { value: number; onCommit: (v: number) => void; label: string }) {
   const [text, setText] = useState<string | null>(null);
@@ -270,11 +269,11 @@ export function SongDetail({ p }: { p: Project }) {
           <button className="btn sm subtle" onClick={() => void toggleExclude(p.id, s.id)}>
             {s.enabled ? <X size={13} /> : <Undo2 size={13} />} {s.enabled ? "제외" : "복원"} <kbd>X</kbd>
           </button>
-          <button className="btn sm subtle" onClick={() => void splitSong(p.id, s.id, player.now())} data-tip="재생 위치에서 두 곡으로 나눠요">
-            <Scissors size={13} /> 여기서 나누기 <kbd>/</kbd>
+          <button className="btn sm subtle" onClick={() => void splitSong(p.id, s.id, player.now())} data-tip="재생 위치에서 두 곡으로 나눠요" data-tip-pos="top">
+            <Scissors size={13} /> 나누기 <kbd>/</kbd>
           </button>
-          <button className="btn sm subtle" disabled={!nextSong} onClick={() => nextSong && void mergeSongs(p.id, ws.multi.length > 1 ? ws.multi : [s.id, nextSong.id])}>
-            <Combine size={13} /> {ws.multi.length > 1 ? `${ws.multi.length}곡 합치기` : "다음 곡과 합치기"} <kbd>G</kbd>
+          <button className="btn sm subtle" disabled={!nextSong} onClick={() => nextSong && void mergeSongs(p.id, ws.multi.length > 1 ? ws.multi : [s.id, nextSong.id])} data-tip={ws.multi.length > 1 ? "선택한 곡을 하나로" : "다음 곡과 하나로 합쳐요"} data-tip-pos="top">
+            <Combine size={13} /> {ws.multi.length > 1 ? `${ws.multi.length}곡 합치기` : "합치기"} <kbd>G</kbd>
           </button>
           <button className="btn sm ghost" onClick={() => void deleteSong(p.id, s.id)} aria-label="삭제">
             <Trash2 size={13} />
@@ -304,9 +303,6 @@ function requestFocusHint() {
   return (
     <div className="dp-foot faint">
       <ArrowDownToLine size={11} /> 다음 미확인 곡 <kbd>N</kbd> · 제목 <kbd>T</kbd> · 메모 <kbd>M</kbd> · 모든 단축키 <kbd>?</kbd>
-      <button className="btn xs ghost" onClick={() => requestFocus("title")}>
-        제목 입력
-      </button>
     </div>
   );
 }

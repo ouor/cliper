@@ -72,12 +72,16 @@ function MuteRow({ p, s, m, selected, warn }: { p: Project; s: Song; m: Mute; se
       <span className={`mute-dot${m.confirmed ? " on" : ""}`} />
       <span className="mr-pos">{mutePosition(m, s)}</span>
       <span className="mono mr-time">
-        {fmtTime(m.start - s.start, 1)}~{fmtTime(m.end - s.start, 1)}
+        {fmtTime(m.start - s.start, 1)} ~ {fmtTime(m.end - s.start, 1)}
       </span>
       <span className="spacer" />
       {m.origin === "manual" && <Hand size={12} className="faint" aria-label="직접 만듦" />}
       {m.gain_db !== null && <span className="tag outline">{m.gain_db}dB</span>}
-      {warn.length > 0 && <AlertTriangle size={13} color="var(--doubt)" aria-label={warn.join(", ")} />}
+      {warn.filter((w) => w !== "곡 밖").length > 0 && (
+        <span data-tip={warn.filter((w) => w !== "곡 밖").join(", ")} data-tip-pos="left">
+          <AlertTriangle size={13} color="var(--doubt)" />
+        </span>
+      )}
       <span className={`tag ${m.confirmed ? "mute" : "suggest"}`}>{m.confirmed ? (m.origin === "manual" ? "직접 만듦" : "확인함") : "제안 · 확인 전"}</span>
       {void p}
     </button>
@@ -125,9 +129,13 @@ export function TalkEditor({ p }: { p: Project }) {
   useEffect(() => {
     if (!s || !clip?.stems || !clip.video) return;
     const cov = clipCovered(clip)!;
-    const a = Math.max(cov[0], s.start - p.settings.margin_before);
-    const b = Math.min(cov[1], s.end + p.settings.margin_after);
+    // song ± margins (+ loop padding) — bounded so long merged clips stay small in memory
+    const pad = useApp.getState().settings.loopPad + 2;
+    const a = Math.max(cov[0], s.start - p.settings.margin_before - pad);
+    const b = Math.min(cov[1], s.end + p.settings.margin_after + pad);
     void player.useStems(p.id, clip.id, clip.video.vod_start + clip.offset, clip.stems.frames, a, b, clip.stems.model + clip.stems.elapsed_sec);
+    const now = player.now();
+    if (now < a || now > b) player.seek(Math.max(a, s.start - 2));
     let alive = true;
     const bust = String(clip.stems.elapsed_sec);
     void Promise.all([loadPeaks(mediaUrl(p.id, `clips/${clip.id}/orig.peaks`, bust)).catch(() => null), loadPeaks(mediaUrl(p.id, `clips/${clip.id}/vocals.peaks`, bust)).catch(() => null)]).then(([orig, voc]) => alive && setPeaks({ orig, voc }));

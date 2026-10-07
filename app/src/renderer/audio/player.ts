@@ -2,6 +2,8 @@
 // sources (VOD stream / stems window), transport (J/K/L), listening modes, video sync.
 import { create } from "zustand";
 import workletUrl from "./player.worklet.ts?worker&url";
+
+export const WORKLET_URL = new URL(workletUrl, location.href).href;
 import type { Mute } from "@ipc/generated/Mute";
 import { mediaUrl } from "@/lib/peaks";
 
@@ -66,6 +68,15 @@ class Player {
   private video: VideoBinding | null = null;
 
   private listeners = new Set<(pos: number) => void>();
+  private dbgResolve: ((v: unknown) => void) | null = null;
+
+  /** Worklet internals (QA). */
+  debug(): Promise<unknown> {
+    return new Promise((r) => {
+      this.dbgResolve = r;
+      this.post({ type: "dbg" });
+    });
+  }
 
   private async init() {
     if (this.ready) return this.ready;
@@ -98,6 +109,8 @@ class Player {
       if (st.playing !== m.playing || st.buffering !== m.buffering || m.force) {
         usePlayer.setState({ playing: m.playing, buffering: m.buffering, pos: m.pos });
       }
+    } else if (m.type === "dbg") {
+      this.dbgResolve?.(m);
     } else if (m.type === "ended") {
       usePlayer.setState({ playing: false, rate: 1 });
     }
@@ -253,8 +266,9 @@ class Player {
           const s = f32[i] * 32767;
           i16[i] = s > 32767 ? 32767 : s < -32768 ? -32768 : s;
         }
+        const n = i16.length; // read before the transfer detaches the buffer
         this.post({ type: "stems:data", which, offset: samplesDone, data: i16 }, [i16.buffer]);
-        samplesDone += i16.length;
+        samplesDone += n;
         if (which === 0) doneO = samplesDone / 2;
         else doneV = samplesDone / 2;
         const now = performance.now();
