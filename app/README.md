@@ -67,7 +67,7 @@ app/
 │     │  └─ player.ts           AudioContext, 소스(방송 전체 스트림 / 곡 창 stems), J/K/L, 구간 반복, 영상 동기화
 │     ├─ canvas/draw.ts         캔버스 공통 (DPR, 테마 색, 눈금, mipmap 파형, 곡선, 빗금)
 │     ├─ lib/                   rpc(타입 있는 call), errors(오류→한국어), song(라벨·상태·링크·설명란),
-│     │                         edits(곡/멘트 편집 → songs.set), pipeline(작업 연결), keys(단축키), peaks, format
+│     │                         edits(곡/멘트 편집 계산), pipeline(작업 연결), keys(단축키), peaks, format
 │     ├─ state/                 zustand: app(설정·화면·토스트·대화상자), projects(낙관적 편집·되돌리기),
 │     │                         jobs(작업·ETA·대기열·이어하기), ws(작업공간 선택/보기)
 │     ├─ screens/               FirstRun, Home, Workspace, Settings, HelpOverlay, CookiesDialog
@@ -93,8 +93,8 @@ app/
 ### 엔진 연동 요점
 
 - 엔진은 앱 시작 시(작업 폴더가 정해져 있으면) `serve --projects <작업 폴더> --models <models>`로 실행. 작업 폴더나 처리 장치(CPU)를 바꾸면 다시 시작합니다. 처리 우선순위 "낮게"는 OS 프로세스 우선순위로 적용.
-- `project.changed`를 진실의 원천으로 씁니다. 곡 편집은 **대기 중 편집(pending op)**으로 화면에 즉시 반영하고(엔진 최신 상태 위에 다시 적용), 순서대로 엔진에 보냅니다. 보낼 때는 편집 전후를 비교해 바뀐 것만 `song.update` / `song.add` / `song.remove` / `mute.upsert` / `mute.remove`로 보내고 모두 `base_revision`을 붙입니다. `CONFLICT`면 최신 상태를 받아 같은 편집을 다시 적용해 재시도합니다. 엔진이 새로 붙인 id(`song.add`, 새 `mute.upsert`)는 별칭으로 기록해 선택 상태와 되돌리기 기록이 따라가게 합니다(`state/projects.ts`).
-- 되돌리기는 그 편집이 건드린 곡만 이전 상태로 되돌립니다. 그사이 작업이 넣은 멘트 제안 같은 다른 변경은 지우지 않습니다.
+- `project.changed`를 진실의 원천으로 씁니다. 곡 편집은 **대기 중 편집(pending op)**으로 화면에 즉시 반영하고(엔진 최신 상태 위에 다시 적용), 순서대로 엔진에 보냅니다. 한 곡만 바꾸는 편집은 전후를 비교해 바뀐 것만 `song.update` / `song.add` / `song.remove` / `mute.upsert` / `mute.remove`로 보내고, 여러 곡에 걸친 편집(나누기·합치기·여러 곡 켜고 끄기)은 `songs.set` 한 번으로 원자적으로 보냅니다. 모두 `base_revision`을 붙입니다. `CONFLICT`면 최신 상태를 받아 같은 편집을 다시 적용해 재시도합니다. 엔진이 새로 붙인 id(`song.add`, 새 `mute.upsert`)는 별칭으로 기록해 선택 상태와 되돌리기 기록이 따라가게 합니다(`state/projects.ts`).
+- 되돌리기는 그 편집이 바꾼 필드와 그 편집이 추가·삭제·변경한 멘트 구간만 이전 상태로 되돌립니다. 그사이 작업이 넣은 멘트 제안 같은 다른 변경은 지우지 않습니다.
 - 같은 종류 작업이 돌고 있어 `BUSY`가 오면 앱 대기열에 넣고, 앞 작업이 끝나면 자동으로 시작합니다.
 - 소리 받기 → 곡 찾기, 영상 받기 → 내보내기(밤새 처리) 같은 연결은 앱이 작업 완료 알림으로 이어 줍니다. 곡을 정해서 받을 때는 `clips.fetch {song_ids, exact: true}`로 이웃 곡을 함께 받지 않습니다.
 - 진행 표시는 `job.started.items`, `progress.item_index/items_total/eta_sec`, `progress.note.code`(한국어 문장은 앱이 만듦)를 씁니다. 소리 받는 동안은 `progress.peaks_until`에 맞춰 `overview.peaks`를 다시 읽어 파형을 채웁니다.
