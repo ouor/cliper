@@ -304,6 +304,47 @@ fn keep_awake_while_busy(eng: std::sync::Weak<Engine>) {
         .ok();
 }
 
+/// Drop the ONNX sessions (detection, separation) once no job has run for
+/// [`MODEL_IDLE`], so an idle app doesn't sit on GPU memory (and the process
+/// commit that mirrors it on Windows). Reopening costs a few seconds.
+const MODEL_IDLE: Duration = Duration::from_secs(60);
+
+fn release_models_when_idle(eng: std::sync::Weak<Engine>) {
+    std::thread::Builder::new()
+        .name("model-idle".into())
+        .spawn(move || {
+            let mut idle_since: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_secs(10));
+                let Some(e) = eng.upgrade() else { return };
+                if !e.jobs.lk().is_empty() {
+                    idle_since = None;
+                    continue;
+                }
+                let since = *idle_since.get_or_insert_with(Instant::now);
+                if since.elapsed() < MODEL_IDLE {
+                    continue;
+                }
+                // a model in use holds its lock; leave it for the next round
+                let mut freed = false;
+                if let Ok(mut t) = e.tagger.try_lock()
+                    && t.take().is_some()
+                {
+                    freed = true;
+                }
+                if let Ok(mut s) = e.separator.try_lock()
+                    && s.take().is_some()
+                {
+                    freed = true;
+                }
+                if freed {
+                    tracing::info!("released idle models");
+                }
+            }
+        })
+        .ok();
+}
+
 struct AlignOutcome {
     method: String,
     offset: f64,
@@ -746,6 +787,7 @@ impl Engine {
             queue_worker: AtomicBool::new(false),
         });
         keep_awake_while_busy(Arc::downgrade(&eng));
+        release_models_when_idle(Arc::downgrade(&eng));
         eng
     }
 

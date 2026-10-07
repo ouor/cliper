@@ -94,35 +94,15 @@ pub fn is_oom(msg: &str) -> bool {
     ["out of memory", "failed to allocate", "alloc_failed", "cudaerrormemoryallocation", "bfcarena"].iter().any(|k| m.contains(k))
 }
 
-/// Free GPU memory (MiB) on the first GPU, from nvidia-smi.
-fn free_vram_mb() -> Option<u64> {
-    let mut c = std::process::Command::new("nvidia-smi");
-    c.args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000);
-    }
-    let out = c.output().ok().filter(|o| o.status.success())?;
-    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
-}
-
 impl Separator {
-    /// Open the model (CUDA unless `prefer_cpu`). On the GPU the batch size
-    /// follows the free memory (batch 4 peaks near 10 GB, 1 near 2.5 GB); an
-    /// out-of-memory run halves it automatically.
+    /// Open the model (CUDA unless `prefer_cpu`). Batch 1 everywhere: on an
+    /// RTX 3090 batch 4 peaked at 9.3 GB of VRAM (and as much process commit)
+    /// for no speed-up over batch 1 (2.6 GB; 640 s clip: 20.9 s vs 18.4 s), and
+    /// the results agree to 64 dB SDR.
     pub fn open(models_dir: &Path, spec: ModelSpec, prefer_cpu: bool) -> Result<Self, ModelError> {
         let (session, device) = open_session(&models_dir.join(&spec.file), prefer_cpu)?;
         let stft = Stft::new(spec.n_fft, spec.hop);
-        let batch = match device {
-            Device::Cpu => 1,
-            Device::Cuda => match free_vram_mb() {
-                Some(mb) if mb >= 11_000 => 4,
-                Some(mb) if mb >= 6_000 => 2,
-                Some(_) => 1,
-                None => 2,
-            },
-        };
+        let batch = 1;
         tracing::info!("separator on {device:?}, batch {batch}");
         Ok(Self { session, spec, stft, device, batch })
     }
