@@ -190,12 +190,53 @@ pub async fn install_from(url: &str, sha256: &str, dir: &Path, progress: Progres
     }
 
     // 2) unpack next to the target, then swap it in
+    let r = place(&part, &got, dir, progress, cancel).await;
+    let _ = std::fs::remove_file(&part);
+    r
+}
+
+/// Install from a zip the user already has (e.g. downloaded from a private
+/// release in the browser). Same pinned checksum as the download.
+pub async fn install_cuda_from_file(zip: &Path, progress: ProgressFn, cancel: CancellationToken) -> Result<PathBuf, AddonError> {
+    let dir = cuda_addon_dir();
+    std::fs::create_dir_all(dir.parent().ok_or_else(|| AddonError::Zip("bad add-on folder".into()))?)?;
+    let (zc, pc, cc) = (zip.to_path_buf(), progress.clone(), cancel.clone());
+    let got = tokio::task::spawn_blocking(move || -> Result<String, AddonError> {
+        let total = std::fs::metadata(&zc)?.len();
+        let mut f = std::fs::File::open(&zc)?;
+        let mut h = Sha256::new();
+        let (mut buf, mut done) = (vec![0u8; 1 << 20], 0u64);
+        loop {
+            if cc.is_cancelled() {
+                return Err(AddonError::Cancelled);
+            }
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+            done += n as u64;
+            pc(Progress { bytes: Some(done), ..Progress::new("addon.verify", done, total) });
+        }
+        Ok(format!("{:x}", h.finalize()))
+    })
+    .await
+    .map_err(|e| AddonError::Zip(e.to_string()))??;
+    if !CUDA_ADDON_SHA256.eq_ignore_ascii_case(&got) {
+        return Err(AddonError::Checksum);
+    }
+    place(zip, &got, &dir, progress, cancel).await
+}
+
+/// Unpack a verified add-on zip beside `dir`, check it, and swap it in.
+async fn place(zip: &Path, sha: &str, dir: &Path, progress: ProgressFn, cancel: CancellationToken) -> Result<PathBuf, AddonError> {
+    let parent = dir.parent().ok_or_else(|| AddonError::Zip("bad add-on folder".into()))?.to_path_buf();
+    let got = sha.to_string();
     let staging = parent.join(format!("{}.staging", CUDA_ADDON_VERSION));
-    let (partc, stagingc, cancelc) = (part.clone(), staging.clone(), cancel.clone());
-    let r = tokio::task::spawn_blocking(move || unpack(&partc, &stagingc, &progress, &cancelc))
+    let (zipc, stagingc, cancelc) = (zip.to_path_buf(), staging.clone(), cancel.clone());
+    let r = tokio::task::spawn_blocking(move || unpack(&zipc, &stagingc, &progress, &cancelc))
         .await
         .map_err(|e| AddonError::Zip(e.to_string()))?;
-    let _ = std::fs::remove_file(&part);
     if let Err(e) = r {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);

@@ -209,7 +209,14 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         "system.set_cookies" => to_json(eng.set_cookies(p::<CookiesArg>(&params)?.cookies)?),
         "system.cookies_status" => to_json(eng.cookies_status()),
         "system.check_cookies" => to_json(eng.check_cookies().await?),
-        "addon.install_cuda" => job(eng.job_install_cuda()),
+        "addon.install_cuda" => {
+            #[derive(Deserialize, Default)]
+            struct A {
+                zip: Option<std::path::PathBuf>,
+            }
+            let a: A = if params.is_null() { A::default() } else { p(&params)? };
+            job(eng.job_install_cuda(a.zip))
+        }
         "addon.remove_cuda" => {
             eng.remove_cuda_addon()?;
             Ok(json!(true))

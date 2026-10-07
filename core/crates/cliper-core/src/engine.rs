@@ -866,9 +866,19 @@ impl Engine {
 
     /// Download + install the CUDA add-on (job on the pseudo project
     /// `_system`). The engine must be restarted afterwards to use it.
-    pub fn job_install_cuda(self: &Arc<Self>) -> ApiResult<String> {
+    /// `zip`: install from a local copy of the add-on zip instead of downloading
+    /// (same pinned checksum) — for a private release, or offline PCs.
+    pub fn job_install_cuda(self: &Arc<Self>, zip: Option<PathBuf>) -> ApiResult<String> {
+        if let Some(z) = &zip
+            && !z.is_file() {
+                return Err(invalid(format!("not a file: {}", z.display())));
+            }
         self.spawn_job("addon.install_cuda", "_system", Vec::new(), move |_eng, ctx| async move {
-            let dir = crate::addon::install_cuda(ctx.progress.clone(), ctx.cancel.clone()).await.map_err(|e| match e {
+            let r = match zip {
+                Some(z) => crate::addon::install_cuda_from_file(&z, ctx.progress.clone(), ctx.cancel.clone()).await,
+                None => crate::addon::install_cuda(ctx.progress.clone(), ctx.cancel.clone()).await,
+            };
+            let dir = r.map_err(|e| match e {
                 crate::addon::AddonError::Cancelled => ApiError::new("CANCELLED", "cancelled"),
                 crate::addon::AddonError::Net(m) => ApiError::new("NETWORK", m),
                 e => ApiError::new("ADDON", e),

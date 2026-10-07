@@ -109,6 +109,7 @@ cd ../app && npm run dist:win
 CUDA 13 + cuDNN 9 런타임(DLL 14개, 압축 약 1 GB)은 앱에 넣지 않고 v0.1.0 릴리즈에 `cliper-cuda-addon-v1-amd64.zip`으로 따로 올려요. NVIDIA 그래픽카드가 있는데 CUDA 런타임이 없으면 앱이 엔진의 `addon.install_cuda`로 자동으로 받아요. 받은 파일은 SHA-256을 확인한 뒤 `%LOCALAPPDATA%\Cliper\addons\cuda-v1`에 풀어요. 이후 버전도 같은 애드온을 써요.
 
 - URL, 크기, SHA-256은 `core/crates/cliper-core/src/addon.rs`에 고정돼 있어요. zip을 다시 만들면 이 값도 같이 바꾸고, 새 이름(`cuda-v2`)으로 올려야 해요.
+- 저장소가 비공개인 동안은 릴리즈 파일을 로그인 없이 받을 수 없어 자동 다운로드가 실패해요. 브라우저로 받은 zip을 앱의 **zip 파일로 설치**(엔진 `addon.install_cuda {zip}`)로 넣으면 같은 해시 검사를 거쳐 설치돼요.
 - QA: `CLIPER_CUDA_ADDON_URL`로 로컬 서버의 같은 파일을 가리키고(해시는 그대로 검사), `CLIPER_ADDON_DIR`로 설치 위치를 바꿀 수 있어요.
 
 ## 참고 구현
