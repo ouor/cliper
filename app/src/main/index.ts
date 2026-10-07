@@ -81,7 +81,11 @@ function writeAtomic(file: string, text: string) {
   writeFileSync(tmp, text);
   renameSync(tmp, file);
 }
-let settings: AppSettings = { ...DEFAULT_SETTINGS, ...readJson<Partial<AppSettings>>(SETTINGS_FILE, {}) };
+const stored = readJson<Partial<AppSettings> & { defaultsRev?: number }>(SETTINGS_FILE, {});
+// defaults changed after a settings file was written: 1 = video 1080p (was 최고 화질)
+if ((stored.defaultsRev ?? 0) < 1 && stored.videoHeight == null) delete stored.videoHeight;
+let settings: AppSettings = { ...DEFAULT_SETTINGS, ...stored };
+(settings as AppSettings & { defaultsRev?: number }).defaultsRev = 1;
 if (env("CLIPER_PROJECTS")) {
   settings.projectsRoot = resolve(env("CLIPER_PROJECTS")!);
   settings.firstRunDone = settings.firstRunDone || env("CLIPER_SKIP_FIRST_RUN") === "1";

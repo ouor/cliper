@@ -27,7 +27,7 @@ export interface AppSettings {
   showLanes: { music: boolean; speech: boolean; sing: boolean };
 
   // 영상 받기
-  videoHeight: number | null; // null = 최고 화질
+  videoHeight: number | null; // 이 높이 이하 중 최고 (null = 최고 화질)
   marginSec: number;
   onlyReviewedFetch: boolean;
 
@@ -78,7 +78,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shortSec: 90,
   listenPreroll: 5,
   showLanes: { music: false, speech: false, sing: false },
-  videoHeight: null,
+  videoHeight: 1080,
   marginSec: 30,
   onlyReviewedFetch: true,
   suggestMutes: true,

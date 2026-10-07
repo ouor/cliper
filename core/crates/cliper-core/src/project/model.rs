@@ -98,7 +98,8 @@ pub struct Settings {
     pub margin_before: f64,
     /// seconds of video fetched after each song
     pub margin_after: f64,
-    /// video rendition height (None = highest/original)
+    /// video rendition height: the best one at or below it (None = highest).
+    /// Default 1080: chzzk's original, and SOOP's 1440p doubles the size.
     pub video_height: Option<u32>,
     /// local recordings: audio track used for analysis, separation and export
     /// (0 = first; pick an OBS mix track when recording multitrack)
@@ -140,7 +141,7 @@ impl Default for Settings {
         Self {
             margin_before: 30.0,
             margin_after: 30.0,
-            video_height: None,
+            video_height: Some(1080),
             audio_track: 0,
             suggest_mutes: true,
             mute_fade: 0.3,

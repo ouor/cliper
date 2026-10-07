@@ -69,7 +69,14 @@ function BroadcastCard({ r, onCancel }: { r: Resolved; onCancel: () => void }) {
   const heights = [...new Set(src.variants.map((v) => v.height))].sort((a, b) => b - a);
   const tracks = src.audio_tracks ?? [];
   const [track, setTrack] = useState(p.settings.audio_track ?? 0);
-  const [height, setHeight] = useState<number | null>(settings.videoHeight && heights.includes(settings.videoHeight) ? settings.videoHeight : null);
+  // the best rendition at or below the default (e.g. 1080p on a 1440p SOOP VOD)
+  const defaultHeight = (() => {
+    const want = settings.videoHeight;
+    if (!want) return null;
+    const h = heights.find((x) => x <= want) ?? heights[heights.length - 1];
+    return h === heights[0] ? null : h;
+  })();
+  const [height, setHeight] = useState<number | null>(defaultHeight);
   const [busy, setBusy] = useState(false);
   const songs = p.songs.filter((s) => s.enabled);
   const exported = songs.filter((s) => s.export).length;
