@@ -95,7 +95,7 @@ impl Default for Settings {
             video_height: None,
             mute_fade: 0.3,
             video_codec: "h264_nvenc".into(),
-            video_quality: 19,
+            video_quality: 23,
             audio_bitrate_k: 320,
             output_dir: None,
         }

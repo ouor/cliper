@@ -17,6 +17,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run the engine as a JSON-RPC 2.0 server on stdin/stdout (for the UI)
+    Serve {
+        #[arg(long, default_value = "projects")]
+        projects: PathBuf,
+        #[arg(long, default_value = "models")]
+        models: PathBuf,
+        #[arg(long)]
+        cpu: bool,
+    },
     /// Resolve a VOD and print its metadata / variants as JSON
     Resolve {
         video: String,
@@ -126,6 +135,10 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     match Cli::parse().cmd {
+        Cmd::Serve { projects, models, cpu } => {
+            let cfg = cliper_core::engine::EngineConfig { projects_root: projects, models_dir: models, prefer_cpu: cpu };
+            cliper_core::ipc::server::serve(cfg).await?;
+        }
         Cmd::Resolve { video, cookies } => {
             let src = cliper_core::platforms::resolve(&video, load_cookies(&cookies)?.as_ref()).await?;
             println!("{}", serde_json::to_string_pretty(&src.info)?);

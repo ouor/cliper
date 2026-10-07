@@ -3,8 +3,10 @@
 pub mod analysis;
 pub mod export;
 pub mod audio;
+pub mod engine;
 pub mod hls;
 pub mod http;
+pub mod ipc;
 pub mod ml;
 pub mod platforms;
 pub mod progress;

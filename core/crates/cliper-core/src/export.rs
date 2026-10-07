@@ -144,7 +144,7 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
                 c.args(["-c:v", "copy"]);
             }
             "h264_nvenc" => {
-                c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", &spec.video_quality.to_string(), "-b:v", "0"]);
+                c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", &spec.video_quality.to_string(), "-b:v", "0"]);
             }
             _ => {
                 c.args(["-c:v", "libx264", "-preset", "medium", "-crf", &spec.video_quality.to_string()]);
