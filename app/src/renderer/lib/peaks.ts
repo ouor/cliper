@@ -101,32 +101,40 @@ export function peaksLevel(p: Peaks, peaksPerPixel: number): { data: Int16Array;
 }
 
 // ── cached loaders (by URL) ──
-const cache = new Map<string, Promise<unknown>>();
+/**
+ * Parsed files keyed by path (without the cache-bust): a new bust replaces the old copy, and
+ * at most CACHE_MAX files stay in memory (least recently used dropped).
+ */
+const CACHE_MAX = 12;
+const cache = new Map<string, { url: string; p: Promise<unknown> }>();
 
-export function loadPeaks(url: string): Promise<Peaks> {
-  let p = cache.get(url) as Promise<Peaks> | undefined;
-  if (!p) {
-    p = fetch(url).then(async (r) => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return parsePeaks(await r.arrayBuffer());
-    });
-    p.catch(() => cache.delete(url));
-    cache.set(url, p);
+function cached<T>(url: string, parse: (b: ArrayBuffer) => T): Promise<T> {
+  const key = url.split("?")[0];
+  const hit = cache.get(key);
+  if (hit && hit.url === url) {
+    cache.delete(key);
+    cache.set(key, hit); // most recent last
+    return hit.p as Promise<T>;
   }
+  const p = fetch(url).then(async (r) => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return parse(await r.arrayBuffer());
+  });
+  p.catch(() => {
+    if (cache.get(key)?.p === p) cache.delete(key);
+  });
+  cache.delete(key);
+  cache.set(key, { url, p });
+  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!);
   return p;
 }
 
+export function loadPeaks(url: string): Promise<Peaks> {
+  return cached(url, parsePeaks);
+}
+
 export function loadProbs(url: string): Promise<Probs> {
-  let p = cache.get(url) as Promise<Probs> | undefined;
-  if (!p) {
-    p = fetch(url).then(async (r) => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return parseProbs(await r.arrayBuffer());
-    });
-    p.catch(() => cache.delete(url));
-    cache.set(url, p);
-  }
-  return p;
+  return cached(url, (b) => parseProbs(b));
 }
 
 export function invalidateMedia(prefix: string) {

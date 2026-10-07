@@ -1,5 +1,5 @@
 // 곡 상세 타임라인 (멘트 다듬기): 원본 · 목소리 · 멘트 구간 · 노래 띠.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Clip } from "@ipc/generated/Clip";
 import type { Mute } from "@ipc/generated/Mute";
 import type { Project } from "@ipc/generated/Project";
@@ -40,7 +40,7 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
   const origin = clip.video!.vod_start + clip.offset;
   const lo = Math.max(cov[0], s.start - p.settings.margin_before);
   const hi = Math.min(cov[1], s.end + p.settings.margin_after);
-  const view: [number, number] = ws.detailView ?? [lo, hi];
+  const view: [number, number] = useMemo(() => ws.detailView ?? [lo, hi], [ws.detailView, lo, hi]);
   const span = view[1] - view[0];
   const xOf = (t: number) => ((t - view[0]) / span) * w;
   const tOf = (x: number) => view[0] + (x / w) * span;

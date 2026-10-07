@@ -185,7 +185,35 @@ function computeFraction(j: Job, pr: Progress): number | null {
   return Math.min(0.999, ((pr.item_index ?? j.itemsDone.length) + inItem) / n);
 }
 
+const lastFlush = new Map<string, number>();
+const queuedProgress = new Map<string, [string, string, Progress]>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Store updates at most ~4 Hz per job, so subscribers don't re-render on every engine tick. */
 function onProgress(jobId: string, kind: string, projectId: string, pr: Progress) {
+  const j = useJobs.getState().jobs[jobId];
+  const now = Date.now();
+  const important = !j || pr.stage !== j.stage || (pr.item ?? j.item) !== j.item || pr.note?.code !== j.note?.code;
+  if (!important && now - (lastFlush.get(jobId) ?? 0) < 250) {
+    queuedProgress.set(jobId, [kind, projectId, pr]);
+    if (!flushTimer)
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        const all = [...queuedProgress.entries()];
+        queuedProgress.clear();
+        for (const [id, [k, pid, p]] of all) {
+          lastFlush.set(id, Date.now());
+          applyProgress(id, k, pid, p);
+        }
+      }, 250);
+    return;
+  }
+  queuedProgress.delete(jobId);
+  lastFlush.set(jobId, now);
+  applyProgress(jobId, kind, projectId, pr);
+}
+
+function applyProgress(jobId: string, kind: string, projectId: string, pr: Progress) {
   const s = useJobs.getState();
   let j = s.jobs[jobId];
   if (!j) {
@@ -255,6 +283,7 @@ export function wireJobs() {
   });
   onNotification("job.progress", (p) => onProgress(p.job_id, p.kind, p.project_id, p.progress));
   onNotification("job.done", (p) => {
+    queuedProgress.delete(p.job_id);
     const j = useJobs.getState().jobs[p.job_id];
     upsert(p.job_id, {
       kind: p.kind,
@@ -272,15 +301,16 @@ export function wireJobs() {
     const t = thens.get(p.job_id);
     thens.delete(p.job_id);
     if (t) t(p.result);
-    dispatchWaiting(p.project_id, p.kind);
+    dispatchWaiting(p.project_id);
   });
   onNotification("job.failed", (p) => {
+    queuedProgress.delete(p.job_id);
     const cancelled = p.error.code === "CANCELLED";
     upsert(p.job_id, { kind: p.kind, projectId: p.project_id, status: cancelled ? "cancelled" : "failed", finishedAt: Date.now(), error: friendly(p.error as ApiError) });
     void forgetActive(p.job_id);
     thens.delete(p.job_id);
     if (!cancelled) void notifyDone(useJobs.getState().jobs[p.job_id], false);
-    dispatchWaiting(p.project_id, p.kind);
+    dispatchWaiting(p.project_id);
   });
   onNotification("queue.changed", (p) => useJobs.setState({ queue: p.queue }));
 }
@@ -311,11 +341,7 @@ export async function reconcileJobs() {
     }
   }
   // waiting entries were blocked by jobs that no longer exist
-  const keys = new Set(useJobs.getState().waiting.map((w) => w.key));
-  for (const key of keys) {
-    const [projectId, kind] = key.split("|");
-    if (runningJobs(useJobs.getState(), projectId, kind).length === 0) dispatchWaiting(projectId, kind);
-  }
+  for (const pid of new Set(useJobs.getState().waiting.map((w) => w.projectId))) dispatchWaiting(pid);
 }
 
 let lastBusy: boolean | null = null;
@@ -331,16 +357,31 @@ function waitKey(projectId: string, kind: string) {
   return `${projectId}|${kind}`;
 }
 
-function dispatchWaiting(projectId: string, kind: string) {
-  const key = waitKey(projectId, kind);
+/**
+ * Start waiting requests of a project whose kind is not running any more. The engine also
+ * blocks some kinds against each other (e.g. detect.run / clips.fetch while audio.fetch runs),
+ * so this runs whenever any job of the project ends; a request that is still blocked simply
+ * comes back BUSY and waits again.
+ */
+function dispatchWaiting(projectId: string) {
   const s = useJobs.getState();
-  const idx = s.waiting.findIndex((w) => w.key === key);
-  if (idx < 0) return;
-  const w = s.waiting[idx];
-  useJobs.setState({ waiting: s.waiting.filter((_, i) => i !== idx) });
-  const then = pendingThen.get(`${w.key}|${w.addedAt}`);
-  pendingThen.delete(`${w.key}|${w.addedAt}`);
-  setTimeout(() => void startJob(w.method, w.params as ParamsOf<typeof w.method>, { label: w.label, then }), 200);
+  const started = new Set<string>();
+  const keep: Waiting[] = [];
+  const go: Waiting[] = [];
+  for (const w of s.waiting) {
+    if (w.projectId !== projectId || started.has(w.method) || runningJobs(s, projectId, w.method).length) keep.push(w);
+    else {
+      started.add(w.method);
+      go.push(w);
+    }
+  }
+  if (!go.length) return;
+  useJobs.setState({ waiting: keep });
+  for (const w of go) {
+    const then = pendingThen.get(`${w.key}|${w.addedAt}`);
+    pendingThen.delete(`${w.key}|${w.addedAt}`);
+    setTimeout(() => void startJob(w.method, w.params as ParamsOf<typeof w.method>, { label: w.label, then }), 200);
+  }
 }
 
 export function cancelWaiting(w: Waiting) {
@@ -401,7 +442,7 @@ export async function startJob<M extends JobMethod>(method: M, params: ParamsOf<
       useJobs.setState((s) => ({ waiting: [...s.waiting, w] }));
       syncBusy();
       // the blocking job may have finished before the BUSY answer arrived
-      if (runningJobs(useJobs.getState(), projectId, method).length === 0) setTimeout(() => dispatchWaiting(projectId, method), 300);
+      if (runningJobs(useJobs.getState(), projectId).length === 0) setTimeout(() => dispatchWaiting(projectId), 300);
       return null;
     }
     throw e;

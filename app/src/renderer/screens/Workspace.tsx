@@ -8,6 +8,7 @@ import { call } from "@/lib/rpc";
 import { trackLabel } from "./Home";
 import { runningJobs, useJobs, cancelJob, retryJob, type Job } from "@/state/jobs";
 import { resetWs, requestFocus, useWs } from "@/state/ws";
+import { useShallow } from "zustand/react/shallow";
 import { player, usePlayer, type ListenMode } from "@/audio/player";
 import { bindings, comboFromEvent, type KeyAction } from "@/lib/keys";
 import { isTyping, Progress } from "@/components/common";
@@ -83,7 +84,7 @@ function lastFailed(jobs: ReturnType<typeof useJobs.getState>, pid: string, kind
 
 function NextBanner({ p }: { p: Project }) {
   const jobs = useJobs();
-  const ws = useWs();
+  const ws = useWs(useShallow((s) => ({ selected: s.selected })));
   const audioJob = runningJobs(jobs, p.id, "audio.fetch")[0];
   const detectJob = runningJobs(jobs, p.id, "detect.run")[0];
   const clipsJob = runningJobs(jobs, p.id, "clips.fetch")[0];
@@ -253,7 +254,7 @@ export function Workspace({ projectId }: { projectId: string }) {
   const history = useProjects((s) => s.history[projectId]);
   const engineReady = useApp((s) => s.engine.state === "ready");
   const keymap = useApp((s) => s.settings.keymap);
-  const ws = useWs();
+  const ws = useWs(useShallow((s) => ({ selected: s.selected, lastEdge: s.lastEdge, setlistOpen: s.setlistOpen })));
   const [err, setErr] = useState<string | null>(null);
 
   // new project: reset the workspace UI; leaving: stop playback

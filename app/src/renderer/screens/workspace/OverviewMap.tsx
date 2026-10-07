@@ -1,5 +1,5 @@
 // 방송 전체 지도: 노래 곡선, 파형, 곡 막대, 후보 구간, 받은 영상 범위. Canvas, mipmapped peaks.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListMusic, Maximize2, SlidersHorizontal, ZoomIn, ZoomOut } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import { begin, colors, drawCurve, drawGrid, drawRuler, drawWave, hatch, panView, roundRect, useCanvasSize, useThemeVersion, zoomView } from "@/canvas/draw";
@@ -12,6 +12,7 @@ import { setEdge } from "@/lib/edits";
 import { fmtTime } from "@/lib/format";
 import { DetectPopover } from "./DetectPopover";
 import { runningJobs, useJobs } from "@/state/jobs";
+import { useShallow } from "zustand/react/shallow";
 
 const GUTTER = 44;
 const LANE_EXTRA = 16;
@@ -56,19 +57,23 @@ export function useMapData(p: Project | undefined, peaksUntil?: number) {
   return { peaks, probs };
 }
 
-export function OverviewMap({ p }: { p: Project }) {
+export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
   const total = p.audio?.duration || p.source?.duration || 1;
-  const ws = useWs();
+  const ws = useWs(
+    useShallow((s) => ({ mapView: s.mapView, selected: s.selected, multi: s.multi, candidate: s.candidate, pendingRange: s.pendingRange, showExcluded: s.showExcluded, mapHeight: s.mapHeight, detectOpen: s.detectOpen })),
+  );
   const lanes = useApp((s) => s.settings.showLanes);
   const showCandidates = useApp((s) => s.settings.showCandidates);
-  const jobs = useJobs();
+  // only the two jobs the map shows (the store updates ~4 Hz while jobs run)
+  const [audioJob, detectJob] = useJobs(useShallow((s) => [runningJobs(s, p.id, "audio.fetch")[0], runningJobs(s, p.id, "detect.run")[0]] as const));
   const theme = useThemeVersion();
   const { ref, w, h, dpr } = useCanvasSize();
   const playheadRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; text: string } | null>(null);
   const [lanesOpen, setLanesOpen] = useState(false);
-  const view: [number, number] = ws.mapView ?? [0, total];
+  // memoised: a fresh array each render made every hover/progress tick redraw the whole canvas
+  const view: [number, number] = useMemo(() => ws.mapView ?? [0, total], [ws.mapView, total]);
   const nums = useMemo(() => songNumbers(p), [p]);
   const extraLanes = (["music", "speech", "sing"] as const).filter((k) => lanes[k]);
 
@@ -81,8 +86,6 @@ export function OverviewMap({ p }: { p: Project }) {
   const xOf = useCallback((t: number) => ((t - view[0]) / (view[1] - view[0])) * w, [view, w]);
   const tOf = useCallback((x: number) => view[0] + (x / w) * (view[1] - view[0]), [view, w]);
 
-  const audioJob = runningJobs(jobs, p.id, "audio.fetch")[0];
-  const detectJob = runningJobs(jobs, p.id, "detect.run")[0];
   const { peaks, probs } = useMapData(p, audioJob?.peaksUntil);
 
   // keep the selected song visible
@@ -566,4 +569,4 @@ export function OverviewMap({ p }: { p: Project }) {
       </div>
     </section>
   );
-}
+});

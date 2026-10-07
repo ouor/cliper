@@ -65,6 +65,7 @@ class Player {
   private inflight = new Map<number, AbortController>();
   // stems
   private stemsAbort: AbortController | null = null;
+  private stemsGen = 0;
   private stemsKey = "";
   private video: VideoBinding | null = null;
 
@@ -203,8 +204,8 @@ class Player {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const buf = await r.arrayBuffer();
         if (this.streamProject !== pid) return;
-        const { dataOffset, channels, bits, format } = parseWavHeader(new DataView(buf, 0, Math.min(buf.byteLength, 4096)));
-        if (channels !== 2 || bits !== 32 || format !== 3) throw new Error(`unexpected window format (${channels}ch ${bits}bit)`);
+        const { dataOffset, channels, bits, format, sampleRate } = parseWavHeader(new DataView(buf, 0, Math.min(buf.byteLength, 4096)));
+        if (channels !== 2 || bits !== 32 || format !== 3 || sampleRate !== SR) throw new Error(`unexpected window format (${channels}ch ${bits}bit ${sampleRate}Hz)`);
         const frames = Math.floor((buf.byteLength - dataOffset) / 8);
         const data = new Float32Array(buf.slice(dataOffset, dataOffset + frames * 8));
         this.post({ type: "stream:chunk", index: i, data }, [data.buffer]);
@@ -212,7 +213,9 @@ class Player {
         if (usePlayer.getState().streamError) usePlayer.setState({ streamError: undefined });
       })
       .catch((e) => {
-        if ((e as Error).name !== "AbortError") usePlayer.setState({ streamError: String((e as Error).message ?? e) });
+        if ((e as Error).name === "AbortError") return;
+        const busy = (e as { engineCode?: string }).engineCode === "BUSY";
+        usePlayer.setState({ streamError: busy ? "소리를 받는 중이라 아직 미리듣기를 할 수 없어요" : String((e as Error).message ?? e) });
       })
       .finally(() => this.inflight.delete(i));
   }
@@ -247,7 +250,11 @@ class Player {
     const wEnd = origin + f1 / SR;
     const wasPlaying = usePlayer.getState().playing;
     if (wasPlaying) this.pause();
-    this.post({ type: "stems:init", origin: wStart, frames });
+    // allocate here (not on the audio thread) and hand the buffers to the worklet
+    const gen = ++this.stemsGen;
+    const ob = new Int16Array(frames * 2);
+    const vb = new Int16Array(frames * 2);
+    this.post({ type: "stems:init", gen, origin: wStart, frames, orig: ob, voc: vb }, [ob.buffer, vb.buffer]);
     usePlayer.setState({ source: "stems", stems: { projectId, clipId, start: wStart, end: wEnd, progress: 0 } });
     const ac = new AbortController();
     this.stemsAbort = ac;
@@ -263,8 +270,8 @@ class Player {
       // header first (small range) to find the data chunk
       const head = await fetch(url, { headers: { range: "bytes=0-4095" }, signal: ac.signal });
       const hb = new DataView(await head.arrayBuffer());
-      const { dataOffset, channels, bits, format } = parseWavHeader(hb);
-      if (channels !== 2 || bits !== 32 || format !== 3) throw new Error(`unsupported wav (${channels}ch ${bits}bit fmt ${format})`);
+      const { dataOffset, channels, bits, format, sampleRate } = parseWavHeader(hb);
+      if (channels !== 2 || bits !== 32 || format !== 3 || sampleRate !== SR) throw new Error(`unsupported wav (${channels}ch ${bits}bit fmt ${format} ${sampleRate}Hz)`);
       const b0 = dataOffset + f0 * 8;
       const b1 = dataOffset + f1 * 8 - 1;
       const r = await fetch(url, { headers: { range: `bytes=${b0}-${b1}` }, signal: ac.signal });
@@ -274,7 +281,7 @@ class Player {
       let samplesDone = 0;
       for (;;) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || ac.signal.aborted || gen !== this.stemsGen) break;
         let bytes = value;
         if (carry.length) {
           const merged = new Uint8Array(carry.length + value.length);
@@ -292,7 +299,7 @@ class Player {
           i16[i] = s > 32767 ? 32767 : s < -32768 ? -32768 : s;
         }
         const n = i16.length; // read before the transfer detaches the buffer
-        this.post({ type: "stems:data", which, offset: samplesDone, data: i16 }, [i16.buffer]);
+        this.post({ type: "stems:data", gen, which, offset: samplesDone, data: i16 }, [i16.buffer]);
         samplesDone += n;
         if (which === 0) doneO = samplesDone / 2;
         else doneV = samplesDone / 2;
@@ -385,7 +392,7 @@ class Player {
   setMutes(mutes: Mute[], muteOn: boolean) {
     this.post({
       type: "mutes",
-      mutes: mutes.map((m) => ({ s: m.start, e: m.end, fi: m.fade_in, fo: m.fade_out, floor: m.gain_db === null ? 0 : 10 ** (m.gain_db / 20) })),
+      mutes: mutes.map((m) => ({ s: m.start, e: m.end, fi: m.fade_in, fo: m.fade_out, floor: m.gain_db === null ? 0 : m.gain_db < 0 ? 10 ** (m.gain_db / 20) : 1 })),
     });
     this.post({ type: "muteOn", on: muteOn });
   }

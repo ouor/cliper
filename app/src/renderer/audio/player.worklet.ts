@@ -59,8 +59,19 @@ class CliperPlayer extends AudioWorkletProcessor {
   private loop: [number, number] | null = null;
   private stopAt: number | null = null;
   private volume = 1;
+  /** smoothed values (no zipper noise / clicks on volume or switch changes) */
+  private vol = 1;
+  private muteMix = 1;
   private buffering = false;
   private sinceReport = 0;
+  /** stems window generation: data for an older window is ignored */
+  private gen = 0;
+  // reused per render quantum (no allocation on the audio thread)
+  private active: MuteEnv[] = [];
+  private tmpL = new Float32Array(1);
+  private tmpR = new Float32Array(1);
+  /** accompaniment RMS requests, computed a slice per render quantum */
+  private rmsJobs: { id: number; ranges: [number, number][]; i: number; f: number; acc: number; out: (number | null)[] }[] = [];
 
   constructor() {
     super();
@@ -70,16 +81,20 @@ class CliperPlayer extends AudioWorkletProcessor {
   private onMessage(m: any) {
     switch (m.type) {
       case "stems:init":
+        // buffers are allocated on the main thread and transferred in
         this.src = "stems";
+        this.gen = m.gen;
         this.origin = m.origin;
         this.frames = m.frames;
-        this.orig = new Int16Array(m.frames * 2);
-        this.voc = new Int16Array(m.frames * 2);
+        this.orig = m.orig as Int16Array;
+        this.voc = m.voc as Int16Array;
         this.loadedO = 0;
         this.loadedV = 0;
         this.chunks.clear();
+        this.rmsJobs = [];
         break;
       case "stems:data": {
+        if (m.gen !== this.gen) break;
         const arr = m.which === 0 ? this.orig : this.voc;
         const data = m.data as Int16Array;
         arr.set(data.subarray(0, Math.max(0, Math.min(data.length, arr.length - m.offset))), m.offset);
@@ -147,25 +162,9 @@ class CliperPlayer extends AudioWorkletProcessor {
       case "volume":
         this.volume = m.volume;
         break;
-      case "accRms": {
-        // exact accompaniment (orig − vocals) RMS in dBFS for each VOD range, null if not loaded
-        const out = (m.ranges as [number, number][]).map(([a, b]) => {
-          if (this.src !== "stems") return null;
-          const f0 = Math.max(0, Math.floor((a - this.origin) * sampleRate));
-          const f1 = Math.min(this.frames, Math.ceil((b - this.origin) * sampleRate));
-          if (f1 <= f0 || f1 > Math.min(this.loadedO, this.loadedV)) return null;
-          let acc = 0;
-          for (let f = f0; f < f1; f++) {
-            const l = (this.orig[f * 2] - this.voc[f * 2]) * I16;
-            const r = (this.orig[f * 2 + 1] - this.voc[f * 2 + 1]) * I16;
-            acc += l * l + r * r;
-          }
-          const rms = Math.sqrt(acc / ((f1 - f0) * 2));
-          return rms > 0 ? 20 * Math.log10(rms) : -120;
-        });
-        this.port.postMessage({ type: "accRms", id: m.id, out });
+      case "accRms":
+        this.rmsJobs.push({ id: m.id, ranges: m.ranges, i: 0, f: -1, acc: 0, out: [] });
         break;
-      }
       case "dbg":
         this.port.postMessage({ type: "dbg", src: this.src, origin: this.origin, frames: this.frames, loadedO: this.loadedO, loadedV: this.loadedV, pos: this.pos, chunks: [...this.chunks.keys()], playing: this.playing });
         break;
@@ -176,19 +175,18 @@ class CliperPlayer extends AudioWorkletProcessor {
     this.port.postMessage({ type: "pos", pos: this.pos, playing: this.playing, buffering: this.buffering, ctxTime: currentTime, rate: this.rate, force });
   }
 
-  /** g(t) — the vocal keep factor. */
-  private gain(t: number, active: MuteEnv[]): number {
+  /**
+   * g(t) — the vocal keep factor, exactly as the engine renders it (render.rs gain_at):
+   * each fade clamped to half the region, raised-cosine inside [s, e], smallest gain wins.
+   */
+  private gain(t: number, active: MuteEnv[], n: number): number {
     let g = 1;
-    for (const m of active) {
+    for (let k = 0; k < n; k++) {
+      const m = active[k];
       if (t < m.s || t > m.e) continue;
-      let fi = m.fi;
-      let fo = m.fo;
-      const len = m.e - m.s;
-      if (fi + fo > len && fi + fo > 0) {
-        const k = len / (fi + fo);
-        fi *= k;
-        fo *= k;
-      }
+      const half = (m.e - m.s) / 2;
+      const fi = Math.min(Math.max(m.fi, 0), half);
+      const fo = Math.min(Math.max(m.fo, 0), half);
       let w: number;
       if (fi > 0 && t < m.s + fi) w = 0.5 * (1 + Math.cos((Math.PI * (t - m.s)) / fi));
       else if (fo > 0 && t > m.e - fo) w = 0.5 * (1 - Math.cos((Math.PI * (t - (m.e - fo))) / fo));
@@ -199,8 +197,49 @@ class CliperPlayer extends AudioWorkletProcessor {
     return g;
   }
 
+  /** Accompaniment RMS work, at most `budget` frames per render quantum. */
+  private workRms(budget: number) {
+    while (budget > 0 && this.rmsJobs.length) {
+      const job = this.rmsJobs[0];
+      if (job.i >= job.ranges.length) {
+        this.port.postMessage({ type: "accRms", id: job.id, out: job.out });
+        this.rmsJobs.shift();
+        continue;
+      }
+      const [a, b] = job.ranges[job.i];
+      const f0 = Math.max(0, Math.floor((a - this.origin) * sampleRate));
+      const f1 = Math.min(this.frames, Math.ceil((b - this.origin) * sampleRate));
+      if (this.src !== "stems" || f1 <= f0 || f1 > Math.min(this.loadedO, this.loadedV)) {
+        job.out.push(null);
+        job.i++;
+        job.f = -1;
+        continue;
+      }
+      if (job.f < 0) {
+        job.f = f0;
+        job.acc = 0;
+      }
+      const end = Math.min(f1, job.f + budget);
+      let acc = job.acc;
+      for (let f = job.f; f < end; f++) {
+        const l = (this.orig[f * 2] - this.voc[f * 2]) * I16;
+        const r = (this.orig[f * 2 + 1] - this.voc[f * 2 + 1]) * I16;
+        acc += l * l + r * r;
+      }
+      budget -= end - job.f;
+      job.acc = acc;
+      job.f = end;
+      if (end >= f1) {
+        const rms = Math.sqrt(acc / ((f1 - f0) * 2));
+        job.out.push(rms > 0 ? 20 * Math.log10(rms) : -120);
+        job.i++;
+        job.f = -1;
+      }
+    }
+  }
+
   private mix(mode: number, oL: number, oR: number, vL: number, vR: number, g: number, out: Float32Array, i: number, right: Float32Array) {
-    const k = this.muteOn ? 1 - g : 0;
+    const k = (1 - g) * this.muteMix;
     switch (mode) {
       case 1:
         out[i] = oL - k * vL;
@@ -224,6 +263,7 @@ class CliperPlayer extends AudioWorkletProcessor {
     const L = outputs[0][0];
     const R = outputs[0][1] ?? outputs[0][0];
     const n = L.length;
+    if (this.rmsJobs.length) this.workRms(32768);
     if (!this.playing || this.src === "none") {
       L.fill(0);
       R.fill(0);
@@ -235,9 +275,13 @@ class CliperPlayer extends AudioWorkletProcessor {
     const t1 = this.pos + step * n;
     const lo = Math.min(t0, t1);
     const hi = Math.max(t0, t1);
-    const active = this.mutes.filter((m) => m.e >= lo && m.s <= hi);
-    const tmpL = new Float32Array(1);
-    const tmpR = new Float32Array(1);
+    const active = this.active;
+    let na = 0;
+    for (const m of this.mutes) if (m.e >= lo && m.s <= hi) active[na++] = m;
+    const tmpL = this.tmpL;
+    const tmpR = this.tmpR;
+    const muteTarget = this.muteOn ? 1 : 0;
+    const smooth = 1 / XFADE;
     let stalled = false;
     let ended = false;
     for (let i = 0; i < n; i++) {
@@ -297,7 +341,9 @@ class CliperPlayer extends AudioWorkletProcessor {
         oL = c[local * 2];
         oR = c[local * 2 + 1];
       }
-      const g = active.length ? this.gain(t, active) : 1;
+      if (this.muteMix !== muteTarget) this.muteMix = Math.abs(muteTarget - this.muteMix) <= smooth ? muteTarget : this.muteMix + (muteTarget > this.muteMix ? smooth : -smooth);
+      if (this.vol !== this.volume) this.vol = Math.abs(this.volume - this.vol) <= 0.002 ? this.volume : this.vol + (this.volume - this.vol) * 0.01;
+      const g = na ? this.gain(t, active, na) : 1;
       if (this.xf > 0) {
         this.mix(this.mode, oL, oR, vL, vR, g, L, i, R);
         this.mix(this.prevMode, oL, oR, vL, vR, g, tmpL, 0, tmpR);
@@ -308,8 +354,8 @@ class CliperPlayer extends AudioWorkletProcessor {
       } else {
         this.mix(this.mode, oL, oR, vL, vR, g, L, i, R);
       }
-      L[i] *= this.volume;
-      R[i] *= this.volume;
+      L[i] *= this.vol;
+      R[i] *= this.vol;
       this.pos += step;
       if (this.loop) {
         const [a, b] = this.loop;
