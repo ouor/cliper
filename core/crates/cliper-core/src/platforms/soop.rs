@@ -71,8 +71,10 @@ pub async fn resolve(video_id: &str, cookies: Option<&BTreeMap<String, String>>)
         )));
     };
     let mut notes = Vec::new();
+    let mut notices = Vec::new();
     if files.len() > 1 {
         notes.push(format!("VOD has {} parts; only the first part is processed.", files.len()));
+        notices.push(crate::progress::Note::new("multipart").arg("parts", files.len()));
     }
 
     let master = http.get_text(&master_url).await?;
@@ -138,6 +140,7 @@ pub async fn resolve(video_id: &str, cookies: Option<&BTreeMap<String, String>>)
             audio_variant: av,
             catalog,
             notes,
+            notices,
             audio_tracks: Vec::new(),
         },
         playlist,

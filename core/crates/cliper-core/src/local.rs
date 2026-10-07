@@ -134,14 +134,19 @@ pub fn source_info(path: &Path) -> Result<SourceInfo, LocalError> {
         .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string());
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut notes = Vec::new();
+    let mut notices = Vec::new();
     if pr.audio_tracks.len() > 1 {
         notes.push(format!(
             "{} audio tracks; track 1 is used unless settings.audio_track is set (e.g. an OBS mix track)",
             pr.audio_tracks.len()
         ));
     }
+    if pr.audio_tracks.len() > 1 {
+        notices.push(crate::progress::Note::new("multitrack").arg("tracks", pr.audio_tracks.len()));
+    }
     if !pr.has_video {
         notes.push("audio-only file: songs can be exported as audio only".into());
+        notices.push(crate::progress::Note::new("audio_only"));
     }
     Ok(SourceInfo {
         platform: Platform::Local,
@@ -155,6 +160,7 @@ pub fn source_info(path: &Path) -> Result<SourceInfo, LocalError> {
         audio_variant: 0,
         catalog: Catalog { published_at: modified, channel: Channel::default(), ..Default::default() },
         notes,
+        notices,
         audio_tracks: pr.audio_tracks,
     })
 }

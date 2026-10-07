@@ -148,7 +148,8 @@ type Variant<E extends Event["event"]> = Omit<Extract<Event, { event: E }>, "eve
 
 /** Server → client notifications (JSON-RPC requests without id). */
 export interface Notifications {
-  "engine.ready": { protocol: number; system: SystemInfo };
+  /** Compatible when min_client_protocol <= PROTOCOL_VERSION <= protocol. */
+  "engine.ready": { protocol: number; min_client_protocol: number; system: SystemInfo };
   "job.started": Variant<"job_started">;
   /** `progress.item` = clip id (clips.fetch) or song id (export.run); `item_index`/`items_total`
    *  place it in job.started's `items`. Show `note` (code + args), not `message`. */

@@ -1658,7 +1658,7 @@ impl Engine {
                 let mutes: Vec<MuteSpan> = s
                     .mutes
                     .iter()
-                    .filter(|m| s.mute_enabled && (m.confirmed || opts.include_unconfirmed))
+                    .filter(|m| opts.apply_mutes.unwrap_or(true) && s.mute_enabled && (m.confirmed || opts.include_unconfirmed))
                     .map(|m| MuteSpan { start: ct(m.start), end: ct(m.end), fade_in: m.fade_in, fade_out: m.fade_out, gain_db: m.gain_db })
                     .collect();
                 let (in_t, out_t) = (ct(s.start).max(0.0), ct(s.end).min(video.duration));
@@ -1735,6 +1735,9 @@ pub struct ExportOptions {
     pub video_codec: Option<String>,
     /// apply unconfirmed mute suggestions too (default false: only confirmed)
     pub include_unconfirmed: bool,
+    /// false = export the original audio for this run (songs' `mute_enabled`
+    /// and mutes stay as they are). Default true.
+    pub apply_mutes: Option<bool>,
     /// write editor/DAW stems (+ markers, Reaper project) instead of a rendered file
     pub stems: bool,
     /// with `stems`: also render the normal output

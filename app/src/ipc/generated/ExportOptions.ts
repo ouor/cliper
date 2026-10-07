@@ -22,6 +22,11 @@ video_codec: string | null,
  */
 include_unconfirmed: boolean, 
 /**
+ * false = export the original audio for this run (songs' `mute_enabled`
+ * and mutes stay as they are). Default true.
+ */
+apply_mutes: boolean | null, 
+/**
  * write editor/DAW stems (+ markers, Reaper project) instead of a rendered file
  */
 stems: boolean, 

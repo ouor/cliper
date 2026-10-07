@@ -116,6 +116,7 @@ fn info(content: &Value, video_id: &str, container: Container, variants: Vec<m3u
         audio_variant,
         catalog: catalog(content),
         notes: Vec::new(),
+        notices: Vec::new(),
         audio_tracks: Vec::new(),
     }
 }

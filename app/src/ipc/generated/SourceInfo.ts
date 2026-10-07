@@ -2,6 +2,7 @@
 import type { AudioTrack } from "./AudioTrack";
 import type { Catalog } from "./Catalog";
 import type { Container } from "./Container";
+import type { Note } from "./Note";
 import type { Platform } from "./Platform";
 import type { Variant } from "./Variant";
 
@@ -16,7 +17,17 @@ duration: number, container: Container, variants: Array<Variant>,
 /**
  * index into `variants` used for audio extraction
  */
-audio_variant: number, catalog: Catalog, notes: Array<string>, 
+audio_variant: number, catalog: Catalog, 
+/**
+ * English remarks for logs / the CLI (UIs: use `notices`)
+ */
+notes: Array<string>, 
+/**
+ * the same remarks as codes: `multipart {parts}` (SOOP: only the first
+ * part is processed), `multitrack {tracks}` (local: pick settings.audio_track),
+ * `audio_only` (local: no video, export as audio)
+ */
+notices: Array<Note>, 
 /**
  * local recordings: audio streams in file order (`settings.audio_track` indexes this)
  */

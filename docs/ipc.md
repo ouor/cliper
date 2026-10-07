@@ -116,6 +116,9 @@ Project directory: `<projects>/<project id>/`
 | `exports/<name>.<ext>` | results (unless `settings.output_dir`); `<name>` from `settings.filename_template`, never overwritten (`_v2`, `_v3`…) |
 | `exports/<name>_stems/` | editor hand-off: `*_original/processed/vocals/accompaniment.wav` (same start & length, 32-bit float), `*_markers.csv`, `<name>.rpp` (Reaper), optional `*_reference.mp4` |
 
+`source.notices` are remarks about the source as codes (`multipart {parts}`,
+`multitrack {tracks}`, `audio_only`); `source.notes` is the English text for logs.
+
 Local recordings: the project's `source.platform` is `"local"` and `source.url`
 is the file path; `audio.mka` replaces `audio.aac`; clips are stream-copied
 cuts of the recording (`settings.audio_track` selects the audio track of a
@@ -183,7 +186,7 @@ See `protocol.ts` for exact shapes.
 | `audio.fetch` | job | |
 | `detect.run` | job | `{params?, retag?}` |
 | `clips.fetch` | job | `{clip_ids?, song_ids?, exact?}` default: clips missing video or stems. `exact` + `song_ids`: plan clips covering only those songs (± margins) so close neighbours aren't fetched along (such clips are `pinned`) |
-| `export.run` | job | `ExportOptions`: `song_ids?`, `format?` (mp4/wav/flac/mp3), `video_codec?` ("copy" = fast), `include_unconfirmed?`, `stems?` + `also_render?`, `handles?`, `reference_video?`, `audio_overrides?` (song id → audio file aligned to clip start) |
+| `export.run` | job | `ExportOptions`: `song_ids?`, `format?` (mp4/wav/flac/mp3), `video_codec?` ("copy" = fast), `include_unconfirmed?`, `apply_mutes?` (false = original audio for this run only), `stems?` + `also_render?`, `handles?`, `reference_video?`, `audio_overrides?` (song id → audio file aligned to clip start) |
 | `songs.match_setlist` | request | `{text, tolerance?=150, apply?, overwrite?}` → `SetlistMatch` |
 | `project.export_metadata` | request | `{format: csv/json/chapters/timestamps, include_disabled?, path?}` → `{text, path}` |
 | `queue.add` / `list` / `cancel` / `clear` | request | batch of inputs; `through`: `detect` (default) or `clips`; progress via `queue.changed` + the entry's `job_id` |
@@ -196,7 +199,7 @@ Only one job **per kind per project** runs at a time (`BUSY` otherwise).
 
 | method | params |
 |--------|--------|
-| `engine.ready` | `{protocol, system}` |
+| `engine.ready` | `{protocol, min_client_protocol, system}` — a client built for protocol *v* is compatible when `min_client_protocol ≤ v ≤ protocol` |
 | `job.started` | `{job_id, kind, project_id, items}` — `items`: clip ids (`clips.fetch`) / song ids (`export.run`) in processing order, else `[]` |
 | `job.progress` | `{job_id, kind, project_id, progress}` — ≤10/s per job (notes always pass). `progress`: `stage, done, total, bytes?, item?, item_index?, items_total?, eta_sec?` (current stage), `peaks_until?` (audio.fetch), `note?` `{code, args?}`, `message?` (English, for logs — don't show it) |
 | `job.done` | `{job_id, kind, project_id, result}` (see `JobResults`) |

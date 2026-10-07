@@ -49,13 +49,23 @@ pub struct Progress {
 /// `copy_audio_track`, `cut_recording`, `find_talk`, `fallback_segments {count}`,
 /// `variant_truncated {resolution}`, `remux`, `render_audio`, `measure_loudness`,
 /// `write_stems`, `write_reference_video`, `decode`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Note {
     pub code: String,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[cfg_attr(feature = "ts", ts(optional, type = "Record<string, string | number>"))]
     pub args: BTreeMap<String, serde_json::Value>,
+}
+
+impl Note {
+    pub fn new(code: &str) -> Self {
+        Self { code: code.into(), args: BTreeMap::new() }
+    }
+    pub fn arg(mut self, k: &str, v: impl Into<serde_json::Value>) -> Self {
+        self.args.insert(k.into(), v.into());
+        self
+    }
 }
 
 impl Progress {

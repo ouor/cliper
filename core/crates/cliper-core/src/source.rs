@@ -89,7 +89,13 @@ pub struct SourceInfo {
     /// index into `variants` used for audio extraction
     pub audio_variant: usize,
     pub catalog: Catalog,
+    /// English remarks for logs / the CLI (UIs: use `notices`)
     pub notes: Vec<String>,
+    /// the same remarks as codes: `multipart {parts}` (SOOP: only the first
+    /// part is processed), `multitrack {tracks}` (local: pick settings.audio_track),
+    /// `audio_only` (local: no video, export as audio)
+    #[serde(default)]
+    pub notices: Vec<crate::progress::Note>,
     /// local recordings: audio streams in file order (`settings.audio_track` indexes this)
     #[serde(default)]
     pub audio_tracks: Vec<AudioTrack>,

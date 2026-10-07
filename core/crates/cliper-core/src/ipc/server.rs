@@ -18,6 +18,9 @@ use crate::engine::{ApiError, Engine, EngineConfig, Event};
 use crate::project::{Mute, Settings, Song};
 
 pub const PROTOCOL_VERSION: u32 = 2;
+/// Oldest client protocol this engine still serves (clients built for an
+/// older protocol should warn).
+pub const MIN_CLIENT_PROTOCOL: u32 = 2;
 
 fn rpc_error(code: i64, message: &str, data: Option<Value>) -> Value {
     let mut e = json!({ "code": code, "message": message });
@@ -331,7 +334,7 @@ pub async fn serve(cfg: EngineConfig) -> anyhow::Result<()> {
     }
 
     let ready = json!({ "jsonrpc": "2.0", "method": "engine.ready",
-        "params": { "protocol": PROTOCOL_VERSION, "system": eng.system_info() } });
+        "params": { "protocol": PROTOCOL_VERSION, "min_client_protocol": MIN_CLIENT_PROTOCOL, "system": eng.system_info() } });
     let _ = out_tx.send(ready.to_string());
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
