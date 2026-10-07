@@ -11,6 +11,7 @@
 //   POST /click  {"selector": "text=시작하기"}     → page.click
 //   POST /mouse  {"x":…,"y":…,"action":"click|down|up|move","button":"left"}
 //   POST /resize {"width":…,"height":…}
+//   POST /close                                   → close the window (as the X button)
 //   GET  /logs                                    → recent console lines
 //   POST /quit
 import http from "node:http";
@@ -83,6 +84,9 @@ http
         }
         case "/resize":
           await app.evaluate(({ BrowserWindow }, [w, h]) => BrowserWindow.getAllWindows()[0].setSize(w, h), [b.width, b.height]);
+          return send(200, { ok: true });
+        case "/close": // like clicking the window's X (preventable close event)
+          await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
           return send(200, { ok: true });
         case "/logs":
           return send(200, { logs: logs.slice(-200) });

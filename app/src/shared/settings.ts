@@ -33,7 +33,6 @@ export interface AppSettings {
 
   // 멘트 지우기
   suggestMutes: boolean;
-  newSongMuteOn: boolean;
   muteFadeIn: number; // s (manual mutes)
   muteFadeOut: number;
   autoMuteFade: number; // engine settings.mute_fade for suggestions
@@ -81,7 +80,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   marginSec: 30,
   onlyReviewedFetch: true,
   suggestMutes: true,
-  newSongMuteOn: true,
   muteFadeIn: 0.08,
   muteFadeOut: 0.3,
   autoMuteFade: 0.3,

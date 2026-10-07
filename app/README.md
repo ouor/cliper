@@ -1,0 +1,99 @@
+# Cliper 데스크톱 앱 (Electron)
+
+치지직·SOOP 노래방송 다시보기(또는 OBS 녹화본)에서 곡을 찾고, 멘트를 지우고, 곡별 파일로 내보내는 Windows 앱의 UI입니다.
+미디어 처리는 모두 Rust 엔진(`core/`, `cliper.exe serve`)이 하고, 이 앱은 엔진을 자식 프로세스로 띄워 JSON-RPC(stdin/stdout NDJSON)로 구동합니다.
+
+- 스택: **Electron 44 + electron-vite 5 (Vite 7) + React 19 + TypeScript 5.9 + zustand**
+- 아이콘 lucide-react, 글꼴 Pretendard(번들 포함, CJK 폴백: 맑은 고딕 / Yu Gothic UI / Meiryo)
+- 기획: `docs/product/desktop-app-plan.md` · IPC: `docs/ipc.md` · 구현 메모: `docs/product/ui-implementation-notes.md` · 엔진 요청: `docs/product/engine-requests.md`
+
+## 실행
+
+사전 준비(이미 되어 있으면 생략):
+
+```powershell
+cd core; cargo build --release          # core/target/release/cliper.exe
+# models/ (UVR-MDX-NET-Voc_FT.onnx, panns_sed.onnx, panns_labels.json), ffmpeg(PATH), CUDA 런타임
+```
+
+```powershell
+cd app
+npm install
+npm run dev        # 개발 모드 (Vite HMR). 첫 실행이면 첫 실행 마법사가 뜹니다
+npm run build      # out/ 에 main · preload · renderer 빌드
+npm start          # 빌드 결과 실행 (electron-vite preview)
+npm run typecheck  # main/preload + renderer 타입 검사
+```
+
+### 환경 변수 (개발·검증용)
+
+| 변수 | 의미 |
+|---|---|
+| `CLIPER_PROJECTS` | 작업 폴더(엔진 `--projects`)를 강제로 지정 |
+| `CLIPER_SKIP_FIRST_RUN=1` | `CLIPER_PROJECTS`와 함께 쓰면 첫 실행 마법사를 건너뜀 |
+| `CLIPER_USER_DATA` | 앱 설정 폴더(userData)를 바꿈 — 깨끗한 프로필로 시험할 때 |
+| `CLIPER_ENGINE` / `CLIPER_MODELS` / `CLIPER_FFMPEG` | 엔진 exe / 모델 폴더 / ffmpeg 경로 (기본: 저장소의 `core/target/release/cliper.exe`, `models/`, PATH의 `ffmpeg`) |
+
+예: 이미 처리된 프로젝트 폴더로 바로 열기
+
+```powershell
+$env:CLIPER_PROJECTS="C:\path\to\projects"; $env:CLIPER_SKIP_FIRST_RUN="1"; npm start
+```
+
+### 자동 점검 도구
+
+- `node scripts/devdriver.mjs` — 빌드된 앱을 Playwright(Electron)로 띄우고 `127.0.0.1:7788`에 조작 API(eval / shot / key / type / click / mouse / resize / close / quit)를 엽니다. 화면 확인과 시나리오 점검에 썼습니다.
+- `node scripts/check.mjs scripts/checks/dsp-check.js` — 실행 중인 앱에서 미리듣기 AudioWorklet을 OfflineAudioContext로 렌더링해 네 가지 듣기 모드가 `docs/ipc.md`의 수식과 일치하는지 확인합니다(최대 오차 < 1e-6).
+- 렌더러에는 점검용 핸들 `window.__cliper`(player, 상태 저장소)가 있습니다. 렌더러 자신의 상태만 노출하며 권한은 없습니다.
+
+## 구조
+
+```
+app/
+├─ electron.vite.config.ts      main / preload / renderer 빌드, 빌드용 엄격한 CSP 주입
+├─ src/
+│  ├─ ipc/                      엔진 IPC 계약 (protocol.ts, generated/* — Rust에서 생성, 직접 수정 금지)
+│  ├─ shared/                   main·preload·renderer 공용 타입 (bridge.ts, settings.ts)
+│  ├─ main/
+│  │  ├─ index.ts               창, IPC 핸들러, 설정/상태 저장(userData), 닫기 확인, 알림
+│  │  ├─ engine.ts              엔진 자식 프로세스: NDJSON JSON-RPC, 요청-응답 매칭, 알림 전달,
+│  │  │                         비정상 종료 시 재시작(2분에 3회까지), stderr 로그(userData/logs/engine.log)
+│  │  └─ media.ts               cliper-media:// 프로토콜 (아래 참고)
+│  ├─ preload/index.ts          contextBridge로 window.cliper 노출 (sandbox, contextIsolation)
+│  └─ renderer/
+│     ├─ App.tsx · main.tsx     부팅, 엔진 상태 배너, 전역 단축키, 오버레이
+│     ├─ audio/
+│     │  ├─ player.worklet.ts   미리듣기 AudioWorklet (원본/결과/지운 목소리/반주, 페이드·강도·겹침 수식)
+│     │  └─ player.ts           AudioContext, 소스(방송 전체 스트림 / 곡 창 stems), J/K/L, 구간 반복, 영상 동기화
+│     ├─ canvas/draw.ts         캔버스 공통 (DPR, 테마 색, 눈금, mipmap 파형, 곡선, 빗금)
+│     ├─ lib/                   rpc(타입 있는 call), errors(오류→한국어), song(라벨·상태·링크·설명란),
+│     │                         edits(곡/멘트 편집 → songs.set), pipeline(작업 연결), keys(단축키), peaks, format
+│     ├─ state/                 zustand: app(설정·화면·토스트·대화상자), projects(낙관적 편집·되돌리기),
+│     │                         jobs(작업·ETA·대기열·이어하기), ws(작업공간 선택/보기)
+│     ├─ screens/               FirstRun, Home, Workspace, Settings, HelpOverlay, CookiesDialog
+│     │  └─ workspace/          SongList, SongDetail(+EdgeScopes), OverviewMap, DetectPopover, SetlistDialog,
+│     │                         TalkEditor(+DetailTimeline), ExportView, Transport
+│     ├─ components/            공통 UI(Modal, Toasts, DialogHost, Progress), StatusBar, JobsPanel
+│     └─ styles/                tokens.css(디자인 토큰, 어둡게/밝게), base.css(컨트롤), app.css(화면)
+└─ scripts/                     devdriver.mjs, check.mjs, checks/dsp-check.js
+```
+
+### 보안 모델
+
+- 렌더러: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`. 창 열기·외부 이동 차단(https 링크만 기본 브라우저로), 권한 요청은 알림·오디오 출력 선택만 허용.
+- 빌드 CSP: `script-src 'self'`, `connect-src 'self' cliper-media:` 등. 개발 모드에서만 Vite HMR용 완화.
+- 브리지: 엔진 호출(`call`)과 알림 구독, 설정/작은 상태 저장, 폴더·파일 대화상자, 경로 열기/폴더 표시, 디스크 여유 공간. 임의 파일 읽기는 없고, 쿠키 파일은 **사용자가 대화상자에서 고른 파일만** 1MB 이하로 읽습니다.
+- `cliper-media://project/<프로젝트 id>/<경로>`: 작업 폴더 안의 **허용 목록 파일만**(`overview.peaks`, `probs.bin`, `clips/<id>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks}`) 제공. id는 경로 구분자·예약 문자·`..` 불가, 해석 후 작업 폴더 안인지 다시 확인. Range 요청 지원(영상 탐색).
+- `cliper-media://pcm/<프로젝트 id>?t=&d=`: 곡 검수 미리듣기용으로 방송 전체 오디오의 한 구간(최대 60초)을 f32 PCM으로 디코드. `audio.aac`는 ADTS 프레임 색인으로 정확한 위치를 잘라 ffmpeg에 넘기고(엔진과 교차상관 0ms 일치 확인), 로컬 녹화본 `audio.mka`는 ffmpeg 탐색을 씁니다.
+
+### 엔진 연동 요점
+
+- 엔진은 앱 시작 시(작업 폴더가 정해져 있으면) `serve --projects <작업 폴더> --models <models>`로 실행. 작업 폴더나 처리 장치(CPU)를 바꾸면 다시 시작합니다. 처리 우선순위 "낮게"는 OS 프로세스 우선순위로 적용.
+- `project.changed`를 진실의 원천으로 씁니다. 곡 편집은 낙관적으로 즉시 반영하고 `songs.set`으로 보냅니다(새 곡/구간 id는 앱이 만듦). 응답 대기 중 들어온 알림의 곡 목록은 무시하고 마지막 응답으로 맞춥니다.
+- 같은 종류 작업이 돌고 있어 `BUSY`가 오면 앱 대기열에 넣고, 앞 작업이 끝나면 자동으로 시작합니다.
+- 소리 받기 → 곡 찾기, 영상 받기 → 내보내기(밤새 처리) 같은 연결은 앱이 작업 완료 알림으로 이어 줍니다.
+- 진행 중 작업 요청은 userData에 기록해 두었다가, 앱이 작업 중에 닫히면 다음 실행 때 "지난번에 멈춘 작업 [이어서 하기]"로 다시 요청합니다.
+
+## 패키징 (후속 과제)
+
+설치 파일은 아직 만들지 않았습니다. electron-builder 등으로 만들 때 `extraResources`에 `engine/cliper.exe`, `models/`, `ffmpeg/ffmpeg.exe`, CUDA/cuDNN DLL(`runtime/`)을 넣으면 main이 `process.resourcesPath` 아래에서 찾도록 이미 경로 해석이 되어 있습니다(`src/main/index.ts`).
