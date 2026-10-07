@@ -14,7 +14,15 @@
 //   POST /close                                   → close the window (as the X button)
 //   GET  /logs                                    → recent console lines
 //   POST /quit
+//
+// Every request needs header `x-devdriver-token: <token>` (printed at start and written to
+// <tmp>/cliper-devdriver.token). Requests with an Origin header (browsers) or a non-JSON body
+// are refused, so web pages can't drive the app.
 import http from "node:http";
+import { randomBytes } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { _electron as electron } from "playwright-core";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -29,8 +37,13 @@ const port = Number(arg("port", "7788"));
 const width = Number(arg("width", "1600"));
 const height = Number(arg("height", "960"));
 
+const token = process.env.DEVDRIVER_TOKEN || randomBytes(16).toString("hex");
+const tokenFile = join(tmpdir(), "cliper-devdriver.token");
+writeFileSync(tokenFile, token);
+
 const app = await electron.launch({ args: [appDir], cwd: appDir, env: { ...process.env } });
 const page = await app.firstWindow();
+app.on("close", () => process.exit(0)); // the app quit (e.g. window closed): free the port
 const logs = [];
 page.on("console", (m) => {
   logs.push(`[${m.type()}] ${m.text()}`);
@@ -56,6 +69,10 @@ http
       res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify(obj));
     };
+    if (req.headers["x-devdriver-token"] !== token || req.headers.origin || (req.method === "POST" && !String(req.headers["content-type"] ?? "").startsWith("application/json"))) {
+      res.writeHead(403);
+      return res.end();
+    }
     try {
       const b = req.method === "POST" ? await body(req) : {};
       switch (req.url) {
@@ -100,4 +117,4 @@ http
       send(500, { error: String(e?.message ?? e) });
     }
   })
-  .listen(port, "127.0.0.1", () => console.log(`devdriver listening on 127.0.0.1:${port}`));
+  .listen(port, "127.0.0.1", () => console.log(`devdriver listening on 127.0.0.1:${port} (token in ${tokenFile})`));

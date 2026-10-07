@@ -12,4 +12,7 @@ import { useApp } from "./state/app";
 // QA handle (the renderer's own state; nothing privileged)
 Object.assign(window, { __cliper: { player, usePlayer, useWs, useProjects, useJobs, useApp, workletUrl: WORKLET_URL, syncStats } });
 
+// A file dropped anywhere except a real drop zone must not make Chromium navigate to it.
+for (const type of ["dragover", "drop"] as const) document.addEventListener(type, (e) => e.preventDefault());
+
 createRoot(document.getElementById("root")!).render(<App />);

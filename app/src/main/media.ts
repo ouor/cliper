@@ -7,7 +7,7 @@
 // review preview), clips/<clip>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks}.
 // Anything else (other paths, `..`, absolute paths, other projects roots) is refused.
 import { createReadStream, statSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 
 // one path segment: no separators, reserved characters or control chars (ids can contain
@@ -24,6 +24,8 @@ const MIME: Record<string, string> = {
 
 export interface MediaContext {
   projectsRoot: () => string | null;
+  /** origins allowed to read media with fetch() (the app's own origin) */
+  allowOrigin: (origin: string | null) => boolean;
 }
 
 function deny(status: number, msg: string): Response {
@@ -40,9 +42,13 @@ export function resolveProjectFile(root: string, projectId: string, rel: string)
   if (!REL_RE.test(rel)) return null;
   const base = resolve(root);
   const full = resolve(base, projectId, rel);
-  const r = relative(base, full);
-  if (!r || r.startsWith("..") || isAbsolute(r) || !full.startsWith(base + sep)) return null;
-  return full;
+  return isInside(base, full) ? full : null;
+}
+
+/** `full` is strictly below `base` (works for drive roots like `D:\` too). */
+export function isInside(base: string, full: string): boolean {
+  const r = relative(resolve(base), resolve(full));
+  return !!r && !r.startsWith("..") && !isAbsolute(r);
 }
 
 async function serveFile(file: string, req: Request): Promise<Response> {
@@ -94,12 +100,20 @@ export function createMediaHandler(ctx: MediaContext) {
     } catch {
       return deny(400, "bad url");
     }
-    const parts = decodeURIComponent(url.pathname).replace(/^\/+/, "").split("/");
+    let parts: string[];
+    try {
+      parts = decodeURIComponent(url.pathname).replace(/^\/+/, "").split("/");
+    } catch {
+      return deny(400, "bad url");
+    }
     if (url.host === "project") {
       const [projectId, ...rest] = parts;
       const file = resolveProjectFile(root, projectId ?? "", rest.join("/"));
       if (!file) return deny(403, "forbidden");
-      return serveFile(file, req);
+      const res = await serveFile(file, req);
+      const origin = req.headers.get("origin");
+      if (origin && ctx.allowOrigin(origin)) res.headers.set("access-control-allow-origin", origin);
+      return res;
     }
     return deny(403, "forbidden");
   };

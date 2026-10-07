@@ -42,7 +42,7 @@ $env:CLIPER_PROJECTS="C:\path\to\projects"; $env:CLIPER_SKIP_FIRST_RUN="1"; npm 
 
 ### 자동 점검 도구
 
-- `node scripts/devdriver.mjs` — 빌드된 앱을 Playwright(Electron)로 띄우고 `127.0.0.1:7788`에 조작 API(eval / shot / key / type / click / mouse / resize / close / quit)를 엽니다. 화면 확인과 시나리오 점검에 썼습니다.
+- `node scripts/devdriver.mjs` — 빌드된 앱을 Playwright(Electron)로 띄우고 `127.0.0.1:7788`에 조작 API(eval / shot / key / type / click / mouse / resize / close / quit)를 엽니다. 요청마다 시작 때 만든 토큰(`<tmp>/cliper-devdriver.token`)을 `x-devdriver-token` 헤더로 보내야 하고, `Origin` 헤더가 있거나 JSON이 아닌 요청은 거부합니다.
 - `node scripts/check.mjs scripts/checks/dsp-check.js` — 실행 중인 앱에서 미리듣기 AudioWorklet을 OfflineAudioContext로 렌더링해 네 가지 듣기 모드가 `docs/ipc.md`의 수식과 일치하는지 확인합니다(최대 오차 < 1e-6).
 - 렌더러에는 점검용 핸들 `window.__cliper`(player, 상태 저장소)가 있습니다. 렌더러 자신의 상태만 노출하며 권한은 없습니다.
 
@@ -81,7 +81,11 @@ app/
 ### 보안 모델
 
 - 렌더러: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`. 창 열기·외부 이동 차단(https 링크만 기본 브라우저로), 권한 요청은 알림·오디오 출력 선택만 허용.
-- 빌드 CSP: `script-src 'self'`, `connect-src 'self' cliper-media:` 등. 개발 모드에서만 Vite HMR용 완화.
+- 렌더러는 `file://`이 아니라 `app://cliper/`(main의 `protocol.handle`)에서 열리고, CSP는 응답 헤더로도 붙습니다(`src/main/app-protocol.ts`). 개발 모드에서만 Vite 서버와 HMR용 완화.
+- 창은 어떤 탐색도 하지 않습니다(`will-navigate`·`will-frame-navigate`·`will-redirect` 차단). 홈의 드롭 영역 밖에 파일을 놓아도 무시됩니다.
+- 앱은 사용자당 하나만 실행됩니다(single-instance lock). 두 번째 실행은 기존 창을 앞으로 가져옵니다.
+- IPC는 우리 창·우리 페이지(`app://cliper` 또는 개발 서버)에서 온 것만 처리합니다. 엔진 메서드는 앱이 쓰는 것만 허용하고, 임의 위치에 쓰는 인자(`export_metadata.path`, `output_dir`)는 사용자가 대화상자에서 고른 경로만 받습니다. `settings:set`은 키와 형식을 검사합니다.
+- `openPath`/`showItem`은 작업 폴더·로그 폴더·엔진이 알려 준 출력 폴더·사용자가 저장한 파일 아래만, 실행 파일 확장자는 거부합니다.
 - 브리지: 엔진 호출(`call`)과 알림 구독, 설정/작은 상태 저장, 폴더·파일 대화상자, 경로 열기/폴더 표시, 디스크 여유 공간. 임의 파일 읽기는 없고, 쿠키 파일은 **사용자가 대화상자에서 고른 파일만** 1MB 이하로 읽습니다.
 - `cliper-media://project/<프로젝트 id>/<경로>`: 작업 폴더 안의 **허용 목록 파일만**(`overview.peaks`, `probs.bin`, `clips/<id>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks}`) 제공. id는 경로 구분자·예약 문자·`..` 불가, 해석 후 작업 폴더 안인지 다시 확인. Range 요청 지원(영상 탐색).
 - 곡 검수 미리듣기(영상 받기 전)는 엔진 `audio.window`가 만든 `cache/window_*.wav`(전체 디코드와 샘플 단위로 같음)를 같은 프로토콜로 6초씩 읽습니다. 허용 목록에 `cache/window_<숫자>.wav`만 추가했습니다.
@@ -98,4 +102,7 @@ app/
 
 ## 패키징 (후속 과제)
 
-설치 파일은 아직 만들지 않았습니다. electron-builder 등으로 만들 때 `extraResources`에 `engine/cliper.exe`, `models/`, `ffmpeg/ffmpeg.exe`, CUDA/cuDNN DLL(`runtime/`)을 넣으면 main이 `process.resourcesPath` 아래에서 찾도록 이미 경로 해석이 되어 있습니다(`src/main/index.ts`).
+설치 파일은 아직 만들지 않았습니다(electron-builder 설정, Electron fuses 미적용). 준비된 부분:
+- 패키지 빌드(`app.isPackaged`)에서는 `process.resourcesPath` 아래 `engine/cliper.exe`, `models/`를 쓰고, `ffmpeg/ffmpeg.exe`가 있으면 엔진에 `CLIPER_FFMPEG`로 넘깁니다. CUDA DLL은 엔진이 `runtime/cuda`를 찾습니다.
+- `CLIPER_*` 환경 변수(엔진·모델·작업 폴더·userData 덮어쓰기)와 `ELECTRON_RENDERER_URL`은 개발 빌드에서만 적용됩니다.
+- 남은 일: electron-builder `extraResources`, `@electron/fuses`(RunAsNode·NodeOptions·Inspect 끄기, OnlyLoadAppFromAsar, asar 무결성, `GrantFileProtocolExtraPrivileges` 끄기), 패키지 상태에서 AudioWorklet 로딩 확인.
