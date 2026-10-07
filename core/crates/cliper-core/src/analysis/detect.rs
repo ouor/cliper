@@ -187,10 +187,84 @@ fn win(sec: f64, fps: f64) -> usize {
 
 /// Detect song sections. `probs` on a uniform grid (`probs.fps`).
 pub fn segment(probs: &Probs, p: &Params) -> Vec<Seg> {
+    analyze(probs, p).segments
+}
+
+/// Why a stretch of music was not accepted as a song.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateReason {
+    /// music-like but shorter than `min_song_sec` (one verse, short hum…)
+    TooShort,
+    /// music without singing (BGM, instrumental)
+    NoSinging,
+    /// music under talk (BGM + chatting)
+    Talk,
+}
+
+/// Music-like region the detector rejected — "maybe a missed song" for review.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Candidate {
+    pub start: f64,
+    pub end: f64,
+    pub reason: CandidateReason,
+}
+
+/// Why a detected song deserves a closer look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum DoubtReason {
+    /// under 90 s — one verse, aborted take, or a cut-off song
+    Short,
+    /// unusually long — may be two songs joined (medley, back-to-back)
+    Long,
+    /// singing evidence is weak — could be BGM / original song playing
+    WeakSinging,
+    /// noticeable talk inside — retake, chat over the song, or a talk segment
+    TalkInside,
+    /// produced by splitting a long blob at talk spikes (full-VOD mode) — boundaries less certain
+    Resplit,
+}
+
+/// Detector confidence for one song: `doubts` empty = confident.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Confidence {
+    pub doubts: Vec<DoubtReason>,
+    /// median smoothed music−speech margin inside the song
+    pub margin: f64,
+    /// p75 of the sing probability inside the song
+    pub sing_p75: f64,
+}
+
+impl Confidence {
+    pub fn is_doubtful(&self) -> bool {
+        !self.doubts.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Analysis {
+    pub segments: Vec<Seg>,
+    /// one per segment
+    pub confidence: Vec<Confidence>,
+    pub candidates: Vec<Candidate>,
+}
+
+/// Shortest rejected music stretch still worth showing as a candidate.
+const CANDIDATE_MIN_SEC: f64 = 15.0;
+
+/// [`segment`] plus per-song confidence and the rejected-but-musical stretches.
+/// The accepted segments are exactly `segment.py` v6's.
+pub fn analyze(probs: &Probs, p: &Params) -> Analysis {
     let fps = probs.fps;
     let music = f64v(&probs.music);
     let speech = f64v(&probs.speech);
     let sing = f64v(&probs.sing);
+    let mut candidates = Vec::new();
 
     let cur: Vec<f64> = if p.pann_use_speech { music.iter().zip(&speech).map(|(m, s)| m - s).collect() } else { music.clone() };
     let core_c = uniform_filter1d(&cur, win(p.pann_smooth_sec, fps));
@@ -200,24 +274,91 @@ pub fn segment(probs: &Probs, p: &Params) -> Vec<Seg> {
     let mask = hysteresis(&core, &loose);
     let mut segs = mask_to_segs(&mask, fps);
     segs = close_gaps(&segs, p.close_sec);
-    segs.retain(|(s, e)| e - s >= p.min_song_sec);
+    segs.retain(|&(s, e)| {
+        let keep = e - s >= p.min_song_sec;
+        if !keep && e - s >= CANDIDATE_MIN_SEC {
+            candidates.push(Candidate { start: s, end: e, reason: CandidateReason::TooShort });
+        }
+        keep
+    });
+
+    // gate rejection reason: talk dominates, or no singing
+    let gate = |s: f64, e: f64, sing_min: f64, stat_p75: bool| -> Option<CandidateReason> {
+        let sg = slice(&sing, s, e, fps);
+        let sv = if stat_p75 { percentile(sg, 75.0) } else { median(sg) };
+        if median(slice(&speech, s, e, fps)) > p.seg_speech_max {
+            Some(CandidateReason::Talk)
+        } else if sv < sing_min {
+            Some(CandidateReason::NoSinging)
+        } else {
+            None
+        }
+    };
 
     // segment gate: BGM (sing↓) / BGM+talk (speech↑)
     if p.seg_sing_min > 0.0 || p.seg_speech_max < 1.0 {
-        segs.retain(|&(s, e)| {
-            let sg = slice(&sing, s, e, fps);
-            let sv = if p.seg_sing_stat == "p75" { percentile(sg, 75.0) } else { median(sg) };
-            sv >= p.seg_sing_min && median(slice(&speech, s, e, fps)) <= p.seg_speech_max
+        segs.retain(|&(s, e)| match gate(s, e, p.seg_sing_min, p.seg_sing_stat == "p75") {
+            None => true,
+            Some(reason) => {
+                candidates.push(Candidate { start: s, end: e, reason });
+                false
+            }
         });
     }
 
+    let mut resplit: Vec<Seg> = Vec::new();
     if p.adaptive_resplit {
-        segs = adaptive_resplit(segs, &speech, &sing, fps, p);
+        let before = segs.clone();
+        segs = adaptive_resplit(segs, &speech, &sing, fps, p, &mut candidates, &gate);
+        resplit = segs.iter().copied().filter(|s| !before.contains(s)).collect();
     }
-    segs
+
+    let talk_s = uniform_filter1d(&speech, win(5.0, fps));
+    let confidence = segs
+        .iter()
+        .map(|&(s, e)| {
+            let margin = median(slice(&core_c, s, e, fps));
+            let sing_p75 = percentile(slice(&sing, s, e, fps), 75.0);
+            let talk_frac = {
+                let t = slice(&talk_s, s, e, fps);
+                t.iter().filter(|&&v| v > p.sc_thr).count() as f64 / t.len().max(1) as f64
+            };
+            let mut doubts = Vec::new();
+            if e - s < 90.0 {
+                doubts.push(DoubtReason::Short);
+            }
+            if e - s > 420.0 {
+                doubts.push(DoubtReason::Long);
+            }
+            if sing_p75 < 2.0 * p.seg_sing_min.max(p.full_sing_min / 2.0) {
+                doubts.push(DoubtReason::WeakSinging);
+            }
+            if talk_frac > 0.08 {
+                doubts.push(DoubtReason::TalkInside);
+            }
+            if resplit.contains(&(s, e)) {
+                doubts.push(DoubtReason::Resplit);
+            }
+            Confidence { doubts, margin, sing_p75 }
+        })
+        .collect();
+
+    // keep candidates that don't overlap an accepted song, deduplicated
+    candidates.retain(|c| !segs.iter().any(|&(s, e)| c.start < e && s < c.end));
+    candidates.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    candidates.dedup_by(|a, b| a.start < b.end && b.start < a.end);
+    Analysis { segments: segs, confidence, candidates }
 }
 
-fn adaptive_resplit(segs: Vec<Seg>, speech: &[f64], sing: &[f64], fps: f64, p: &Params) -> Vec<Seg> {
+fn adaptive_resplit(
+    segs: Vec<Seg>,
+    speech: &[f64],
+    sing: &[f64],
+    fps: f64,
+    p: &Params,
+    candidates: &mut Vec<Candidate>,
+    gate: &dyn Fn(f64, f64, f64, bool) -> Option<CandidateReason>,
+) -> Vec<Seg> {
     let n_long = segs.iter().filter(|(s, e)| e - s > p.long_blob_sec).count();
     if n_long < p.long_blob_n {
         return segs;
@@ -229,7 +370,13 @@ fn adaptive_resplit(segs: Vec<Seg>, speech: &[f64], sing: &[f64], fps: f64, p: &
             let (i0, i1) = (idx(s, fps), idx(e, fps).min(talk.len()));
             let not_talk: Vec<bool> = talk[i0..i1].iter().map(|t| !t).collect();
             let frag: Vec<Seg> = mask_to_segs(&not_talk, fps).into_iter().map(|(a, b)| (s + a, s + b)).collect();
-            refined.extend(close_gaps(&frag, p.sc_close_sec).into_iter().filter(|(a, b)| b - a >= p.min_song_sec));
+            for (a, b) in close_gaps(&frag, p.sc_close_sec) {
+                if b - a >= p.min_song_sec {
+                    refined.push((a, b));
+                } else if b - a >= CANDIDATE_MIN_SEC {
+                    candidates.push(Candidate { start: a, end: b, reason: CandidateReason::TooShort });
+                }
+            }
         } else {
             refined.push((s, e));
         }
@@ -237,7 +384,12 @@ fn adaptive_resplit(segs: Vec<Seg>, speech: &[f64], sing: &[f64], fps: f64, p: &
     refined
         .into_iter()
         .filter(|&(s, e)| {
-            percentile(slice(sing, s, e, fps), 75.0) >= p.full_sing_min && median(slice(speech, s, e, fps)) <= p.seg_speech_max
+            let ok = percentile(slice(sing, s, e, fps), 75.0) >= p.full_sing_min && median(slice(speech, s, e, fps)) <= p.seg_speech_max;
+            if !ok {
+                let reason = gate(s, e, p.full_sing_min, true).unwrap_or(CandidateReason::NoSinging);
+                candidates.push(Candidate { start: s, end: e, reason });
+            }
+            ok
         })
         .collect()
 }

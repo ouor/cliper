@@ -104,11 +104,13 @@ struct DetectArg {
 struct ClipsArg {
     id: String,
     clip_ids: Option<Vec<String>>,
+    song_ids: Option<Vec<String>>,
 }
 #[derive(Deserialize)]
 struct ExportArg {
     id: String,
-    song_ids: Option<Vec<String>>,
+    #[serde(flatten)]
+    opts: crate::engine::ExportOptions,
 }
 #[derive(Deserialize)]
 struct JobArg {
@@ -154,11 +156,11 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         }
         "clips.fetch" => {
             let a: ClipsArg = p(&params)?;
-            job(eng.job_fetch_clips(&a.id, a.clip_ids))
+            job(eng.job_fetch_clips(&a.id, a.clip_ids, a.song_ids))
         }
         "export.run" => {
             let a: ExportArg = p(&params)?;
-            job(eng.job_export(&a.id, a.song_ids))
+            job(eng.job_export(&a.id, a.opts))
         }
         "job.list" => to_json(eng.jobs()),
         "job.cancel" => Ok(json!(eng.cancel(&p::<JobArg>(&params)?.job_id))),

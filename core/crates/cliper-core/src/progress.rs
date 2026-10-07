@@ -18,14 +18,18 @@ pub struct Progress {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub message: Option<String>,
+    /// what the progress is about (clip id in clips.fetch, song id in export.run)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub item: Option<String>,
 }
 
 impl Progress {
     pub fn new(stage: &str, done: u64, total: u64) -> Self {
-        Self { stage: stage.to_string(), done, total, bytes: None, message: None }
+        Self { stage: stage.to_string(), done, total, bytes: None, message: None, item: None }
     }
     pub fn note(stage: &str, message: impl Into<String>) -> Self {
-        Self { stage: stage.to_string(), done: 0, total: 0, bytes: None, message: Some(message.into()) }
+        Self { stage: stage.to_string(), done: 0, total: 0, bytes: None, message: Some(message.into()), item: None }
     }
 }
 

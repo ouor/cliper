@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::detect::Params;
+use crate::analysis::detect::{Analysis, Candidate, Confidence, Params};
 use crate::hls::audio_extract::{AudioResult, SegIndex};
 use crate::hls::video_fetch::VideoClip;
 use crate::source::SourceInfo;
@@ -68,6 +68,9 @@ pub struct Detection {
     pub params: Params,
     /// raw detector output (before user edits)
     pub segments: Vec<(f64, f64)>,
+    /// music-like stretches the detector rejected (possible missed songs)
+    #[serde(default)]
+    pub candidates: Vec<Candidate>,
     pub device: crate::ml::runtime::Device,
 }
 
@@ -81,14 +84,29 @@ pub struct Settings {
     pub margin_after: f64,
     /// video rendition height (None = highest/original)
     pub video_height: Option<u32>,
+    /// suggest vocal mutes over detected talk after separation
+    pub suggest_mutes: bool,
     /// default fade length for new mutes (s)
     pub mute_fade: f64,
+    /// default strength for new mutes: None = remove the voice completely,
+    /// Some(-12.0) = only turn it down by 12 dB
+    pub mute_gain_db: Option<f64>,
+    /// fade at the very start / end of each exported song (s)
+    pub song_fade_in: f64,
+    pub song_fade_out: f64,
     /// export: "h264_nvenc" | "libx264" | "copy"
     pub video_codec: String,
     /// export quality (CQ for nvenc, CRF for x264)
     pub video_quality: u32,
     pub audio_bitrate_k: u32,
+    /// loudness normalisation of exported songs (None = keep the original level)
+    pub loudness: Option<Loudness>,
     pub output_dir: Option<String>,
+    /// output file name (without extension). Tokens: {date} (broadcast date
+    /// YYYY-MM-DD), {yymmdd}, {platform}, {vod_id}, {channel}, {vod_title},
+    /// {idx} (2-digit song number), {title}, {artist}, {start} (h-mm-ss in the VOD).
+    /// Unsafe characters are replaced; an existing file gets `_v2`, `_v3`, ….
+    pub filename_template: String,
 }
 
 impl Default for Settings {
@@ -97,13 +115,29 @@ impl Default for Settings {
             margin_before: 30.0,
             margin_after: 30.0,
             video_height: None,
+            suggest_mutes: true,
             mute_fade: 0.3,
+            mute_gain_db: None,
+            song_fade_in: 0.3,
+            song_fade_out: 1.5,
             video_codec: "h264_nvenc".into(),
             video_quality: 23,
             audio_bitrate_k: 320,
+            loudness: None,
             output_dir: None,
+            filename_template: "{vod_id}_{idx}_{title}".into(),
         }
     }
+}
+
+/// Target loudness for export (EBU R128 / ITU-R BS.1770 via ffmpeg `loudnorm`, linear mode).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Loudness {
+    /// integrated loudness target, LUFS (YouTube ≈ −14)
+    pub target_lufs: f64,
+    /// true-peak ceiling, dBTP (e.g. −1)
+    pub true_peak: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,12 +155,24 @@ pub enum Origin {
 pub struct Song {
     pub id: String,
     pub title: String,
+    /// original artist
+    #[serde(default)]
+    pub artist: String,
     pub start: f64,
     pub end: f64,
     pub origin: Origin,
     /// excluded songs are kept (so detection reruns don't resurrect them) but not exported
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// the user has reviewed this song's boundaries
+    #[serde(default)]
+    pub reviewed: bool,
+    /// free-form note (e.g. "retake", "medley", "2:13 talk audible")
+    #[serde(default)]
+    pub note: String,
+    /// detector confidence (auto songs; None for manual songs)
+    #[serde(default)]
+    pub confidence: Option<Confidence>,
     pub clip_id: Option<String>,
     #[serde(default)]
     pub mutes: Vec<Mute>,
@@ -148,6 +194,13 @@ pub struct Mute {
     pub fade_in: f64,
     pub fade_out: f64,
     pub origin: Origin,
+    /// approved by the user. Only confirmed mutes are applied on export;
+    /// suggestions start unconfirmed, user-made mutes are confirmed.
+    #[serde(default)]
+    pub confirmed: bool,
+    /// None = remove the voice completely; Some(db) = attenuate by `db` (negative)
+    #[serde(default)]
+    pub gain_db: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,26 +288,38 @@ impl Project {
     }
 
     /// Replace auto songs with fresh detector output, keeping manual songs and
-    /// any auto song the user touched (titles/mutes/disabled survive reruns).
-    pub fn apply_detection(&mut self, segs: &[(f64, f64)]) {
+    /// any auto song the user touched (reviewed, titled, muted, disabled, fetched).
+    pub fn apply_detection(&mut self, a: &Analysis) {
         let keep: Vec<Song> = self
             .songs
             .drain(..)
-            .filter(|s| s.origin == Origin::Manual || !s.enabled || !s.title.is_empty() || !s.mutes.is_empty() || s.clip_id.is_some())
+            .filter(|s| {
+                s.origin == Origin::Manual
+                    || s.reviewed
+                    || !s.enabled
+                    || !s.title.is_empty()
+                    || !s.note.is_empty()
+                    || !s.mutes.is_empty()
+                    || s.clip_id.is_some()
+            })
             .collect();
         let overlaps = |a: (f64, f64), b: (f64, f64)| a.0 < b.1 && b.0 < a.1;
         let mut songs = keep;
-        for &seg in segs {
+        for (k, &seg) in a.segments.iter().enumerate() {
             if songs.iter().any(|s| overlaps((s.start, s.end), seg)) {
                 continue;
             }
             songs.push(Song {
                 id: new_id("s"),
                 title: String::new(),
+                artist: String::new(),
                 start: seg.0,
                 end: seg.1,
                 origin: Origin::Auto,
                 enabled: true,
+                reviewed: false,
+                note: String::new(),
+                confidence: a.confidence.get(k).cloned(),
                 clip_id: None,
                 mutes: Vec::new(),
                 export: None,

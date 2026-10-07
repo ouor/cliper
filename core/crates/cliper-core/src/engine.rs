@@ -19,14 +19,14 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::analysis::detect::{self, Params};
 use crate::analysis::talk::{self, TalkParams};
 use crate::audio::{align, ffmpeg, peaks, wav};
-use crate::export::{ExportSpec, export_song};
+use crate::export::{ExportSpec, OutputFormat, StemsSpec, export_song, export_stems};
 use crate::hls::audio_extract::{self, ExtractOptions};
 use crate::hls::video_fetch::{self, VideoOptions};
 use crate::ml::panns::{self, Probs, Tagger};
 use crate::ml::runtime;
 use crate::ml::separator::ModelSpec;
 use crate::progress::{CancellationToken, Progress, ProgressFn};
-use crate::project::{self, Detection, Mute, Origin, Project, Settings, Song, Store, plan};
+use crate::project::{self, Detection, naming, Mute, Origin, Project, Settings, Song, Store, plan};
 use crate::render::MuteSpan;
 use crate::source::{ResolveError, Source};
 
@@ -454,11 +454,14 @@ impl Engine {
                 s.id = project::new_id("s");
             }
             for m in s.mutes.iter_mut() {
-                if m.end <= m.start || m.fade_in < 0.0 || m.fade_out < 0.0 {
+                if m.end <= m.start || m.fade_in < 0.0 || m.fade_out < 0.0 || m.gain_db.is_some_and(|g| !g.is_finite() || g > 0.0) {
                     return Err(invalid(format!("song {}: bad mute {}–{}", s.id, m.start, m.end)));
                 }
                 if m.id.is_empty() {
                     m.id = project::new_id("m");
+                }
+                if m.origin == Origin::Manual {
+                    m.confirmed = true;
                 }
             }
             s.mutes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
@@ -570,16 +573,23 @@ impl Engine {
                 }
             };
             let params = params.unwrap_or_else(|| p.detection.as_ref().map(|d| d.params.clone()).unwrap_or_default());
-            let segs = detect::segment(&probs, &params);
+            let a = detect::analyze(&probs, &params);
+            let segs = a.segments.clone();
             let p = eng
                 .mutate(&p.id, |p| {
-                    p.detection = Some(Detection { probs_file: "probs.bin".into(), params, segments: segs.clone(), device });
-                    p.apply_detection(&segs);
+                    p.detection = Some(Detection {
+                        probs_file: "probs.bin".into(),
+                        params,
+                        segments: a.segments.clone(),
+                        candidates: a.candidates.clone(),
+                        device,
+                    });
+                    p.apply_detection(&a);
                     plan::plan_clips(p);
                     Ok(())
                 })
                 .await?;
-            Ok(json!({ "segments": segs, "songs": p.songs.len(), "clips": p.clips.len() }))
+            Ok(json!({ "segments": segs, "songs": p.songs.len(), "clips": p.clips.len(), "candidates": a.candidates.len() }))
         })
     }
 
@@ -589,11 +599,17 @@ impl Engine {
             .ok()
             .and_then(|b| Probs::from_bytes(&b))
             .ok_or_else(|| precondition("run detection first"))?;
-        let segs = detect::segment(&probs, &params);
+        let a = detect::analyze(&probs, &params);
         self.mutate(id, |p| {
             let device = p.detection.as_ref().map(|d| d.device).unwrap_or(runtime::Device::Cpu);
-            p.detection = Some(Detection { probs_file: "probs.bin".into(), params, segments: segs.clone(), device });
-            p.apply_detection(&segs);
+            p.detection = Some(Detection {
+                probs_file: "probs.bin".into(),
+                params,
+                segments: a.segments.clone(),
+                candidates: a.candidates.clone(),
+                device,
+            });
+            p.apply_detection(&a);
             plan::plan_clips(p);
             Ok(())
         })
@@ -602,18 +618,24 @@ impl Engine {
 
     // ── clips: video → align → stems → talk ─────────────────────────────
 
-    /// Fetch + process clips (`clip_ids` = None: every clip still missing video or stems).
-    pub fn job_fetch_clips(self: &Arc<Self>, id: &str, clip_ids: Option<Vec<String>>) -> ApiResult<String> {
+    /// Fetch + process clips: video → alignment → stems → talk suggestions.
+    /// Select by `clip_ids`, or by `song_ids` (their clips — "finish this song
+    /// first", "fetch only the reviewed songs"); neither = every clip still
+    /// missing video or stems.
+    pub fn job_fetch_clips(self: &Arc<Self>, id: &str, clip_ids: Option<Vec<String>>, song_ids: Option<Vec<String>>) -> ApiResult<String> {
         let p = self.get(id)?;
         if p.audio.is_none() {
             return Err(precondition("fetch the audio first"));
         }
+        let from_songs: Option<Vec<String>> = song_ids.map(|ids| {
+            p.songs.iter().filter(|s| ids.contains(&s.id)).filter_map(|s| s.clip_id.clone()).collect()
+        });
         let todo: Vec<String> = p
             .clips
             .iter()
-            .filter(|c| match &clip_ids {
-                Some(ids) => ids.contains(&c.id),
-                None => c.video.is_none() || c.stems.is_none(),
+            .filter(|c| match (&clip_ids, &from_songs) {
+                (Some(ids), _) | (None, Some(ids)) => ids.contains(&c.id),
+                (None, None) => c.video.is_none() || c.stems.is_none(),
             })
             .map(|c| c.id.clone())
             .collect();
@@ -627,8 +649,21 @@ impl Engine {
                 if ctx.cancel.is_cancelled() {
                     return Err(ApiError::new("CANCELLED", "cancelled"));
                 }
-                (ctx.progress)(Progress { message: Some(format!("clip {}/{n}", k + 1)), ..Progress::new("clips.fetch", k as u64, n as u64) });
-                eng.process_clip(&p.id, cid, &ctx).await?;
+                (ctx.progress)(Progress {
+                    message: Some(format!("clip {}/{n}", k + 1)),
+                    item: Some(cid.clone()),
+                    ..Progress::new("clips.fetch", k as u64, n as u64)
+                });
+                // tag every progress event of this clip with its id
+                let tagged: ProgressFn = {
+                    let (inner, cid) = (ctx.progress.clone(), cid.clone());
+                    Arc::new(move |mut pr: Progress| {
+                        pr.item.get_or_insert_with(|| cid.clone());
+                        inner(pr)
+                    })
+                };
+                let cctx = JobCtx { progress: tagged, ..ctx.clone() };
+                eng.process_clip(&p.id, cid, &cctx).await?;
                 done.push(cid.clone());
             }
             Ok(json!({ "clips": done }))
@@ -692,6 +727,9 @@ impl Engine {
         };
 
         // 4) talk → mute suggestions
+        if !p.settings.suggest_mutes {
+            return Ok(());
+        }
         (ctx.progress)(Progress::note("talk", "finding talk in the vocal stem"));
         let stems = clip.stems.clone().unwrap();
         let songs_clip: Vec<(f64, f64)> = p
@@ -709,21 +747,33 @@ impl Engine {
             Ok(talk::talk_regions(&v, &m, &songs_clip, &TalkParams::default()))
         })
         .await??;
-        let fade = p.settings.mute_fade;
+        let (fade, gain_db) = (p.settings.mute_fade, p.settings.mute_gain_db);
         self.mutate(pid, |p| {
             let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
             let talk_vod: Vec<(f64, f64)> = regions.iter().filter_map(|&(a, b)| Some((c.to_vod_time(a)?, c.to_vod_time(b)?))).collect();
             c.talk = talk_vod.clone();
             let (mb, ma) = (p.settings.margin_before, p.settings.margin_after);
             for s in p.songs.iter_mut().filter(|s| s.clip_id.as_deref() == Some(cid)) {
-                if s.mutes.iter().any(|m| m.origin == Origin::Manual) {
-                    continue; // never override the user's own mutes
-                }
-                s.mutes = talk_vod
+                // keep the user's own and confirmed mutes; refresh unconfirmed suggestions
+                s.mutes.retain(|m| m.origin == Origin::Manual || m.confirmed);
+                let kept: Vec<(f64, f64)> = s.mutes.iter().map(|m| (m.start, m.end)).collect();
+                let fresh: Vec<Mute> = talk_vod
                     .iter()
                     .filter(|&&(a, b)| b > s.start - mb && a < s.end + ma)
-                    .map(|&(a, b)| Mute { id: project::new_id("m"), start: a, end: b, fade_in: fade, fade_out: fade, origin: Origin::Auto })
+                    .filter(|&&(a, b)| !kept.iter().any(|&(x, y)| a < y && x < b))
+                    .map(|&(a, b)| Mute {
+                        id: project::new_id("m"),
+                        start: a,
+                        end: b,
+                        fade_in: fade,
+                        fade_out: fade,
+                        origin: Origin::Auto,
+                        confirmed: false,
+                        gain_db,
+                    })
                     .collect();
+                s.mutes.extend(fresh);
+                s.mutes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
             }
             Ok(())
         })
@@ -762,12 +812,12 @@ impl Engine {
 
     // ── export ──────────────────────────────────────────────────────────
 
-    pub fn job_export(self: &Arc<Self>, id: &str, song_ids: Option<Vec<String>>) -> ApiResult<String> {
+    pub fn job_export(self: &Arc<Self>, id: &str, opts: ExportOptions) -> ApiResult<String> {
         let p = self.get(id)?;
         let songs: Vec<Song> = p
             .songs
             .iter()
-            .filter(|s| s.enabled && song_ids.as_ref().is_none_or(|ids| ids.contains(&s.id)))
+            .filter(|s| s.enabled && opts.song_ids.as_ref().is_none_or(|ids| ids.contains(&s.id)))
             .cloned()
             .collect();
         if songs.is_empty() {
@@ -778,35 +828,89 @@ impl Engine {
             if !ok {
                 return Err(precondition(format!("song {} has no processed clip yet (fetch clips first)", s.id)));
             }
+            if let Some(path) = opts.audio_overrides.get(&s.id).filter(|p| !Path::new(p).is_file()) {
+                return Err(invalid(format!("audio override for {} not found: {path}", s.id)));
+            }
         }
         self.spawn_job("export.run", id, move |eng, ctx| async move {
             let out_dir = p.settings.output_dir.clone().map(PathBuf::from).unwrap_or_else(|| eng.store.dir(&p.id).join("exports"));
+            std::fs::create_dir_all(&out_dir)?;
             let all: Vec<&Song> = p.songs.iter().filter(|s| s.enabled).collect();
+            let format = opts.format.unwrap_or_default();
             let mut results = Vec::new();
+            let mut stems_out = Vec::new();
             for (k, s) in songs.iter().enumerate() {
                 if ctx.cancel.is_cancelled() {
                     return Err(ApiError::new("CANCELLED", "cancelled"));
                 }
-                (ctx.progress)(Progress { message: Some(format!("song {}/{}", k + 1, songs.len())), ..Progress::new("export.run", k as u64, songs.len() as u64) });
+                (ctx.progress)(Progress {
+                    message: Some(format!("song {}/{}", k + 1, songs.len())),
+                    item: Some(s.id.clone()),
+                    ..Progress::new("export.run", k as u64, songs.len() as u64)
+                });
+                let tagged: ProgressFn = {
+                    let (inner, sid) = (ctx.progress.clone(), s.id.clone());
+                    Arc::new(move |mut pr: Progress| {
+                        pr.item.get_or_insert_with(|| sid.clone());
+                        inner(pr)
+                    })
+                };
                 let clip = p.clip(s.clip_id.as_ref().unwrap()).unwrap();
                 let (stems, video) = (clip.stems.clone().unwrap(), clip.video.clone().unwrap());
                 let ct = |t: f64| clip.to_clip_time(t).unwrap();
                 let number = all.iter().position(|x| x.id == s.id).map(|i| i + 1).unwrap_or(k + 1);
+                let name = naming::render_name(&p.settings.filename_template, &p, s, number);
+                let mutes: Vec<MuteSpan> = s
+                    .mutes
+                    .iter()
+                    .filter(|m| m.confirmed || opts.include_unconfirmed)
+                    .map(|m| MuteSpan { start: ct(m.start), end: ct(m.end), fade_in: m.fade_in, fade_out: m.fade_out, gain_db: m.gain_db })
+                    .collect();
+                let (in_t, out_t) = (ct(s.start).max(0.0), ct(s.end).min(video.duration));
+
+                if opts.stems {
+                    let spec = StemsSpec {
+                        source_mp4: video.path.clone(),
+                        orig_wav: stems.orig.clone(),
+                        vocals_wav: stems.vocals.clone(),
+                        in_t,
+                        out_t,
+                        handles: opts.handles.unwrap_or(3.0).max(0.0),
+                        mutes: mutes.clone(),
+                        dir: out_dir.join(format!("{name}_stems")),
+                        name: name.clone(),
+                        vod_offset: video.vod_start + clip.offset,
+                        reference_video: opts.reference_video,
+                    };
+                    let progress = tagged.clone();
+                    let r = tokio::task::spawn_blocking(move || export_stems(&spec, &progress)).await??;
+                    stems_out.push(json!({ "song_id": s.id, "stems": r }));
+                    if !opts.also_render {
+                        continue;
+                    }
+                }
+
+                let metadata = song_metadata(&p, s);
                 let spec = ExportSpec {
                     source_mp4: video.path.clone(),
                     orig_wav: stems.orig.clone(),
                     vocals_wav: stems.vocals.clone(),
-                    in_t: ct(s.start).max(0.0),
-                    out_t: ct(s.end).min(video.duration),
-                    mutes: s.mutes.iter().map(|m| MuteSpan { start: ct(m.start), end: ct(m.end), fade_in: m.fade_in, fade_out: m.fade_out }).collect(),
-                    out: out_dir.join(file_name(&p, s, number)),
-                    video_codec: p.settings.video_codec.clone(),
+                    audio_override: opts.audio_overrides.get(&s.id).map(PathBuf::from),
+                    in_t,
+                    out_t,
+                    mutes,
+                    out: naming::unique_path(&out_dir, &name, format.extension()),
+                    format,
+                    video_codec: opts.video_codec.clone().unwrap_or_else(|| p.settings.video_codec.clone()),
                     video_quality: p.settings.video_quality,
                     audio_bitrate_k: p.settings.audio_bitrate_k,
-                    title: Some(s.title.clone()).filter(|t| !t.is_empty()),
+                    fade_in: p.settings.song_fade_in,
+                    fade_out: p.settings.song_fade_out,
+                    loudness: p.settings.loudness,
+                    metadata,
                 };
-                let (progress, cancel) = (ctx.progress.clone(), ctx.cancel.clone());
-                let r = tokio::task::spawn_blocking(move || export_song(&spec, &progress, &cancel)).await??;
+                let cancel = ctx.cancel.clone();
+                let r = tokio::task::spawn_blocking(move || export_song(&spec, &tagged, &cancel)).await??;
                 let sid = s.id.clone();
                 let info = project::ExportInfo { path: r.path.to_string_lossy().into_owned(), exported_at: project::now(), duration: r.duration };
                 eng.mutate(&p.id, |p| {
@@ -816,18 +920,51 @@ impl Engine {
                     Ok(())
                 })
                 .await?;
-                results.push(r);
+                results.push(json!({ "song_id": sid, "result": r }));
             }
-            Ok(json!({ "exports": results }))
+            Ok(json!({ "exports": results, "stems": stems_out }))
         })
     }
 }
 
-fn file_name(p: &Project, s: &Song, number: usize) -> String {
-    let t = s.start as u64;
-    let when = format!("{}h{:02}m{:02}s", t / 3600, t / 60 % 60, t % 60);
-    let title = if s.title.trim().is_empty() { when } else { s.title.trim().to_string() };
-    let vid = p.source.as_ref().map(|s| s.video_id.clone()).unwrap_or_default();
-    let raw = format!("{vid}_{number:02}_{title}.mp4");
-    raw.chars().map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '_' } else { c }).collect()
+/// Options for `export.run`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(default)]
+pub struct ExportOptions {
+    /// default: every enabled song
+    pub song_ids: Option<Vec<String>>,
+    /// default: mp4
+    pub format: Option<OutputFormat>,
+    /// override settings.video_codec for this run ("copy" = fast, lossless video)
+    pub video_codec: Option<String>,
+    /// apply unconfirmed mute suggestions too (default false: only confirmed)
+    pub include_unconfirmed: bool,
+    /// write editor/DAW stems (+ markers, Reaper project) instead of a rendered file
+    pub stems: bool,
+    /// with `stems`: also render the normal output
+    pub also_render: bool,
+    /// with `stems`: seconds of handle before/after the song (default 3)
+    pub handles: Option<f64>,
+    /// with `stems`: add a light 720p reference video
+    pub reference_video: bool,
+    /// song id → audio file (aligned to the clip start) replacing the rendered audio
+    pub audio_overrides: BTreeMap<String, String>,
+}
+
+/// Container tags: title, artist, channel, date, source link.
+fn song_metadata(p: &Project, s: &Song) -> Vec<(String, String)> {
+    let src = p.source.as_ref();
+    let mut m = vec![
+        ("title".to_string(), s.title.clone()),
+        ("artist".to_string(), s.artist.clone()),
+        ("album_artist".to_string(), src.map(|x| x.channel.clone()).unwrap_or_default()),
+        ("album".to_string(), src.map(|x| x.title.clone()).unwrap_or_default()),
+        ("date".to_string(), naming::broadcast_date(p).unwrap_or_default()),
+    ];
+    if let Some(x) = src {
+        let t = s.start.max(0.0) as u64;
+        m.push(("comment".into(), format!("{} @ {}:{:02}:{:02}", x.url, t / 3600, t / 60 % 60, t % 60)));
+    }
+    m
 }

@@ -216,20 +216,31 @@ async fn main() -> Result<()> {
             let mutes = mute
                 .iter()
                 .filter_map(|s| s.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
-                .map(|(start, end)| MuteSpan { start, end, fade_in: fade, fade_out: fade })
+                .map(|(start, end)| MuteSpan { start, end, fade_in: fade, fade_out: fade, gain_db: None })
                 .collect();
+            let format = match output.extension().and_then(|e| e.to_str()).unwrap_or("mp4") {
+                "wav" => cliper_core::export::OutputFormat::Wav,
+                "flac" => cliper_core::export::OutputFormat::Flac,
+                "mp3" => cliper_core::export::OutputFormat::Mp3,
+                _ => cliper_core::export::OutputFormat::Mp4,
+            };
             let spec = ExportSpec {
                 source_mp4: video.unwrap_or_else(|| clip_dir.join("source.mp4")),
                 orig_wav: clip_dir.join("orig.wav"),
                 vocals_wav: clip_dir.join("vocals.wav"),
+                audio_override: None,
                 in_t,
                 out_t,
                 mutes,
                 out: output,
+                format,
                 video_codec: codec,
-                video_quality: 19,
+                video_quality: 23,
                 audio_bitrate_k: 320,
-                title: None,
+                fade_in: 0.3,
+                fade_out: 1.5,
+                loudness: None,
+                metadata: Vec::new(),
             };
             let progress: cliper_core::progress::ProgressFn = Arc::new(|p: Progress| {
                 if let Some(m) = p.message {

@@ -65,7 +65,11 @@ mod tests {
     #[test]
     fn merges_close_songs() {
         let mut p = Project::new("t", "x");
-        p.apply_detection(&[(100.0, 300.0), (330.0, 500.0), (2000.0, 2200.0)]);
+        let a = crate::analysis::detect::Analysis {
+            segments: vec![(100.0, 300.0), (330.0, 500.0), (2000.0, 2200.0)],
+            ..Default::default()
+        };
+        p.apply_detection(&a);
         plan_clips(&mut p);
         assert_eq!(p.clips.len(), 2);
         assert_eq!((p.clips[0].start, p.clips[0].end), (70.0, 530.0));
