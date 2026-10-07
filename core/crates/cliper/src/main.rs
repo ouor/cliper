@@ -26,6 +26,28 @@ enum Cmd {
         #[arg(long)]
         cpu: bool,
     },
+    /// Headless batch: create projects for VODs / recordings and run audio +
+    /// detection (and optionally clips + export). One JSON line per input on stdout.
+    Process {
+        /// VOD URLs, chzzk numbers, soop:<id>, or local recording paths
+        #[arg(required = true)]
+        inputs: Vec<String>,
+        #[arg(long, default_value = "projects")]
+        projects: PathBuf,
+        #[arg(long, default_value = "models")]
+        models: PathBuf,
+        #[arg(long)]
+        cpu: bool,
+        /// also fetch video, separate and suggest mutes for every song
+        #[arg(long)]
+        clips: bool,
+        /// also export every song (implies --clips; unconfirmed mutes are not applied)
+        #[arg(long)]
+        export: bool,
+        /// export format: mp4 | wav | flac | mp3
+        #[arg(long, default_value = "mp4")]
+        format: FormatArg,
+    },
     /// Resolve a VOD and print its metadata / variants as JSON
     Resolve {
         video: String,
@@ -121,6 +143,26 @@ enum Cmd {
     },
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum FormatArg {
+    Mp4,
+    Wav,
+    Flac,
+    Mp3,
+}
+
+impl FormatArg {
+    fn parse_format(self) -> cliper_core::export::OutputFormat {
+        use cliper_core::export::OutputFormat as F;
+        match self {
+            FormatArg::Mp4 => F::Mp4,
+            FormatArg::Wav => F::Wav,
+            FormatArg::Flac => F::Flac,
+            FormatArg::Mp3 => F::Mp3,
+        }
+    }
+}
+
 fn load_cookies(p: &Option<PathBuf>) -> Result<Option<std::collections::BTreeMap<String, String>>> {
     Ok(match p {
         Some(p) => Some(serde_json::from_slice(&std::fs::read(p)?)?),
@@ -138,6 +180,63 @@ async fn main() -> Result<()> {
         Cmd::Serve { projects, models, cpu } => {
             let cfg = cliper_core::engine::EngineConfig { projects_root: projects, models_dir: models, prefer_cpu: cpu };
             cliper_core::ipc::server::serve(cfg).await?;
+        }
+        Cmd::Process { inputs, projects, models, cpu, clips, export, format } => {
+            use cliper_core::engine::{Engine, EngineConfig, Event, ExportOptions};
+            use cliper_core::queue::{QueueStatus, QueueThrough};
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+            let eng = Engine::new(EngineConfig { projects_root: projects, models_dir: models, prefer_cpu: cpu }, tx);
+            // progress → stderr (one line per stage change / note)
+            tokio::spawn(async move {
+                let mut last = String::new();
+                while let Some(e) = rx.recv().await {
+                    if let Event::JobProgress { project_id, progress, .. } = e {
+                        let line = match &progress.message {
+                            Some(m) => format!("[{project_id}] {}: {m}", progress.stage),
+                            None => format!("[{project_id}] {}", progress.stage),
+                        };
+                        if line != last {
+                            eprintln!("{line}");
+                            last = line;
+                        }
+                    }
+                }
+            });
+            let through = if clips || export { QueueThrough::Clips } else { QueueThrough::Detect };
+            let entries = eng.queue_add(inputs, through);
+            let mut failed = 0;
+            for entry in &entries {
+                // wait for this entry
+                let done = loop {
+                    if let Some(e) = eng.queue().into_iter().find(|e| e.id == entry.id)
+                        && matches!(e.status, QueueStatus::Done | QueueStatus::Failed | QueueStatus::Cancelled)
+                    {
+                        break e;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                };
+                let mut out = serde_json::json!({ "input": done.input, "status": done.status, "project_id": done.project_id, "error": done.error });
+                if done.status == QueueStatus::Done && export {
+                    let pid = done.project_id.clone().unwrap();
+                    let opts = ExportOptions { format: Some(format.parse_format()), ..Default::default() };
+                    match eng.job_export(&pid, opts) {
+                        Ok(j) => out["export"] = eng.wait_job(&j).await.unwrap_or_else(|e| serde_json::json!({ "error": e })),
+                        Err(e) => out["export"] = serde_json::json!({ "error": e }),
+                    }
+                }
+                if done.status != QueueStatus::Done {
+                    failed += 1;
+                }
+                if let Some(pid) = &done.project_id
+                    && let Ok(p) = eng.get(pid)
+                {
+                    out["songs"] = serde_json::json!(p.songs.iter().filter(|s| s.enabled).map(|s| (s.start, s.end)).collect::<Vec<_>>());
+                }
+                println!("{out}");
+            }
+            if failed > 0 {
+                std::process::exit(1);
+            }
         }
         Cmd::Resolve { video, cookies } => {
             let src = cliper_core::platforms::resolve(&video, load_cookies(&cookies)?.as_ref()).await?;

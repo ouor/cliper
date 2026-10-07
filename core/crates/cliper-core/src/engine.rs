@@ -138,6 +138,12 @@ api_from!(crate::export::ExportError, |e: crate::export::ExportError| match e {
     crate::export::ExportError::Invalid(m) => ApiError::new("INVALID_PARAMS", m),
 });
 api_from!(tokio::task::JoinError, |e| ApiError::new("INTERNAL", e));
+api_from!(crate::local::LocalError, |e: crate::local::LocalError| match e {
+    crate::local::LocalError::Missing(_) => ApiError::new("NOT_FOUND", e),
+    crate::local::LocalError::NoAudio(_) => ApiError::new("FORMAT", e),
+    crate::local::LocalError::Ffmpeg(f) => f.into(),
+    crate::local::LocalError::Io(e) => e.into(),
+});
 
 /// Notifications pushed to the client.
 #[derive(Debug, Clone, Serialize)]
@@ -149,6 +155,7 @@ pub enum Event {
     JobDone { job_id: String, kind: String, project_id: String, result: Value },
     JobFailed { job_id: String, kind: String, project_id: String, error: ApiError },
     ProjectChanged { project: Box<Project> },
+    QueueChanged { queue: Vec<crate::queue::QueueEntry> },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,6 +215,40 @@ pub struct Engine {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     tagger: Arc<Mutex<Option<Tagger>>>,
     cookies: Mutex<Option<BTreeMap<String, String>>>,
+    /// results of finished jobs, for `wait_job` (kept until read)
+    finished: Mutex<HashMap<String, ApiResult<Value>>>,
+    job_finished: tokio::sync::Notify,
+    pub(crate) queue: Mutex<Vec<crate::queue::QueueEntry>>,
+    pub(crate) queue_wake: tokio::sync::Notify,
+    pub(crate) queue_worker: Mutex<bool>,
+}
+
+/// Keep Windows from sleeping while jobs run (unattended overnight batches).
+/// Every 30 s, if any job is running, the system idle timer is reset.
+fn keep_awake_while_busy(eng: std::sync::Weak<Engine>) {
+    std::thread::Builder::new()
+        .name("keep-awake".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(30));
+                let Some(e) = eng.upgrade() else { return };
+                let busy = !e.jobs.lock().unwrap().is_empty();
+                drop(e);
+                #[cfg(windows)]
+                if busy {
+                    use windows_sys::Win32::System::Power::{ES_SYSTEM_REQUIRED, SetThreadExecutionState};
+                    // SAFETY: plain Win32 call without pointers
+                    unsafe { SetThreadExecutionState(ES_SYSTEM_REQUIRED) };
+                }
+                #[cfg(not(windows))]
+                let _ = busy;
+            }
+        })
+        .ok();
+}
+
+fn is_local(p: &Project) -> bool {
+    p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local)
 }
 
 fn invalid(msg: impl std::fmt::Display) -> ApiError {
@@ -223,7 +264,7 @@ impl Engine {
         let store = Store::new(&cfg.projects_root);
         let _ = std::fs::create_dir_all(&cfg.projects_root);
         let cookies = std::fs::read(cfg.projects_root.join("cookies.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
-        Arc::new(Self {
+        let eng = Arc::new(Self {
             cfg,
             store,
             events,
@@ -232,7 +273,32 @@ impl Engine {
             locks: Mutex::new(HashMap::new()),
             tagger: Arc::new(Mutex::new(None)),
             cookies: Mutex::new(cookies),
-        })
+            finished: Mutex::new(HashMap::new()),
+            job_finished: tokio::sync::Notify::new(),
+            queue: Mutex::new(Vec::new()),
+            queue_wake: tokio::sync::Notify::new(),
+            queue_worker: Mutex::new(false),
+        });
+        keep_awake_while_busy(Arc::downgrade(&eng));
+        eng
+    }
+
+    pub(crate) fn emit_event(&self, e: Event) {
+        self.emit(e);
+    }
+
+    /// Wait for a job started by this engine to finish; its result or error.
+    pub async fn wait_job(&self, job_id: &str) -> ApiResult<Value> {
+        loop {
+            let notified = self.job_finished.notified();
+            if let Some(r) = self.finished.lock().unwrap().remove(job_id) {
+                return r;
+            }
+            if !self.jobs.lock().unwrap().contains_key(job_id) && !self.finished.lock().unwrap().contains_key(job_id) {
+                return Err(ApiError::new("NOT_FOUND", format!("job {job_id}")));
+            }
+            notified.await;
+        }
     }
 
     fn emit(&self, e: Event) {
@@ -333,6 +399,15 @@ impl Engine {
         tokio::spawn(async move {
             let res = f(eng.clone(), ctx).await;
             eng.jobs.lock().unwrap().remove(&jid);
+            {
+                // remember the outcome for wait_job (bounded)
+                let mut f = eng.finished.lock().unwrap();
+                if f.len() > 256 {
+                    f.clear();
+                }
+                f.insert(jid.clone(), res.clone());
+            }
+            eng.job_finished.notify_waiters();
             match res {
                 Ok(result) => eng.emit(Event::JobDone { job_id: jid, kind: kind_s, project_id: pid, result }),
                 Err(error) => eng.emit(Event::JobFailed { job_id: jid, kind: kind_s, project_id: pid, error }),
@@ -392,6 +467,19 @@ impl Engine {
 
     /// Resolve `input` and create (or reopen) its project. Id = `<platform>-<video id>`.
     pub async fn create(&self, input: &str) -> ApiResult<Project> {
+        if crate::local::is_local(input) {
+            let path = crate::local::normalize(input);
+            let id = crate::local::project_id(&path);
+            if self.store.exists(&id) {
+                return self.get(&id);
+            }
+            let info = tokio::task::spawn_blocking(move || crate::local::source_info(&path)).await??;
+            let mut p = self.store.create(&id, &info.url)?;
+            p.source = Some(info);
+            self.store.save(&mut p)?;
+            self.emit(Event::ProjectChanged { project: Box::new(p.clone()) });
+            return Ok(p);
+        }
         let (platform, vid) = crate::platforms::detect(input)?;
         let id = format!("{}-{vid}", platform.as_str());
         if self.store.exists(&id) {
@@ -415,6 +503,9 @@ impl Engine {
     /// Resolved source for a project, re-resolving when the cached playback
     /// URLs are getting old. Verifies the segmentation hasn't changed.
     async fn source(&self, p: &Project) -> ApiResult<Source> {
+        if is_local(p) {
+            return Err(precondition("local recordings have no remote source"));
+        }
         {
             let cache = self.sources.lock().await;
             if let Some((s, at)) = cache.get(&p.id)
@@ -545,6 +636,43 @@ impl Engine {
     pub fn job_fetch_audio(self: &Arc<Self>, id: &str) -> ApiResult<String> {
         let p = self.get(id)?;
         self.spawn_job("audio.fetch", id, move |eng, ctx| async move {
+            if is_local(&p) {
+                let path = PathBuf::from(&p.source.as_ref().unwrap().url);
+                let (file, track) = ("audio.mka", p.settings.audio_track);
+                let out = eng.store.path(&p.id, file);
+                (ctx.progress)(Progress::note("audio.fetch", "copying the audio track"));
+                let t0 = Instant::now();
+                let duration = tokio::task::spawn_blocking(move || -> ApiResult<f64> {
+                    crate::local::extract_audio(&path, track, &out)?;
+                    Ok(crate::local::probe(&out)?.duration)
+                })
+                .await??;
+                let bytes = std::fs::metadata(eng.store.path(&p.id, file)).map(|m| m.len()).unwrap_or(0);
+                let state = project::AudioState {
+                    file: file.into(),
+                    variant: 0,
+                    duration,
+                    index: crate::hls::audio_extract::SegIndex {
+                        first_segment: 0,
+                        frames: Vec::new(),
+                        durations: Vec::new(),
+                        samples_per_frame: 1024,
+                        sample_rate: 48000,
+                    },
+                    fetched_bytes: bytes,
+                    full_source_bytes: bytes,
+                    fallback_segments: 0,
+                    elapsed_sec: t0.elapsed().as_secs_f64(),
+                };
+                let p = eng
+                    .mutate(&p.id, |p| {
+                        p.audio = Some(state);
+                        p.detection = None;
+                        Ok(())
+                    })
+                    .await?;
+                return Ok(json!({ "audio": p.audio }));
+            }
             let src = eng.source(&p).await?;
             let file = "audio.aac";
             let out = eng.store.path(&p.id, file);
@@ -713,9 +841,15 @@ impl Engine {
 
         // 1) video
         let clip = if clip.video.is_none() || !mp4.is_file() {
-            let src = self.source(&p).await?;
-            let opts = VideoOptions { height: p.settings.video_height, workers: None };
-            let v = video_fetch::fetch_video(&src, clip.start, clip.end, &mp4, &opts, ctx.progress.clone(), ctx.cancel.clone()).await?;
+            let v = if is_local(&p) {
+                (ctx.progress)(Progress::note("video.fetch", "cutting the recording"));
+                let (path, track, mp4c, (a, b)) = (PathBuf::from(&p.source.as_ref().unwrap().url), p.settings.audio_track, mp4.clone(), (clip.start, clip.end));
+                tokio::task::spawn_blocking(move || crate::local::cut_clip(&path, a, b, track, &mp4c)).await??
+            } else {
+                let src = self.source(&p).await?;
+                let opts = VideoOptions { height: p.settings.video_height, workers: None };
+                video_fetch::fetch_video(&src, clip.start, clip.end, &mp4, &opts, ctx.progress.clone(), ctx.cancel.clone()).await?
+            };
             // 2) align against the analysis audio
             let offset = self.measure_offset(&p, &v.path, v.vod_start).await.unwrap_or_else(|e| {
                 tracing::warn!("alignment failed ({e}); assuming 0");
@@ -856,6 +990,10 @@ impl Engine {
             .collect();
         if songs.is_empty() {
             return Err(precondition("no songs to export"));
+        }
+        let no_video = p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local && s.variants.first().is_none_or(|v| v.height == 0));
+        if no_video && opts.format.unwrap_or_default().has_video() && !(opts.stems && !opts.also_render) {
+            return Err(precondition("this recording has no video; export as wav / flac / mp3"));
         }
         for s in &songs {
             let ok = s.clip_id.as_ref().and_then(|c| p.clip(c)).is_some_and(|c| c.stems.is_some() && c.video.is_some());

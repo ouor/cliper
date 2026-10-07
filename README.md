@@ -51,6 +51,8 @@ core/target/release/cliper serve --projects projects --models models
 
 디버그 CLI (단계별): `resolve`, `fetch-audio`, `detect`, `fetch-video`, `separate`, `talk`, `export` — `cliper --help`.
 
+헤드리스 일괄 처리: `cliper process <링크·번호·로컬 파일…> [--clips] [--export --format mp4|wav|flac|mp3]`.
+
 ## 검증
 
 ```bash

@@ -12,6 +12,8 @@ use crate::http::{Http, NetError};
 pub enum Platform {
     Chzzk,
     Soop,
+    /// a recording on this PC (e.g. OBS) — `SourceInfo.url` is its path
+    Local,
 }
 
 impl Platform {
@@ -19,6 +21,7 @@ impl Platform {
         match self {
             Platform::Chzzk => "chzzk",
             Platform::Soop => "soop",
+            Platform::Local => "local",
         }
     }
 }

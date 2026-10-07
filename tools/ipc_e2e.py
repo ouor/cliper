@@ -126,7 +126,9 @@ def main():
     print("export.run")
     res = c.wait_job(c.call("export.run", {"id": pid})["job_id"])
     for e in res["exports"]:
-        print(f"    {e['path']} ({e['duration']:.1f}s, {e['video_codec']})")
+        r = e["result"]
+        loud = r.get("loudness") or {}
+        print(f"    {r['path']} ({r['duration']:.1f}s, {r['video_codec']}, {loud.get('integrated', float('nan')):.1f} LUFS)")
 
     c.call("engine.shutdown")
     c.p.wait(timeout=10)

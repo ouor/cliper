@@ -84,6 +84,9 @@ pub struct Settings {
     pub margin_after: f64,
     /// video rendition height (None = highest/original)
     pub video_height: Option<u32>,
+    /// local recordings: audio track used for analysis, separation and export
+    /// (0 = first; pick an OBS mix track when recording multitrack)
+    pub audio_track: u32,
     /// suggest vocal mutes over detected talk after separation
     pub suggest_mutes: bool,
     /// default fade length for new mutes (s)
@@ -115,6 +118,7 @@ impl Default for Settings {
             margin_before: 30.0,
             margin_after: 30.0,
             video_height: None,
+            audio_track: 0,
             suggest_mutes: true,
             mute_fade: 0.3,
             mute_gain_db: None,

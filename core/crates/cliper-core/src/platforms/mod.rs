@@ -23,5 +23,6 @@ pub async fn resolve(video: &str, cookies: Option<&BTreeMap<String, String>>) ->
     match platform {
         Platform::Chzzk => chzzk::resolve(&id, cookies).await,
         Platform::Soop => soop::resolve(&id, cookies).await,
+        Platform::Local => Err(ResolveError::Unrecognized(video.to_string())),
     }
 }

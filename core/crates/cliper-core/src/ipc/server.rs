@@ -39,6 +39,7 @@ pub fn event_to_notification(e: Event) -> Value {
         Event::JobDone { .. } => "job.done",
         Event::JobFailed { .. } => "job.failed",
         Event::ProjectChanged { .. } => "project.changed",
+        Event::QueueChanged { .. } => "queue.changed",
     };
     let mut params = serde_json::to_value(&e).unwrap_or(Value::Null);
     if let Some(o) = params.as_object_mut() {
@@ -131,6 +132,16 @@ struct MetaArg {
     path: Option<String>,
 }
 #[derive(Deserialize)]
+struct QueueAddArg {
+    inputs: Vec<String>,
+    #[serde(default)]
+    through: crate::queue::QueueThrough,
+}
+#[derive(Deserialize)]
+struct QueueIdArg {
+    entry_id: String,
+}
+#[derive(Deserialize)]
 struct JobArg {
     job_id: String,
 }
@@ -187,6 +198,16 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         "export.run" => {
             let a: ExportArg = p(&params)?;
             job(eng.job_export(&a.id, a.opts))
+        }
+        "queue.add" => {
+            let a: QueueAddArg = p(&params)?;
+            to_json(eng.queue_add(a.inputs, a.through))
+        }
+        "queue.list" => to_json(eng.queue()),
+        "queue.cancel" => Ok(json!(eng.queue_cancel(&p::<QueueIdArg>(&params)?.entry_id))),
+        "queue.clear" => {
+            eng.queue_clear();
+            Ok(json!(true))
         }
         "job.list" => to_json(eng.jobs()),
         "job.cancel" => Ok(json!(eng.cancel(&p::<JobArg>(&params)?.job_id))),

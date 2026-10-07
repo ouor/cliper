@@ -56,6 +56,7 @@ pub fn timed_url(p: &Project, t: f64) -> String {
     match src.platform {
         crate::source::Platform::Soop => format!("{}?change_second={secs}", src.url),
         crate::source::Platform::Chzzk => format!("{}?currentTime={secs}", src.url),
+        crate::source::Platform::Local => src.url.clone(),
     }
 }
 
