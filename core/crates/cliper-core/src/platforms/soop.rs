@@ -55,14 +55,30 @@ fn audio_variant(variants: &[m3u8::Variant]) -> usize {
 
 pub async fn resolve(video_id: &str, cookies: Option<&BTreeMap<String, String>>) -> Result<Source, ResolveError> {
     let http = Http::new(HEADERS, cookies);
-    let resp = http
-        .client()
-        .post(VIEW)
-        .form(&[("nTitleNo", video_id), ("nApiLevel", "11"), ("nPlaylistIdx", "0")])
-        .send()
-        .await
-        .map_err(|e| ResolveError::Net(e.into()))?;
-    let body: Value = resp.json().await.map_err(|e| ResolveError::Net(e.into()))?;
+    // the view API occasionally refuses a connection; retry a few times
+    let mut attempt = 0u64;
+    let body: Value = loop {
+        let r = async {
+            http.client()
+                .post(VIEW)
+                .form(&[("nTitleNo", video_id), ("nApiLevel", "11"), ("nPlaylistIdx", "0")])
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<Value>()
+                .await
+        }
+        .await;
+        match r {
+            Ok(v) => break v,
+            Err(e) if attempt >= 3 => return Err(ResolveError::Net(e.into())),
+            Err(e) => {
+                attempt += 1;
+                tracing::warn!("SOOP view API failed ({e}); retry {attempt}/3");
+                tokio::time::sleep(std::time::Duration::from_millis(700 * attempt)).await;
+            }
+        }
+    };
     let data = body["data"].clone();
     let files = data["files"].as_array().cloned().unwrap_or_default();
     let Some(master_url) = files.first().and_then(|f| s(&f["file"])) else {
