@@ -142,8 +142,9 @@ impl Store {
             return Err(StoreError::NotFound(id.to_string()));
         }
         std::fs::create_dir_all(self.dir(id))?;
-        let p = Project::new(id, input);
+        let mut p = Project::new(id, input);
         self.save_raw(&p)?;
+        p.dir = abs(&self.dir(id));
         Ok(p)
     }
 
@@ -196,6 +197,7 @@ impl Store {
             self.save_raw(&p)?;
         }
         relink_exports(&mut p, &self.dir(id));
+        p.dir = abs(&self.dir(id));
         Ok(p)
     }
 
@@ -208,7 +210,12 @@ impl Store {
     }
 
     fn save_raw(&self, p: &Project) -> Result<(), StoreError> {
-        write_atomic(&self.path(&p.id, "project.json"), &serde_json::to_vec_pretty(p)?)?;
+        // `dir` is where it was loaded from, not part of the project
+        let mut v = serde_json::to_value(p)?;
+        if let Some(o) = v.as_object_mut() {
+            o.remove("dir");
+        }
+        write_atomic(&self.path(&p.id, "project.json"), &serde_json::to_vec_pretty(&v)?)?;
         Ok(())
     }
 
@@ -255,6 +262,10 @@ impl Store {
 /// Export records are absolute (exports may go to an output folder): one that
 /// pointed into the project's own `exports/` before the folder moved (or was
 /// copied) is pointed at the same file here (QA-17).
+fn abs(d: &Path) -> std::path::PathBuf {
+    std::path::absolute(d).unwrap_or_else(|_| d.to_path_buf())
+}
+
 fn relink_exports(p: &mut Project, dir: &Path) {
     for s in p.songs.iter_mut() {
         let Some(e) = s.export.as_mut() else { continue };

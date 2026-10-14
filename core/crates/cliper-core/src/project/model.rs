@@ -23,6 +23,11 @@ pub struct Project {
     /// random, made once: tells two copies of a folder (same `id`) apart
     #[serde(default)]
     pub uid: String,
+    /// absolute folder this project was loaded from (C2-5): tells a copy at
+    /// another place apart even with the same `uid`. Set on load, never
+    /// stored in project.json.
+    #[serde(default)]
+    pub dir: std::path::PathBuf,
     /// what the user typed (URL / id)
     pub input: String,
     pub created_at: String,
@@ -388,6 +393,7 @@ impl Project {
             schema: SCHEMA.into(),
             id: id.to_string(),
             uid: new_uid(),
+            dir: Default::default(),
             input: input.to_string(),
             created_at: now.clone(),
             updated_at: now,

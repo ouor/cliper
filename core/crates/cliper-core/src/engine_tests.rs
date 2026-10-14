@@ -694,6 +694,12 @@ async fn projects_from_other_locations_stay_listed() {
     assert_eq!(ids(&eng), vec!["here1", "moved1", "old1"]);
     let moved = eng.list().into_iter().find(|s| s.id == "moved1").unwrap();
     assert!(moved.dir.unwrap().ends_with("moved1"));
+    // C2-5: the loaded project says which folder it is, without storing it
+    let mp = eng.get("moved1").unwrap();
+    assert!(mp.dir.is_absolute() && mp.dir.ends_with("moved1"), "{:?}", mp.dir);
+    eng.set_pinned("moved1", false).await.unwrap();
+    let raw: Value = serde_json::from_slice(&std::fs::read(single.join("moved1/project.json")).unwrap()).unwrap();
+    assert!(raw.get("dir").is_none());
     // works like any project: edits land in its own folder
     eng.set_pinned("old1", true).await.unwrap();
     assert!(Store::new(&other).load("old1").unwrap().pinned);

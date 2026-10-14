@@ -14,6 +14,12 @@ export type Project = { schema: string, id: string,
  */
 uid: string, 
 /**
+ * absolute folder this project was loaded from (C2-5): tells a copy at
+ * another place apart even with the same `uid`. Set on load, never
+ * stored in project.json.
+ */
+dir: string, 
+/**
  * what the user typed (URL / id)
  */
 input: string, created_at: string, updated_at: string, 

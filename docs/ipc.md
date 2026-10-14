@@ -692,6 +692,14 @@ check), `Song.video_wanted` (set by `video.fetch {song_ids}` for user
 requests; settable with `song.update`), `Song.listened` (set it with
 `song.update` when the user has listened to a song in review). Fields a newer
 Cliper wrote are kept as they are.
+`Project.dir` (C2-5): the absolute folder this project was loaded from, in
+every `Project` (responses and `project.changed`); never stored in
+`project.json`. `uid` + `dir` identify a loaded instance: drop a
+`project.changed` / response whose `dir` isn't the folder you are showing
+(e.g. a late one from a location just removed). A copied folder **keeps its
+`uid`** on purpose: one id is listed from one place only (`DUPLICATE_PROJECT`),
+so a copy never sits beside its original, and a folder moved by hand must
+stay the same project; `dir` is what tells the places apart.
 
 **Video state**: `VideoState.offline` (network down, waiting — see Requests),
 `VideoState.warnings`, `RequestStatus.force`. `StorageUsage.orphan`.
