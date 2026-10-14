@@ -70,6 +70,9 @@ cargo build --release
 core/target/release/cliper serve --projects projects --models models
 ```
 
+- `--config <파일>`: 앱 설정(깨우기 유지, 영상 일시정지) 파일. 기본 `%LOCALAPPDATA%\Cliper\engine.json`이라, 시험용 엔진은 임시 파일을 주면 실제 설정을 건드리지 않습니다.
+- 한 작업 폴더에는 엔진 하나만(`<작업 폴더>/.cliper.lock`). 앱이 같은 폴더를 쓰는 중이면 두 번째 엔진은 `engine.failed`(`ROOT_LOCKED`)를 보내고 끝납니다.
+
 앱(개발 모드):
 
 ```bash

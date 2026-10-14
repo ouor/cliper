@@ -4,8 +4,12 @@ The UI never does media work itself. It spawns the Rust engine and talks to it
 over **newline-delimited JSON-RPC 2.0 on the child's stdin/stdout**.
 
 ```
-cliper.exe serve --projects <dir> --models <dir> [--cpu]
+cliper.exe serve --projects <dir> --models <dir> [--cpu] [--config <file>]
 ```
+
+`--config` is the app preferences file (keep-awake, video pause); default
+`%LOCALAPPDATA%\Cliper\engine.json`. It belongs to the user, not to a
+projects folder (A-6).
 
 - One JSON object per line, UTF-8, both directions.
 - **stdout carries protocol lines only**; logs go to stderr (`RUST_LOG=info` for more).
@@ -15,15 +19,24 @@ cliper.exe serve --projects <dir> --models <dir> [--cpu]
   Regenerate after changing Rust types:
   `cd core && cargo test -p cliper-core --features ts export_bindings`.
 
-Protocol **3** (this document): video is kept per VOD range (segment store),
-not per song clip. See [What changed in protocol 3](#what-changed-in-protocol-3-for-the-ui)
-at the end.
+Protocol **4** (this document): video is kept per VOD range (segment store),
+not per song clip; the protocol-2 leftovers are gone. See
+[What changed in protocol 4](#what-changed-in-protocol-4-for-the-ui) and
+[protocol 3](#what-changed-in-protocol-3-for-the-ui) at the end.
 
 ## Lifecycle
 
 1. Spawn `cliper serve`. The first line is the `engine.ready` notification
    (`{ protocol, system }`); check `system.models` and `system.ffmpeg` and
-   guide the user if something is missing.
+   guide the user if something is missing. `system.warnings` lists settings
+   files that could not be read (set aside as `*.corrupt-<time>`, the last
+   good copy or defaults used) — show them once.
+   **One engine per projects folder**: the engine holds
+   `<projects>/.cliper.lock` while it runs. A second engine on the same folder
+   (another app window, `cliper process`, a portable copy) sends
+   `engine.failed {protocol, code: "ROOT_LOCKED", message, data: {root}}`
+   instead of `engine.ready` and exits — tell the user another Cliper is
+   using that folder.
 2. Send requests; listen for notifications. Video downloads left from the
    previous run resume by themselves (unless paused, see `video.pause`).
 3. On quit, send `engine.shutdown` (cancels jobs) or close stdin.
@@ -143,14 +156,17 @@ on every save), the call fails with `CONFLICT` and nothing is written — reload
   "requests": [ { "id": "r…", "priority": "user", "reason": "song", "song_ids": ["s…"],
                   "ranges": [[2590, 2710]], "process": false, "total_sec": 108.3,
                   "have_sec": 16.7, "fetching_sec": 8.3, "failed_sec": 0,
-                  "remaining_sec": 91.6,
+                  "remaining_sec": 91.6, "force": false,
                   "songs": [ { "song_id": "s…", "total_sec": 108.3, "have_sec": 16.7, "failed_sec": 0 } ],
                   "created_at": "…" } ],
   "paused": false,                  // app-wide
   "have_sec": 266.7, "fetching_sec": 16.7, "queued_sec": 91.7, "failed_sec": 16.7,
   "eta_sec": 21,                    // this project's queue at the current speed
   "bytes": 61354596,                // video on disk (not the view cache)
-  "local": false                    // local recording: everything is "have"
+  "local": false,                   // local recording: everything is "have"
+  "offline": null,                  // or {since, retry_in_sec, reason}: the network is down,
+                                    // downloads wait and retry by themselves (app-wide)
+  "warnings": []                    // e.g. a corrupt video/index.json that was set aside
 }
 ```
 
@@ -179,14 +195,26 @@ ranges (margins never warn).
   request_id, priority}` moves one (`now` puts it first).
 - **At most 4 HTTP requests are in flight in the whole app** (audio and video,
   all projects and jobs together; `system.net_stats` shows the counters).
-- **Offline**: when resolving the VOD fails for network reasons (resolving
-  retries by itself), the segment fails at once and that failure is reused
-  for 30 s, so a whole request ends within seconds instead of minutes.
+- **Offline** (R-3): an error that means "no network" (no connection, no
+  HTTP status, a cut transfer, resolving fails for network reasons) does
+  **not** fail the segment. Every video download of the app pauses and is
+  retried after 5 s, 10 s, 20 s … up to 5 min; `VideoState.offline =
+  {since, retry_in_sec, reason}` (in every project's state) until a download
+  works again. Requests stay queued and keep their order — show "인터넷 연결을
+  기다리는 중" instead of failures; nothing to do for the user.
 - **Retries**: each segment is tried 4 times (3 retries, 1 / 2 / 4 s apart);
   an expired playback token is re-resolved once; a CDN copy that is truncated
   is fetched from the next lower rendition (that segment only). Then the
   segment is `failed` (kept across restarts). `video.retry {id, ranges?}`
-  clears failures and fetches them again.
+  clears failures and fetches them again (also segments shorter than 0.4 s,
+  e.g. the VOD's last one).
+- **Rendition identity** (A-1): a rendition is known by its key
+  (`"<w>x<h>@<bandwidth>[/<codecs>]"`), never by its position in the
+  platform's list (which can change between resolves). `video/v<N>/` is the
+  folder number given to a key the first time it is used
+  (`video/index.json` `renditions`), never reused. A download looks its key up
+  in the freshly resolved list; a key no longer offered fails that segment
+  with `FORMAT` (other renditions continue).
 - **Rendition**: a missing stretch that touches video on disk, being fetched,
   or an adopted (protocol-2) clip continues that rendition — looking across
   the queued segments of the gap, so the far end of a top-up already uses it;
@@ -200,7 +228,12 @@ ranges (margins never warn).
   segment will actually get.
 - **Pause**: `video.pause {paused}` stops every video download of the app
   (downloads in progress are dropped and redone later) and is remembered
-  across restarts. While paused nothing starts, top-ups included.
+  across restarts (in the `--config` file). While paused nothing starts,
+  top-ups included — except requests a job waits for (`export.run {fetch:
+  true}`, the batch queue's video step): they have `RequestStatus.force: true`
+  and download anyway (R-11), so an export never waits forever.
+- **While a cleanup runs** (`media.drop`), `video.fetch` for that project
+  fails with `VIDEO_BUSY` and nothing starts for it.
 - **Cancel**: `video.cancel {id, request_id?}` (all of the project's without
   `request_id`) — segments not started are dropped, video already fetched stays.
 - **Restart**: pending requests live in `video/index.json` and resume when the
@@ -214,8 +247,13 @@ ranges (margins never warn).
 - `video.request_done {project_id, request_id, status, failed, code}` ends
   every request: `status` `done` (everything is on disk), `failed` (`failed` =
   ranges that couldn't be fetched, `code` = first reason) or `cancelled`.
-- `process: true`: when the request is done, the engine runs `stems.ensure`
-  for its songs / ranges (queued after a running one).
+- `process: true`: when the request ends, the engine runs `stems.ensure`
+  for its songs / ranges (queued after a running one) — also when some
+  segments failed (what arrived is separated); the pending separation is kept
+  in `video/index.json` across restarts.
+- `video.fetch {song_ids}` marks those songs `video_wanted: true` (A-5) unless
+  `priority: "auto"` or `reason: "topup"`/`"auto"`: the "user asked for this
+  song's video" flag now lives in the project (see protocol 4).
 
 ### Playing video (`video.view`)
 
@@ -223,10 +261,13 @@ ranges (margins never warn).
 height, kind}`: an MP4 (H.264 + audio) holding the picture at VOD time `t`:
 
 - `kind: "segments"` — a remux of the contiguous same-rendition stretch around
-  `t` (whole stretch up to 30 min, else a 30-min window from `t − 10 min`),
+  `t` (whole stretch up to 30 min, else a 30-min window on a 10-minute grid,
+  starting at least 10 min before `t`, so nearby seeks share one file),
   built on demand (a long stretch takes seconds; cached, the 3 most recently
-  used views per project are kept in `video/views/`). Rebuilt (new file name)
-  when the stretch grows; keep playing the old file until you ask again.
+  used views per project are kept in `video/views/`). While the stretch grows
+  (a top-up is downloading) the existing view is returned as long as it
+  holds `t` (and `end`, if given); ask again past its `end` to get the
+  longer one. `end` is capped at `t + 30 min`.
 - `kind: "legacy"` — a clip adopted from a protocol-2 project
   (`clips/<id>/source.mp4`, played directly).
 - `kind: "local"` — a window cut from a local recording.
@@ -259,6 +300,13 @@ aren't separated yet:
   of ms without audio (silence with 5 ms fades); the timing never shifts.
 - Result `EnsureResult {separated, reseparated, spans, suggestions,
   suggestions_by_song, no_video}` — `suggestions_by_song` maps song id → count.
+- **Span length cap** (R-2): a span is at most 30 min. Where songs ± margins
+  form a longer separated stretch, spans **overlap by 20 s** instead of
+  merging; the engine crossfades across the overlap when it reads stems
+  (export). A player reading `stems/<span>/` itself: at a VOD time covered by
+  two spans, use the later span (or crossfade over the overlap). Spans made
+  before the per-rendition placement fix are checked again where they cross a
+  rendition change (`StemSpan.version`).
 - Spans are **immutable folders**: growing one writes `stems/<new id>/` and
   removes the old one after `project.changed` lists the new span. Keep reading
   the old files until you switch.
@@ -274,9 +322,10 @@ audio as if fetched in one piece (video duration within 1 frame of the song,
 audio = the render formula to the 24-bit LSB; checked in the E2E runs).
 
 - Songs whose `[start, end]` lacks video: without `fetch` the call fails at
-  once with `VIDEO_MISSING`, `data: {songs: [{song_id, ranges}], vod_gone}`; with
-  `fetch: true` their video is queued (`reason: "export"`), the other songs are
-  exported first, then these as their video arrives. A song whose video can't
+  once with `VIDEO_MISSING`, `data: {ranges, songs: [{song_id, ranges}], vod_gone}`; with
+  `fetch: true` their video is queued (`reason: "export"`, downloads even
+  while video is paused), the other songs are exported first, then these as
+  their video arrives. A song whose video can't
   be fetched (replay gone, failures) ends in `result.failed[]`
   (`{song_id, error}`, error `VIDEO_MISSING` with `data.vod_gone`) — the job
   succeeds if any song was exported.
@@ -292,8 +341,12 @@ audio = the render formula to the 24-bit LSB; checked in the E2E runs).
 ## Storage (S-E8)
 
 `storage.usage {id}` → `StorageUsage {audio, video, stems, unused_video, cache,
-exports, total, pinned, video_sec, updated_at}` (bytes; `total` = audio + video
-+ stems + cache; `exports` is informational, never cleaned).
+orphan, exports, total, pinned, video_sec, updated_at}` (bytes; `total` = audio
++ video + stems + cache + orphan; `exports` is informational, never cleaned).
+`orphan` = leftovers nothing refers to (A-4: stem folders of no span, views
+not in the index, interrupted `.part`/`.tmp` writes, e.g. after a crash);
+those untouched for an hour are removed when the project is loaded and by
+every `media.drop`.
 `storage.usage {}` → `{projects: StorageUsage[], free, root}` (free bytes on the
 projects drive).
 
@@ -315,17 +368,21 @@ track, the VOD changed) they are dropped as on any new audio.
 
 Decisions are never deleted: songs, boundaries, titles, notes, review state,
 mutes (with their state), `talk` / `talk_scanned`, settings, export history.
-Exported files are never deleted. Nothing is deleted automatically.
-`media.drop` fails with `PINNED` on a kept project unless `force`, and with
-`BUSY` while the project has a job or video requests (cancel them first).
-`project.set_pinned {id, pinned}` sets 📌. `project.drop_media {id}` (protocol 2)
-= level `video`.
+Exported files are never deleted. Nothing is deleted automatically
+(leftovers aside, see `orphan`).
+`media.drop` fails with `PINNED` on a kept project unless `force`, with
+`BUSY` while the project has a job, and with `VIDEO_BUSY` while video is
+queued or downloading for it (`video.cancel` first). The check and the
+"cleaning up" mark are one step, so no download can start in between; the
+project and `video/index.json` stop referring to the files **before** they
+are deleted (a crash in between leaves only leftovers).
+`project.set_pinned {id, pinned}` sets 📌.
 
 ## Project locations
 
 Projects are created in the projects folder (`serve --projects`), but
 `project.list` also covers projects elsewhere, remembered in the projects
-folder's `engine.json`:
+folder's `locations.json` (filled once from the old `engine.json`):
 
 - `projects.add_root {path}` → `{projects, skipped}`: list every project in
   another folder — call it with the previous folder after the user picks a new
@@ -339,7 +396,8 @@ folder's `engine.json`:
 - `projects.remove_location {path}` → bool (nothing is deleted),
   `projects.locations` → `{root, roots, projects}`.
 - Ids must be unique: the projects folder wins, then roots, then single
-  folders; a clash is reported in `skipped` / as `CONFLICT` with `data.dir`.
+  folders; a clash is reported in `skipped` / as `DUPLICATE_PROJECT` with
+  `data.dir`.
 - `ProjectSummary.dir` is each project's absolute folder: resolve media paths
   against it (not `projects root + id`). Everything inside a project stays
   relative, so these projects work exactly like local ones (video, stems,
@@ -365,13 +423,16 @@ moved as a whole.
 | `overview.peaks` | whole-VOD waveform, 20 peaks/s — grows **during** `audio.fetch` (re-read when `progress.peaks_until` advances), final after the job; rewritten by `detect.run` |
 | `cache/window_*.wav` | `audio.window` results (the 24 newest are kept) |
 | `probs.bin` | PANNs curves (CLPROBS1) — for a diagnostic lane |
-| `video/index.json` | engine bookkeeping (requests, failures, alignment, adopted clips, views) — read `video.status` instead |
+| `project.json.bak-@<n>` | the file as it was before a schema migration from `@<n>` (kept) |
+| `video/index.json` | engine bookkeeping (rendition table, requests, failures, alignment, adopted clips, views) — read `video.status` instead; `.bak` = the previous save, `.bak-v1` = before the rendition table, `.corrupt-<time>` = a file that could not be read |
 | `video/v<rendition>/<index>.m4s` \| `.ts` | downloaded HLS segments, exactly the CDN's bytes (init: `init.mp4`) |
 | `video/views/<key>.mp4` | playable views (`video.view`), rebuilt on demand |
 | `stems/<span id>/orig.wav`, `vocals.wav` | 48 kHz stereo float32 WAV of a stem span (`project.stems[].dir`) |
 | `stems/<span id>/orig.peaks`, `vocals.peaks` | span waveforms, 100 peaks/s |
 | `clips/<clip id>/source.mp4` | video adopted from a protocol-2 project (a `legacy` view); its stems may live in the same folder (`stems[].dir = "clips/<id>"`) |
 | `exports/<name>.<ext>` | results (unless `settings.output_dir`); `<name>` from `settings.filename_template`, never overwritten (`_v2`, `_v3`…) |
+| `<projects>/locations.json` | other project roots / folders listed (`projects.*`) |
+| `<projects>/.cliper.lock` | held by the running engine (one engine per projects folder) |
 | `exports/<name>_stems/` | editor hand-off: `*_original/processed/vocals/accompaniment.wav` (same start & length, 32-bit float), `*_markers.csv`, `<name>.rpp` (Reaper), optional `*_reference.mp4` |
 
 `source.notices` are remarks about the source as codes (`multipart {parts}`,
@@ -437,21 +498,21 @@ See `protocol.ts` for exact shapes.
 | `system.set_cookies` | request | `{cookies: {NID_AUT, NID_SES, …} \| null}` for private/membership VODs → `CookieStatus`. Stored encrypted for the Windows user (DPAPI); survive restarts |
 | `system.cookies_status` | request | → `CookieStatus` (`set, names, platforms, saved_at, encrypted, valid, checked_at, account`) — values are never returned |
 | `system.check_cookies` | request | asks chzzk whether the cookies are still logged in → `CookieStatus` (`valid`, `account`). SOOP can't be checked (`valid: null`) |
-| `system.set_keep_awake` | request | `{enabled}` keep the PC awake while jobs run (persisted; `serve --no-keep-awake` overrides) |
-| `project.list` / `get` / `create` / `delete` | request | `create` takes a URL, chzzk number, `soop:<id>` or a local file path (`source.audio_tracks` lists its audio streams). `list` → `ProjectSummary` with `unreviewed`, `unconfirmed_mutes`, `clips_ready` (enabled songs fully separated), `pinned`, `vod`, `dir` (absolute folder), `has_audio` (false after cleanup level `audio`), `has_detection`, `last_error`. Opening a protocol-2 project migrates it (see the end) |
+| `system.set_keep_awake` | request | `{enabled}` keep the PC awake while jobs run (persisted in the `--config` file; `serve --no-keep-awake` overrides) |
+| `project.list` / `get` / `create` / `delete` | request | `create` takes a URL, chzzk number, `soop:<id>` or a local file path (`source.audio_tracks` lists its audio streams). `list` → `ProjectSummary` with `unreviewed`, `unconfirmed_mutes`, `separated_songs` (enabled songs fully separated), `pinned`, `vod`, `dir` (absolute folder), `has_audio` (false after cleanup level `audio`), `has_detection`, `last_error`. Opening an older project migrates it (see the end); a project written by a newer Cliper fails with `SCHEMA_NEWER` and is not touched |
 | `project.update_settings` | request | margins (0–300 s; "앞뒤 여유", per project), rendition height (for video fetched from now on), mute fade, encoder, output dir, `audio_track` (local; run `audio.fetch` again after changing it) |
 | `project.set_pinned` | request | `{id, pinned}` → Project |
-| `song.update` | request | `{song_id, patch, base_revision?}` partial Song (not `id/clip_id/export/confidence`; `mutes` replaces the list) → Project |
+| `song.update` | request | `{song_id, patch, base_revision?}` partial Song (not `id/export/confidence`; unknown fields → `INVALID_PARAMS`; `mutes` replaces the list; `video_wanted` / `listened` are settable) → Project |
 | `song.add` | request | `{song, base_revision?}` → `{project, song_id}` |
 | `song.remove` | request | `{song_id, base_revision?}` → Project |
 | `mute.upsert` | request | `{song_id, mute, base_revision?}` add (id `""`/unknown) or replace → `{project, mute_id}` |
 | `mute.remove` | request | `{song_id, mute_id, base_revision?}` → Project |
 | `songs.set` | request | full replacement of `songs` (keep ids; new = `""`); validated; `base_revision?` |
 | `vod.check` | request | → `VodStatus` (see above) |
-| `project.open` | request | `{path}` → Project (a project folder elsewhere; remembered); `CONFLICT` on a duplicate id |
+| `project.open` | request | `{path}` → Project (a project folder elsewhere; remembered); `DUPLICATE_PROJECT` (`data.dir`) on a duplicate id |
 | `projects.add_root` / `projects.remove_location` / `projects.locations` | request | other folders whose projects `project.list` includes (see Project locations) |
 | `video.status` | request | `{id}` → `VideoState`; `{}` → `{paused, projects: {id: VideoState}}` (loaded projects) |
-| `video.fetch` | request | `{id, ranges?, song_ids?, priority?, reason?, process?, height?}` → `FetchPlan`. Errors `PRECONDITION` (no audio yet), `VOD_GONE`, `NO_SPACE`, `INVALID_PARAMS` |
+| `video.fetch` | request | `{id, ranges?, song_ids?, priority?, reason?, process?, height?}` → `FetchPlan`. Errors `PRECONDITION` (no audio yet), `VOD_GONE`, `NO_SPACE`, `VIDEO_BUSY` (cleanup running), `INVALID_PARAMS` |
 | `video.estimate` | request | same params → `FetchPlan` (nothing queued) |
 | `video.cancel` | request | `{id, request_id?}` → `{cancelled}` |
 | `video.prioritize` | request | `{id, request_id, priority}` |
@@ -460,15 +521,11 @@ See `protocol.ts` for exact shapes.
 | `video.view` | request | `{id, t, end?}` → `VideoView`; `VIDEO_MISSING` if there's no video at `t` |
 | `stems.ensure` | job | `{id, song_ids?, ranges?}` → `EnsureResult` |
 | `storage.usage` | request | `{id}` → `StorageUsage`; `{}` → `{projects, free, root}` |
-| `media.drop` | request | `{id, level: unused \| stems \| video \| audio, force?}` → `{project, freed_bytes}`; `PINNED`, `BUSY` |
-| `project.drop_media` | request | protocol 2: = `media.drop {level: "video"}` |
+| `media.drop` | request | `{id, level: unused \| stems \| video \| audio, force?}` → `{project, freed_bytes}`; `PINNED`, `BUSY` (job), `VIDEO_BUSY` (video requests) |
 | `audio.window` | request | `{start, duration, sample_rate?=48000, channels?=2}` VOD seconds → `{path, file, …}` float32 WAV of the analysis audio, sample-exact |
 | `detect.default_params` / `detect.rerun` | request | rerun is instant (cached probabilities) |
 | `audio.fetch` | job | |
 | `detect.run` | job | `{params?, retag?}` |
-| `clips.fetch` | job | protocol-2 pipeline on the new model: `{id, song_ids?}` (default every enabled song; `clip_ids`, `exact` ignored) → fetch songs ± margins (priority `user`), wait, `stems.ensure`. Result `{clips: [], video_failed, stems: EnsureResult}` |
-| `clips.plan` | request | protocol 2: no-op, returns the project |
-| `clip.extend` / `clip.drop_media` | request | removed: `INVALID_PARAMS` |
 | `export.run` | job | `ExportOptions`: `song_ids?`, `format?` (mp4/wav/flac/mp3), `fetch?` (fetch missing video first), `video_codec?` ("copy" = fast), `export_height?` / `video_bitrate_k?` / `audio_bitrate_k?` (per-run overrides of the settings below), `include_unconfirmed?`, `apply_mutes?` (false = original audio for this run only), `stems?` + `also_render?`, `handles?`, `reference_video?`, `audio_overrides?` (song id → audio file aligned to the hand-off files' start). Result `{exports, stems, failed}` |
 | `songs.match_setlist` | request | `{text, tolerance?=150, apply?, overwrite?}` → `SetlistMatch` |
 | `project.export_metadata` | request | `{format: csv/json/chapters/timestamps, include_disabled?, path?}` → `{text, path}` |
@@ -476,12 +533,16 @@ See `protocol.ts` for exact shapes.
 | `job.list` / `job.cancel` | request | |
 | `engine.shutdown` | request | |
 
+`clips.fetch` is no longer a method; it remains only as the job kind of the
+batch queue's video step (`queue.add {through: "clips"}`: fetch songs ±
+margins at `batch` priority, then separate; result `{video_failed, stems}`).
+
 Only one job **per kind per project** runs at a time, and `audio.fetch`
 excludes `detect.run`, `clips.fetch`, `stems.ensure`, `export.run` and
 `audio.window` on the same project (`BUSY` otherwise; the message names the
 running job). Video downloads aren't jobs: they run beside everything, and
 editing songs while they run is fine. `media.drop` is `BUSY` while a job runs
-or video is being fetched for the project. Settings are validated
+and `VIDEO_BUSY` while video is being fetched for the project. Settings are validated
 (`INVALID_PARAMS`: ranges, `video_codec` ∈ `h264_nvenc` / `libx264` / `copy`).
 Export size and rate: `settings.export_height` (144–4320, e.g. 1080/720/480/360;
 aspect kept, even width, never upscaled; null = fetched size) and
@@ -496,6 +557,7 @@ Project ids are plain names (no path separators).
 | method | params |
 |--------|--------|
 | `engine.ready` | `{protocol, min_client_protocol, system}` — a client built for protocol *v* is compatible when `min_client_protocol ≤ v ≤ protocol` |
+| `engine.failed` | `{protocol, code, message, data?}` — sent **instead of** `engine.ready` when the engine can't start (`ROOT_LOCKED`); the process then exits |
 | `job.started` | `{job_id, kind, project_id, items}` — `items`: song ids (`clips.fetch`, `export.run`) in processing order, else `[]` |
 | `job.progress` | `{job_id, kind, project_id, progress}` — ≤10/s per job (notes always pass). `progress`: `stage, done, total, bytes?, item?, item_index?, items_total?, eta_sec?` (current stage), `peaks_until?` (audio.fetch), `note?` `{code, args?}`, `message?` (English, for logs — don't show it) |
 | `job.done` | `{job_id, kind, project_id, result}` (see `JobResults`) |
@@ -554,13 +616,17 @@ the engine code; some errors add details next to it:
 |------|------------------------|
 | `INVALID_PARAMS` | bug or bad input |
 | `NOT_FOUND` | project / song / request id unknown |
-| `BUSY` | same job already running / project busy |
-| `CONFLICT` | `base_revision` is stale — reload and reapply |
+| `BUSY` | a job of that kind (or one that excludes it) is running for the project |
+| `VIDEO_BUSY` | video is queued / downloading for the project (`media.drop`, `project.delete`: cancel it first), or a cleanup is running (`video.fetch`: retry shortly) |
+| `CONFLICT` | `base_revision` is stale — reload and reapply (only this) |
+| `DUPLICATE_PROJECT` | `project.open`: a project with the same id is already listed from `data.dir` |
+| `SCHEMA_NEWER` | the project (or its `video/index.json`) was written by a newer Cliper: update the app; nothing was changed |
+| `ROOT_LOCKED` | (`engine.failed`) another engine uses the projects folder `data.root` |
 | `PRECONDITION` | step order (e.g. video before audio.fetch) — show what to do next |
 | `UNRECOGNIZED_INPUT` | not a chzzk/SOOP VOD reference |
 | `VOD_NOT_FOUND` | deleted/unknown VOD (creating a project) |
 | `VOD_GONE` | the replay is gone: only video already downloaded can be used |
-| `VIDEO_MISSING` | no video for a range: `data.ranges`, or `data.songs [{song_id, ranges}]` (export) — offer [받고 내보내기] (`fetch: true`) or, if `vod_gone`, [받은 범위에 맞추기] |
+| `VIDEO_MISSING` | no video for a range: `data.ranges` always; export adds `data.songs [{song_id, ranges}]` and `data.vod_gone` — offer [받고 내보내기] (`fetch: true`) or, if `vod_gone`, [받은 범위에 맞추기] |
 | `NO_SPACE` | `data.need`, `data.free` bytes — offer [정리하기] |
 | `PINNED` | the project is kept (📌) — unpin first or confirm (`force`) |
 | `AUTH_REQUIRED` | needs login cookies → `system.set_cookies` |
@@ -598,7 +664,79 @@ the engine code; some errors add details next to it:
 `cliper process <inputs…> [--clips] [--export --format mp4|wav|flac|mp3]`
 runs the same queue without a UI (one JSON line per input on stdout) — for
 scripts that watch channels for new VODs. `--clips` fetches the songs' video
-at `batch` priority and separates it.
+at `batch` priority and separates it. It takes the projects-folder lock too,
+so it can't run while the app uses the same folder (`ROOT_LOCKED`); its
+preferences come from `%LOCALAPPDATA%\Cliper\engine.json`.
+
+## What changed in protocol 4 (for the UI)
+
+Engine `protocol` = `min_client_protocol` = 4 (review fixes of cycle 2,
+`docs/reviews/cycle2/`). A protocol-3 app shows its version notice.
+
+**Removed** (A-8): methods `clips.plan`, `clips.fetch`, `clip.extend`,
+`clip.drop_media`, `project.drop_media` (→ `METHOD_NOT_FOUND`; use
+`video.fetch` / `stems.ensure` / `media.drop {level: "video"}`); fields
+`Project.clips`, `Song.clip_id`; types `Clip`, `Alignment`, `VideoClip`,
+`Stems`; `detect.run`'s result `clips`. `ProjectSummary.clips_ready` is renamed
+`separated_songs`.
+
+**Error codes split**: `DUPLICATE_PROJECT` (was `CONFLICT` from
+`project.open`; `CONFLICT` now only means a stale `base_revision`) and
+`VIDEO_BUSY` (was `BUSY` from `media.drop` / `project.delete` when video is
+downloading; also `video.fetch` during a cleanup). `VIDEO_MISSING.data` always
+has `ranges`. New `SCHEMA_NEWER`, `ROOT_LOCKED`.
+
+**New in the project** (A-5): `Project.uid` (random, made once; a copied
+folder keeps it — key app-side caches by it instead of the `created_at`
+check), `Song.video_wanted` (set by `video.fetch {song_ids}` for user
+requests; settable with `song.update`), `Song.listened` (set it with
+`song.update` when the user has listened to a song in review). Fields a newer
+Cliper wrote are kept as they are.
+
+**Video state**: `VideoState.offline` (network down, waiting — see Requests),
+`VideoState.warnings`, `RequestStatus.force`. `StorageUsage.orphan`.
+`SystemInfo.prefs_path`, `SystemInfo.warnings`.
+
+**Engine start**: `serve --config <file>` for the app preferences (default
+`%LOCALAPPDATA%\Cliper\engine.json`; the old `<projects>/engine.json` is read
+once to fill it); the location list moved to `<projects>/locations.json`. A
+second engine on the same projects folder gets `engine.failed` /
+`ROOT_LOCKED`.
+
+**Project files**: schema `cliper/project@3`. Opening an older project backs it
+up as `project.json.bak-@<n>` and migrates it (`@1` clips → segment store,
+`@2` → drop the clip fields, add `uid`). Video index version 2 (rendition
+table); index v1 is kept as `index.json.bak-v1`.
+
+**What the UI must change**
+
+1. Handle `engine.failed` (before any `engine.ready`): `ROOT_LOCKED` → "다른
+   Cliper가 이 작업 폴더를 쓰고 있어요" with `data.root`; don't restart the
+   engine in a loop.
+2. Show `system.warnings` once (a settings file was unreadable and set aside).
+3. Video lane / jobs panel: when `VideoState.offline` is set, show "인터넷
+   연결을 기다리는 중 · {retry_in_sec}초 뒤 다시" for queued video instead of
+   failures or a stuck spinner; requests resume by themselves.
+4. Replace the userData flags with the project's: `videoSongs` →
+   `Song.video_wanted` (the engine sets it on `video.fetch {song_ids}`; the
+   app no longer needs `markVideoSongs`; clear it with `song.update` if the
+   user un-asks), `listened` → `Song.listened` (write with `song.update`), and
+   key per-project UI state by `Project.uid` (drop the `created_at` QA-5
+   check). One-time import: for projects with a stored `videoSongs` /
+   `listened` list, write them with `song.update` once.
+5. `media.drop` / `project.delete`: treat `VIDEO_BUSY` as "영상을 받는
+   중이에요 — 받기를 멈춘 뒤 다시"; `video.fetch` `VIDEO_BUSY` → retry after
+   the cleanup ends.
+6. Storage screen: show `orphan` (e.g. "남은 임시 파일") inside the total.
+7. Jobs panel: a request with `force: true` downloads while paused — label it
+   (e.g. "내보내기용 · 일시정지 중에도 받는 중").
+8. Stems player: spans may overlap by 20 s (the 30-min cap); at a time two
+   spans cover, read the later span.
+9. Already done for typecheck in this round (no behaviour change):
+   `protocol.ts` (version 4, removed methods, `engine.failed`), `edits.ts`
+   (new songs get `video_wanted/listened: false`), `locations.ts`
+   (`DUPLICATE_PROJECT`), `Home.tsx`/`projects.ts` (`separated_songs`),
+   `DetectPopover.tsx` (no clip check), the main allowlist and timeouts.
 
 ## What changed in protocol 3 (for the UI)
 
@@ -661,7 +799,7 @@ keep its rendition (no `reencode_joined` / re-separation for those songs);
 outside the projects folder — the media protocol must resolve a project's
 files under `dir`, and after switching the projects folder the app calls
 `projects.add_root {old folder}` once (the list lives in the new folder's
-`engine.json`).
+`engine.json`; `locations.json` since protocol 4).
 
 **Migration of existing projects**: opening a protocol-2 project converts it
 in place, once, without any download or separation: each downloaded clip's
