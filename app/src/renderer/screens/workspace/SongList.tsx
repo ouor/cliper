@@ -101,6 +101,8 @@ function Row({ p, s, sv, n, selected, multi, prog, talk, shortSec }: { p: Projec
                 ) : (
                   <span className="tag mute">멘트 {s.mutes.length} ✓</span>
                 )
+              ) : sv.state === "ready" ? (
+                <span className="faint">영상 ✓ · 나누기 전</span>
               ) : sv.label ? (
                 <span className={sv.state === "fetching" ? "faint" : "tag doubt"}>{sv.label}</span>
               ) : (

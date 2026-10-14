@@ -66,13 +66,14 @@ app/
 │     │  ├─ player.worklet.ts   미리듣기 AudioWorklet (원본/결과/지운 목소리/반주, 페이드·강도·겹침 수식)
 │     │  └─ player.ts           AudioContext, 소스(방송 전체 스트림 / 곡 창 stems), J/K/L, 구간 반복, 영상 동기화
 │     ├─ canvas/draw.ts         캔버스 공통 (DPR, 테마 색, 눈금, mipmap 파형, 곡선, 빗금)
-│     ├─ lib/                   rpc(타입 있는 call), errors(오류→한국어), song(라벨·상태·링크·설명란),
+│     ├─ components/VideoPane   재생 위치의 영상(video.view)과 덮개(받지 않음/받는 중/받지 못함/받을 수 없음)
+│     ├─ lib/                   rpc(타입 있는 call), errors(오류→한국어), song(라벨·상태·링크·설명란), video(받은 범위·곡 영상 상태·받기),
 │     │                         edits(곡/멘트 편집 계산), pipeline(작업 연결), keys(단축키), peaks, format
-│     ├─ state/                 zustand: app(설정·화면·토스트·대화상자), projects(낙관적 편집·되돌리기),
+│     ├─ state/                 zustand: app(설정·화면·토스트·대화상자), projects(낙관적 편집·되돌리기), video(받은 범위·요청·일시정지),
 │     │                         jobs(작업·ETA·대기열·이어하기), ws(작업공간 선택/보기)
-│     ├─ screens/               FirstRun, Home, Workspace, Settings, HelpOverlay, CookiesDialog
+│     ├─ screens/               FirstRun, Home, Workspace, Settings, Storage(저장 공간), HelpOverlay, CookiesDialog
 │     │  └─ workspace/          SongList, SongDetail(+EdgeScopes), OverviewMap, DetectPopover, SetlistDialog,
-│     │                         TalkEditor(+DetailTimeline), ExportView, Transport
+│     │                         TalkEditor(+DetailTimeline), ExportView, Transport, VideoControls(⋯ 메뉴·영상 맞추기·배너·자동 채우기)
 │     ├─ components/            공통 UI(Modal, Toasts, DialogHost, Progress), StatusBar, JobsPanel
 │     └─ styles/                tokens.css(디자인 토큰, 어둡게/밝게), base.css(컨트롤), app.css(화면)
 └─ scripts/                     devdriver.mjs, check.mjs, checks/dsp-check.js
@@ -87,7 +88,7 @@ app/
 - IPC는 우리 창·우리 페이지(`app://cliper` 또는 개발 서버)에서 온 것만 처리합니다. 엔진 메서드는 앱이 쓰는 것만 허용하고, 임의 위치에 쓰는 인자(`export_metadata.path`, `output_dir`)는 사용자가 대화상자에서 고른 경로만 받습니다. `settings:set`은 키와 형식을 검사합니다.
 - `openPath`/`showItem`은 작업 폴더·로그 폴더·엔진이 알려 준 출력 폴더·사용자가 저장한 파일 아래만, 실행 파일 확장자는 거부합니다.
 - 브리지: 엔진 호출(`call`)과 알림 구독, 설정/작은 상태 저장, 폴더·파일 대화상자, 경로 열기/폴더 표시, 디스크 여유 공간. 임의 파일 읽기는 없고, 쿠키 파일은 **사용자가 대화상자에서 고른 파일만** 1MB 이하로 읽습니다.
-- `cliper-media://project/<프로젝트 id>/<경로>`: 작업 폴더 안의 **허용 목록 파일만**(`overview.peaks`, `probs.bin`, `clips/<id>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks}`) 제공. id는 경로 구분자·예약 문자·`..` 불가, 해석 후 작업 폴더 안인지 다시 확인. Range 요청 지원(영상 탐색).
+- `cliper-media://project/<프로젝트 id>/<경로>`: 작업 폴더 안의 **허용 목록 파일만**(`overview.peaks`, `probs.bin`, `video/views/<key>.mp4`(재생용 뷰), `stems/<구간>/{orig,vocals}.{wav,peaks}`, 옮겨 온 `clips/<id>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks}`) 제공. id는 경로 구분자·예약 문자·`..` 불가, 해석 후 작업 폴더 안인지 다시 확인. Range 요청 지원(영상 탐색).
 - 곡 검수 미리듣기(영상 받기 전)는 엔진 `audio.window`가 만든 `cache/window_*.wav`(전체 디코드와 샘플 단위로 같음)를 같은 프로토콜로 6초씩 읽습니다. 허용 목록에 `cache/window_<숫자>.wav`만 추가했습니다.
 
 ### 엔진 연동 요점
@@ -96,7 +97,8 @@ app/
 - `project.changed`를 진실의 원천으로 씁니다. 곡 편집은 **대기 중 편집(pending op)**으로 화면에 즉시 반영하고(엔진 최신 상태 위에 다시 적용), 순서대로 엔진에 보냅니다. 한 곡만 바꾸는 편집은 전후를 비교해 바뀐 것만 `song.update` / `song.add` / `song.remove` / `mute.upsert` / `mute.remove`로 보내고, 여러 곡에 걸친 편집(나누기·합치기·여러 곡 켜고 끄기)은 `songs.set` 한 번으로 원자적으로 보냅니다. 모두 `base_revision`을 붙입니다. `CONFLICT`면 최신 상태를 받아 같은 편집을 다시 적용해 재시도합니다. 엔진이 새로 붙인 id(`song.add`, 새 `mute.upsert`)는 별칭으로 기록해 선택 상태와 되돌리기 기록이 따라가게 합니다(`state/projects.ts`).
 - 되돌리기는 그 편집이 바꾼 필드와 그 편집이 추가·삭제·변경한 멘트 구간만 이전 상태로 되돌립니다. 그사이 작업이 넣은 멘트 제안 같은 다른 변경은 지우지 않습니다.
 - 같은 종류 작업이 돌고 있어 `BUSY`가 오면 앱 대기열에 넣고, 앞 작업이 끝나면 자동으로 시작합니다.
-- 소리 받기 → 곡 찾기, 영상 받기 → 내보내기(밤새 처리) 같은 연결은 앱이 작업 완료 알림으로 이어 줍니다. 곡을 정해서 받을 때는 `clips.fetch {song_ids, exact: true}`로 이웃 곡을 함께 받지 않습니다.
+- 소리 받기 → 곡 찾기 연결은 앱이 작업 완료 알림으로 이어 줍니다.
+- **영상(protocol 3)**: 방송 시간축의 받은 범위입니다. 받은 범위는 `video.status` / `video.changed`(`state/video.ts`), 곡 영상 받기는 `video.fetch {song_ids, process: true}`(없는 부분만, 받은 뒤 나누기), 경계를 넓힌 뒤 3초 자동 채우기(`auto`, 5분까지), `V` = 재생 위치 ± 1분(`now`), 지도 `Shift+드래그` = 범위 받기. 재생은 `video.view` 파일(`currentTime = vod − origin`), 빈 곳은 덮개(`components/VideoPane.tsx`). 멘트 다듬기 소리는 `project.stems` 구간, 구간 밖은 분석 오디오로 원본만. 내보내기는 모자라면 `export.run {fetch: true}`. 정리는 `media.drop` 4단계(설정 > 저장 공간). 자세한 기록: `docs/product/cycle2-segment-video-ui.md`.
 - 진행 표시는 `job.started.items`, `progress.item_index/items_total/eta_sec`, `progress.note.code`(한국어 문장은 앱이 만듦)를 씁니다. 소리 받는 동안은 `progress.peaks_until`에 맞춰 `overview.peaks`를 다시 읽어 파형을 채웁니다.
 - 진행 중 작업 요청은 userData에 기록해 두었다가, 앱이 작업 중에 닫히면 다음 실행 때 "지난번에 멈춘 작업 [이어서 하기]"로 다시 요청합니다.
 

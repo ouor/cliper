@@ -10,8 +10,8 @@ import type { ApiError } from "@ipc/generated/ApiError";
 import { call, EngineError, onNotification } from "@/lib/rpc";
 import { friendly, type FriendlyError } from "@/lib/errors";
 import { getProject } from "./projects";
-import { useApp } from "./app";
-import { projectTitle } from "@/lib/song";
+import { toast, useApp } from "./app";
+import { projectTitle, songNumbers } from "@/lib/song";
 
 export type JobKind = "audio.fetch" | "detect.run" | "clips.fetch" | "stems.ensure" | "export.run";
 type JobMethod = Extract<Method, JobKind>;
@@ -308,6 +308,18 @@ export function wireJobs() {
     const done = useJobs.getState().jobs[p.job_id];
     void forgetActive(p.job_id);
     void notifyDone(done, true);
+    // new mute suggestions from newly separated parts (14.8): a short toast
+    if (p.kind === "stems.ensure" || p.kind === "clips.fetch") {
+      const r = (p.kind === "stems.ensure" ? p.result : (p.result as { stems?: unknown } | null)?.stems) as { suggestions?: number } | null | undefined;
+      const n = r?.suggestions ?? 0;
+      if (n > 0) {
+        const proj = getProject(p.project_id);
+        const ids = ((done?.request?.params as { song_ids?: string[] | null } | undefined)?.song_ids ?? []).filter(Boolean);
+        const nums = proj ? songNumbers(proj) : new Map<string, number>();
+        const which = ids.length === 1 && nums.get(ids[0]) ? `곡 ${String(nums.get(ids[0])).padStart(2, "0")}: ` : "";
+        toast(`${which}새로 나눈 부분에서 멘트 제안 ${n}개가 생겼어요.`, { kind: "info", ttl: 4000 });
+      }
+    }
     const t = thens.get(p.job_id);
     thens.delete(p.job_id);
     if (t) t(p.result);
