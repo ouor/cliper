@@ -9,6 +9,8 @@ export interface EngineStatus {
   system: unknown | null;
   /** user-facing reason when crashed/failed */
   reason?: string;
+  /** engine.failed code (ROOT_LOCKED, SCHEMA_NEWER, …) */
+  failCode?: string;
   /** last stderr lines (for [자세히]) */
   detail?: string;
   restarts: number;

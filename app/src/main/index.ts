@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, protocol, shell, session, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
-import { existsSync, mkdirSync, promises as fsp, readFileSync, renameSync, writeFileSync, accessSync, constants as fsConst, statfsSync } from "node:fs";
+import { existsSync, mkdirSync, promises as fsp, readFileSync, renameSync, writeFileSync, accessSync, constants as fsConst, statfsSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Engine } from "./engine";
@@ -134,6 +134,18 @@ function noteProject(p: unknown) {
 const projectDirs = new Map<string, string>();
 /** previous projects folders (settings change) — the only paths projects.add_root accepts besides picked ones */
 const previousRoots = new Set<string>();
+/** state keys only main writes (security decisions read them); state:set refuses them (U-1) */
+const MAIN_ONLY_STATE = "__main.";
+const PENDING_ROOTS = MAIN_ONLY_STATE + "pendingAddRoots";
+function pendingRoots(): string[] {
+  const v = state[PENDING_ROOTS];
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+function setPendingRoots(list: string[]) {
+  if (list.length) state[PENDING_ROOTS] = [...new Set(list)];
+  else delete state[PENDING_ROOTS];
+  saveStateSoon();
+}
 /** other locations the engine lists (projects.locations): the renderer may open them in Explorer */
 const locationDirs = new Set<string>();
 let dirsLoading: Promise<void> | null = null;
@@ -311,8 +323,9 @@ function checkEngineParams(method: string, params: Record<string, unknown>): str
   if (method === "projects.add_root") {
     // the previous projects folder (after a change) or a folder the user picked
     const p = typeof params.path === "string" ? resolve(params.path) : "";
-    const pending = typeof state.pendingAddRoot === "string" ? resolve(state.pendingAddRoot) : "";
-    if (!p || !(previousRoots.has(p) || pickedFolders.has(p) || p === pending)) return "folder not chosen by the user";
+    // only a previous projects folder main itself recorded (settings change) or a folder the user
+    // just picked — never a value the renderer can write (U-1)
+    if (!p || !(previousRoots.has(p) || pickedFolders.has(p) || pendingRoots().map((x) => resolve(x)).includes(p))) return "folder not chosen by the user";
   }
   if (method === "export.run") {
     const ov = params.audio_overrides as Record<string, unknown> | undefined;
@@ -321,15 +334,27 @@ function checkEngineParams(method: string, params: Record<string, unknown>): str
   return null;
 }
 
-const EXECUTABLE = new Set([".exe", ".com", ".bat", ".cmd", ".lnk", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msi", ".msp", ".scr", ".hta", ".cpl", ".jar", ".reg", ".url", ".pif", ".appref-ms"]);
+/** files the app ever opens (results, reports, logs); folders are always fine (U-1: an allowlist) */
+const OPENABLE_EXT = new Set([".mp4", ".m4a", ".wav", ".flac", ".mp3", ".json", ".csv", ".txt", ".log", ".rpp"]);
 
-/** Paths under the work folder, the log folder, known output folders, or saved by the user. */
+/**
+ * Folders or allowlisted files under the projects folder, a project's own folder, the log folder,
+ * known output folders, or saved by the user. Location roots (other folders the engine lists)
+ * may be opened as folders only, never files inside them (U-1).
+ */
 function openable(path: unknown): path is string {
   if (typeof path !== "string" || !isAbsolute(path)) return false;
   const p = resolve(path);
-  if (EXECUTABLE.has(extname(p).toLowerCase())) return false;
+  let dir = false;
+  try {
+    dir = statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+  if (!dir && !OPENABLE_EXT.has(extname(p).toLowerCase())) return false;
   if (savedPaths.has(p)) return true;
-  const roots = [settings.projectsRoot, LOG_DIR, ADDONS_DIR, ...knownOutputDirs, ...projectDirs.values(), ...locationDirs].filter((r): r is string => !!r).map((r) => resolve(r));
+  if (dir && [...locationDirs].some((r) => r === p)) return true;
+  const roots = [settings.projectsRoot, LOG_DIR, ADDONS_DIR, ...knownOutputDirs, ...projectDirs.values()].filter((r): r is string => !!r).map((r) => resolve(r));
   return roots.some((r) => p === r || isInside(r, p));
 }
 
@@ -368,8 +393,14 @@ function registerIpc() {
     if (method === "projects.locations")
       void res.then((r) => {
         const l = r.ok ? (r.result as { roots?: unknown; projects?: unknown }) : null;
+        if (l) locationDirs.clear(); // rebuilt from the engine's list (U-19)
         for (const p of [...(Array.isArray(l?.roots) ? l.roots : []), ...(Array.isArray(l?.projects) ? l.projects : [])]) if (typeof p === "string") locationDirs.add(resolve(p));
       });
+    if (method === "projects.add_root")
+      void res.then((r) => {
+        if ((r.ok || r.error.engineCode === "NOT_FOUND" || r.error.engineCode === "INVALID_PARAMS") && typeof prm.path === "string") setPendingRoots(pendingRoots().filter((x) => resolve(x) !== resolve(prm.path as string)));
+      });
+    if (method === "projects.remove_location") void res.then(() => locationDirs.clear());
     if (method === "project.open" || method === "projects.add_root" || method === "projects.remove_location" || method === "project.create" || method === "project.delete") void res.then(() => refreshProjectDirs());
     return res;
   });
@@ -388,7 +419,11 @@ function registerIpc() {
     saveSettings();
     if (patch.lowPriority !== undefined) engine.setOptions({ lowPriority: settings.lowPriority });
     const rootChanged = patch.projectsRoot !== undefined && patch.projectsRoot !== prev.projectsRoot;
-    if (rootChanged && prev.projectsRoot) previousRoots.add(resolve(prev.projectsRoot));
+    if (rootChanged && prev.projectsRoot) {
+      previousRoots.add(resolve(prev.projectsRoot));
+      // the renderer lists the old folder again once the engine runs on the new one (main-only)
+      setPendingRoots([...pendingRoots(), prev.projectsRoot]);
+    }
     const deviceChanged = patch.device !== undefined && patch.device !== prev.device;
     if (deviceChanged) engine.setOptions({ preferCpu: settings.device === "cpu" });
     const notRunning = engine.status.state === "no-root" || engine.status.state === "stopped";
@@ -402,6 +437,7 @@ function registerIpc() {
   handle("state:get", (_e, key: unknown) => (typeof key === "string" ? state[key] ?? null : null));
   handle("state:set", (_e, key: unknown, value: unknown) => {
     if (typeof key !== "string" || key.length > 300) throw new Error("bad key");
+    if (key.startsWith(MAIN_ONLY_STATE) || key === "pendingAddRoot") throw new Error("reserved key");
     if (value === null || value === undefined) delete state[key];
     else {
       if (JSON.stringify(value).length > 512 * 1024) throw new Error("value too large");

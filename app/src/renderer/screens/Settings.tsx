@@ -2,7 +2,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Cookie, Copy, Cpu, Download, Film, FolderOpen, HardDrive, Info, Keyboard, Mic2, RotateCcw, Scissors, Search, Settings2, Upload, X } from "lucide-react";
 import { StorageTab } from "./Storage";
-import { rememberOldRoot } from "@/lib/locations";
 import { MarginPicker } from "./workspace/VideoControls";
 import { useApp, updateSettings, toast, ask, applyTheme, type SettingsTab } from "@/state/app";
 import { getProject } from "@/state/projects";
@@ -177,7 +176,6 @@ export function SettingsScreen() {
       ],
     });
     if (r === "ok") {
-      await rememberOldRoot(st.projectsRoot);
       useApp.setState({ route: { name: "home" } });
       await updateSettings({ projectsRoot: p });
     }

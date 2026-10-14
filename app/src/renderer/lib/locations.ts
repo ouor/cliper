@@ -5,25 +5,25 @@ import { call, EngineError } from "./rpc";
 import { go, toast } from "@/state/app";
 import { refreshList, replaceProject, resetProjectState, useProjects } from "@/state/projects";
 
-/** Remember the old projects folder so it is listed again once the engine runs on the new one. */
-export async function rememberOldRoot(oldRoot: string | null) {
-  if (oldRoot) await window.cliper.setState("pendingAddRoot", oldRoot);
-}
+/** previous projects folders waiting to be listed again — written by main only (U-1) */
+const PENDING_ROOTS = "__main.pendingAddRoots";
 
-/** After the engine (re)started: list the previous projects folder's projects (once). */
+/**
+ * After the engine (re)started: list the previous projects folder(s) again (14.9). Main records
+ * the old folder when the projects folder changes and drops it once `projects.add_root` succeeds.
+ */
 export async function addPendingRoot() {
-  const old = await window.cliper.getState<string>("pendingAddRoot");
-  if (!old) return;
-  try {
-    const r = await call("projects.add_root", { path: old });
-    for (const s of r.projects) resetProjectState(s.id);
-    await window.cliper.setState("pendingAddRoot", null);
-    await refreshList();
-    if (r.projects.length) toast(`이전 작업 폴더의 작업 ${r.projects.length}개도 그대로 목록에 있어요. 원래 자리에서 열려요.`, { kind: "ok", ttl: 6000 });
-    if (r.skipped.length) toast(`같은 작업이 이미 있어서 ${r.skipped.length}개는 목록에 넣지 않았어요: ${r.skipped.map((x) => x.dir).join(", ")}`, { kind: "warn", ttl: 10000 });
-  } catch (e) {
-    // keep it pending (engine down etc.) unless the folder is gone
-    if (e instanceof EngineError && (e.engineCode === "NOT_FOUND" || e.engineCode === "INVALID_PARAMS")) await window.cliper.setState("pendingAddRoot", null);
+  const list = (await window.cliper.getState<string[]>(PENDING_ROOTS)) ?? [];
+  for (const old of list) {
+    try {
+      const r = await call("projects.add_root", { path: old });
+      for (const s of r.projects) resetProjectState(s.id);
+      await refreshList();
+      if (r.projects.length) toast(`이전 작업 폴더의 작업 ${r.projects.length}개도 그대로 목록에 있어요. 원래 자리에서 열려요.`, { kind: "ok", ttl: 6000 });
+      if (r.skipped.length) toast(`같은 작업이 이미 있어서 ${r.skipped.length}개는 목록에 넣지 않았어요: ${r.skipped.map((x) => x.dir).join(", ")}`, { kind: "warn", ttl: 10000 });
+    } catch {
+      /* stays pending (engine down etc.); main drops it when the folder is gone */
+    }
   }
 }
 

@@ -59,6 +59,8 @@ export class Engine extends EventEmitter {
   private restartTimer: NodeJS.Timeout | null = null;
   private logStream: WriteStream | null = null;
   private logBytes = 0;
+  /** the engine sent engine.failed: it won't work by restarting it */
+  private fatal = false;
   status: EngineStatus = { state: "no-root", system: null, restarts: 0, projectsRoot: null };
 
   constructor(private opts: EngineOptions) {
@@ -116,6 +118,7 @@ export class Engine extends EventEmitter {
 
   start(projectsRoot: string) {
     this.stopping = false;
+    this.fatal = false;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
     if (!existsSync(this.opts.exe)) {
@@ -196,9 +199,25 @@ export class Engine extends EventEmitter {
           this.emitSafe("result", p.method, msg.result);
         }
       } else if (typeof msg.method === "string") {
-        if (msg.method === "engine.ready") {
+        if (msg.method === "engine.failed") {
+          // the engine refused to start (protocol 4: ROOT_LOCKED, SCHEMA_NEWER, …): show why and
+          // don't restart it in a loop when it exits
+          const prm = (msg.params ?? {}) as { code?: string; message?: string; data?: { root?: string } };
+          this.fatal = true;
+          const root = prm.data?.root ?? this.status.projectsRoot ?? "";
+          this.setStatus({
+            state: "failed",
+            system: null,
+            failCode: prm.code,
+            reason:
+              prm.code === "ROOT_LOCKED"
+                ? `다른 Cliper가 이 작업 폴더를 쓰고 있어요 (${root}). 그 창을 닫거나 다른 작업 폴더를 고른 뒤 [다시 시작]을 눌러 주세요.`
+                : `처리 엔진을 시작하지 못했어요 · ${prm.message ?? prm.code ?? ""}`,
+            detail: `${prm.code ?? ""}: ${prm.message ?? ""}`,
+          });
+        } else if (msg.method === "engine.ready") {
           const prm = msg.params ?? {};
-          this.setStatus({ state: "ready", system: prm.system ?? null, protocol: prm.protocol as number, minClientProtocol: prm.min_client_protocol as number, reason: undefined, detail: undefined });
+          this.setStatus({ state: "ready", system: prm.system ?? null, protocol: prm.protocol as number, minClientProtocol: prm.min_client_protocol as number, reason: undefined, detail: undefined, failCode: undefined });
         }
         this.emitSafe("notify", msg.method, msg.params);
       }
@@ -219,6 +238,11 @@ export class Engine extends EventEmitter {
     this.pending.clear();
     if (this.stopping) {
       this.setStatus({ state: "stopped", system: null });
+      return;
+    }
+    if (this.fatal) {
+      // engine.failed already said why (e.g. another Cliper holds the folder): no restart loop
+      this.log("=== not restarting: engine.failed");
       return;
     }
     const now = Date.now();
