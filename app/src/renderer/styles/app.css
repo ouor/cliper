@@ -2599,3 +2599,36 @@
 .st-pin {
   color: var(--text-4);
 }
+/* a button in a section title sits after the rule */
+.section-title > .btn {
+  order: 2;
+}
+.section-title::after {
+  order: 1;
+}
+.st-locs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-1);
+}
+.st-locs-title {
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  font-weight: var(--fw-semibold);
+}
+.st-loc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-xs);
+}
+/* the next view file, loaded behind the active one for a seamless switch */
+.video-box video.video-preload {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}

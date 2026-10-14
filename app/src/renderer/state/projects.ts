@@ -172,8 +172,9 @@ export function putProject(p: Project) {
 export function applyChanged(p: Project) {
   setEngine(p);
   const s = useProjects.getState();
-  const summary = summarize(p);
   const idx = s.summaries.findIndex((x) => x.id === p.id);
+  // the folder (Project locations) only comes with project.list: keep it
+  const summary = { ...summarize(p), dir: idx >= 0 ? s.summaries[idx].dir : undefined };
   const summaries = idx >= 0 ? s.summaries.map((x, i) => (i === idx ? summary : x)) : [summary, ...s.summaries];
   summaries.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   useProjects.setState({ summaries });

@@ -129,7 +129,40 @@ function noteProject(p: unknown) {
   const dir = (p as { settings?: { output_dir?: string | null } } | null)?.settings?.output_dir;
   if (typeof dir === "string" && dir) knownOutputDirs.add(resolve(dir));
 }
-engine.on("status", (s) => send("engine:status", s));
+// project id → its folder (ProjectSummary.dir): projects may live outside the projects folder
+// (Project locations). Filled from project.list; refreshed on a miss and after location changes.
+const projectDirs = new Map<string, string>();
+/** previous projects folders (settings change) — the only paths projects.add_root accepts besides picked ones */
+const previousRoots = new Set<string>();
+/** other locations the engine lists (projects.locations): the renderer may open them in Explorer */
+const locationDirs = new Set<string>();
+let dirsLoading: Promise<void> | null = null;
+function noteSummaries(list: unknown) {
+  if (!Array.isArray(list)) return;
+  for (const s of list as { id?: unknown; dir?: unknown }[]) if (typeof s?.id === "string" && typeof s.dir === "string" && s.dir) projectDirs.set(s.id, resolve(s.dir));
+}
+function refreshProjectDirs(): Promise<void> {
+  dirsLoading ??= engine
+    .call("project.list", {})
+    .then((r) => {
+      if (r.ok) {
+        projectDirs.clear();
+        noteSummaries(r.result);
+      }
+    })
+    .finally(() => {
+      dirsLoading = null;
+    });
+  return dirsLoading;
+}
+async function projectDir(id: string): Promise<string | null> {
+  if (!projectDirs.has(id) && engine.status.state === "ready") await refreshProjectDirs();
+  return projectDirs.get(id) ?? null;
+}
+engine.on("status", (s) => {
+  if (s.state === "ready") void refreshProjectDirs();
+  send("engine:status", s);
+});
 engine.on("notify", (method: string, params: unknown) => {
   if (method === "project.changed") noteProject((params as { project?: unknown })?.project);
   send("engine:notify", method, params);
@@ -246,6 +279,7 @@ function on(channel: string, fn: (e: IpcMainEvent, ...args: any[]) => void) {
 const ENGINE_METHODS = new Set([
   "system.info", "system.probe_gpu", "system.set_cookies", "system.cookies_status", "system.check_cookies", "system.set_keep_awake",
   "project.list", "project.create", "project.get", "project.delete", "project.update_settings", "project.export_metadata", "project.drop_media", "project.set_pinned",
+  "project.open", "projects.add_root", "projects.remove_location", "projects.locations",
   "songs.set", "song.update", "song.add", "song.remove", "mute.upsert", "mute.remove", "songs.match_setlist",
   "audio.window", "detect.default_params", "detect.rerun",
   "audio.fetch", "detect.run", "clips.fetch", "export.run", "stems.ensure",
@@ -270,6 +304,16 @@ function checkEngineParams(method: string, params: Record<string, unknown>): str
     // a local add-on zip: only one the user just picked in the file dialog
     if (typeof params.zip !== "string" || !pickedFiles.has(params.zip) || !/\.zip$/i.test(params.zip)) return "zip not chosen by the user";
   }
+  if (method === "project.open") {
+    // a project folder from elsewhere: only one the user just picked
+    if (typeof params.path !== "string" || !pickedFolders.has(resolve(params.path))) return "folder not chosen by the user";
+  }
+  if (method === "projects.add_root") {
+    // the previous projects folder (after a change) or a folder the user picked
+    const p = typeof params.path === "string" ? resolve(params.path) : "";
+    const pending = typeof state.pendingAddRoot === "string" ? resolve(state.pendingAddRoot) : "";
+    if (!p || !(previousRoots.has(p) || pickedFolders.has(p) || p === pending)) return "folder not chosen by the user";
+  }
   if (method === "export.run") {
     const ov = params.audio_overrides as Record<string, unknown> | undefined;
     if (ov && Object.keys(ov).length) return "audio_overrides is not used by the app";
@@ -285,7 +329,7 @@ function openable(path: unknown): path is string {
   const p = resolve(path);
   if (EXECUTABLE.has(extname(p).toLowerCase())) return false;
   if (savedPaths.has(p)) return true;
-  const roots = [settings.projectsRoot, LOG_DIR, ADDONS_DIR, ...knownOutputDirs].filter((r): r is string => !!r).map((r) => resolve(r));
+  const roots = [settings.projectsRoot, LOG_DIR, ADDONS_DIR, ...knownOutputDirs, ...projectDirs.values(), ...locationDirs].filter((r): r is string => !!r).map((r) => resolve(r));
   return roots.some((r) => p === r || isInside(r, p));
 }
 
@@ -319,7 +363,15 @@ function registerIpc() {
     const prm = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
     const bad = checkEngineParams(method, prm);
     if (bad) return { ok: false, error: { code: 0, message: bad, engineCode: "INVALID_PARAMS" } };
-    return engine.call(method, prm);
+    const res = engine.call(method, prm);
+    if (method === "project.list") void res.then((r) => r.ok && noteSummaries(r.result));
+    if (method === "projects.locations")
+      void res.then((r) => {
+        const l = r.ok ? (r.result as { roots?: unknown; projects?: unknown }) : null;
+        for (const p of [...(Array.isArray(l?.roots) ? l.roots : []), ...(Array.isArray(l?.projects) ? l.projects : [])]) if (typeof p === "string") locationDirs.add(resolve(p));
+      });
+    if (method === "project.open" || method === "projects.add_root" || method === "projects.remove_location" || method === "project.create" || method === "project.delete") void res.then(() => refreshProjectDirs());
+    return res;
   });
   handle("engine:status", () => engine.status);
   handle("engine:restart", () => {
@@ -336,6 +388,7 @@ function registerIpc() {
     saveSettings();
     if (patch.lowPriority !== undefined) engine.setOptions({ lowPriority: settings.lowPriority });
     const rootChanged = patch.projectsRoot !== undefined && patch.projectsRoot !== prev.projectsRoot;
+    if (rootChanged && prev.projectsRoot) previousRoots.add(resolve(prev.projectsRoot));
     const deviceChanged = patch.device !== undefined && patch.device !== prev.device;
     if (deviceChanged) engine.setOptions({ preferCpu: settings.device === "cpu" });
     const notRunning = engine.status.state === "no-root" || engine.status.state === "stopped";
@@ -456,7 +509,7 @@ app.whenReady().then(() => {
   // no default menu: its accelerators (Ctrl+Shift+Z, Ctrl+R, …) would swallow the app's shortcuts
   Menu.setApplicationMenu(null);
   protocol.handle("app", createAppHandler(join(__dirname, "../renderer")));
-  protocol.handle("cliper-media", createMediaHandler({ projectsRoot: () => settings.projectsRoot, allowOrigin: (o) => !!o && originOf(o) === ENTRY_ORIGIN }));
+  protocol.handle("cliper-media", createMediaHandler({ projectsRoot: () => settings.projectsRoot, projectDir, allowOrigin: (o) => !!o && originOf(o) === ENTRY_ORIGIN }));
   // deny every permission request except audio output selection and notifications
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
     cb(permission === "notifications" || permission === "speaker-selection" || permission === "clipboard-sanitized-write");

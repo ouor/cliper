@@ -115,6 +115,14 @@ export function songVideo(p: Project, vs: VideoState | undefined, s: Song): Song
   };
   if (missingSec < 0.05) return { state: "ready", missing: [], missingSec: 0, fraction: 1, pending: false, touched: true, label: "영상 ✓" };
   if (pending) {
+    // the engine's per-song progress of its requests (C2-3), when it has one for this song
+    const sp = (vs?.requests ?? []).flatMap((r) => (r.songs ?? []).filter((x) => x.song_id === s.id));
+    const tot = sp.reduce((n, x) => n + x.total_sec, 0);
+    if (tot > 0) {
+      const frac = Math.max(0, Math.min(1, sp.reduce((n, x) => n + x.have_sec, 0) / tot));
+      if (!(missing.length === 1 && (missing[0][0] > s.start + 0.05 || missing[0][1] < s.end - 0.05)) || frac < 0.5)
+        return { state: "fetching", missing, missingSec, fraction: frac, pending, touched, label: `영상 받는 중 ${Math.floor(frac * 100)}%` };
+    }
     const partial = fraction > 0.01 || missing.length > 1 || (missing.length === 1 && (missing[0][0] > s.start + 0.05 || missing[0][1] < s.end - 0.05));
     return { state: "fetching", missing, missingSec, fraction, pending, touched, label: partial && fraction > 0.5 ? `${where().startsWith("앞") || where().startsWith("뒤") ? where() : `영상 ${where()}`} 받는 중` : `영상 받는 중 ${Math.floor(fraction * 100)}%` };
   }

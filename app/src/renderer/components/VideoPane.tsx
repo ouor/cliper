@@ -26,21 +26,26 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
   const vs = useVideo((s) => s.byProject[p.id]);
   const paused = useVideo((s) => s.paused);
   const gone = vodGone(p);
-  const ref = useRef<HTMLVideoElement>(null);
+  const els = useRef(new Map<string, HTMLVideoElement>());
   const [view, setView] = useState<VideoView | null>(null);
+  /** the view of the stretch right after the current one, loaded in a hidden element so the
+   *  switch at a file boundary (adopted clip ↔ new segments, C2-1) is seamless */
+  const [next, setNext] = useState<VideoView | null>(null);
   const [shown, setShown] = useState<Shown>({ kind: "opening" });
-  const state = useRef({ vs, gone, view, asking: null as number | null, failedAt: null as number | null });
+  const state = useRef({ vs, gone, view, next, asking: null as number | null, askingNext: null as number | null, failedAt: null as number | null });
   state.current.vs = vs;
   state.current.gone = gone;
   state.current.view = view;
+  state.current.next = next;
 
-  // a new project: forget the old view
+  // a new project: forget the old views
   useEffect(() => {
     setView(null);
+    setNext(null);
     state.current.failedAt = null;
   }, [p.id]);
 
-  // follow the playhead: what to show, and which view file to ask for
+  // follow the playhead: what to show, and which view files to ask for
   useEffect(() => {
     let last = "";
     const show = (s: Shown) => {
@@ -49,6 +54,7 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
       last = k;
       setShown(s);
     };
+    const inside = (v: VideoView | null, pos: number) => !!v && pos >= v.start - 0.05 && pos <= v.end + 0.05;
     const ask = (t: number) => {
       const st = state.current;
       if (st.asking !== null) return;
@@ -66,6 +72,19 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
           st.asking = null;
         });
     };
+    const askNext = (t: number) => {
+      const st = state.current;
+      if (st.askingNext !== null) return;
+      st.askingNext = t;
+      call("video.view", { id: p.id, t })
+        .then((v) => {
+          if (state.current.view?.file !== v.file) setNext(v);
+        })
+        .catch(() => {})
+        .finally(() => {
+          st.askingNext = null;
+        });
+    };
     const tick = (pos: number) => {
       const st = state.current;
       const at = covAt(st.vs, pos, st.gone);
@@ -74,7 +93,19 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
         return;
       }
       const v = st.view;
-      if (v && pos >= v.start - 0.05 && pos <= v.end + 0.05) {
+      if (inside(v, pos)) {
+        show({ kind: "video" });
+        // near the end of this file while video continues after it: load the next file now
+        if (v && v.end - pos < 6 && covAt(st.vs, v.end + 0.2, st.gone).state === "have" && !(st.next && st.next.start <= v.end + 0.3 && st.next.end > v.end + 0.3)) askNext(v.end + 0.2);
+        return;
+      }
+      // crossed into the preloaded neighbour: switch without the "opening" cover
+      if (inside(st.next, pos)) {
+        const n = st.next!;
+        st.view = n;
+        st.next = null;
+        setView(n);
+        setNext(null);
         show({ kind: "video" });
         return;
       }
@@ -90,13 +121,13 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
     state.current.failedAt = null;
   }, [vs]);
 
-  // bind the <video> element to the view
+  // bind the active <video> element to the view
   useEffect(() => {
     if (!view) {
       player.attachVideo(null);
       return;
     }
-    player.attachVideo(ref.current, view.origin, view.start, view.end);
+    player.attachVideo(els.current.get(view.file) ?? null, view.origin, view.start, view.end);
     return () => player.attachVideo(null);
   }, [view]);
 
@@ -172,7 +203,27 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
 
   return (
     <div className="video-box">
-      {view && <video key={view.file} ref={ref} src={mediaUrl(p.id, view.file)} muted playsInline preload="auto" />}
+      {[view, next].map(
+        (v) =>
+          v && (
+            <video
+              key={v.file}
+              ref={(el) => {
+                if (el) els.current.set(v.file, el);
+                else els.current.delete(v.file);
+              }}
+              className={v === view ? undefined : "video-preload"}
+              src={mediaUrl(p.id, v.file)}
+              muted
+              playsInline
+              preload="auto"
+              // the preloaded neighbour waits on its first frame
+              onLoadedMetadata={(e) => {
+                if (v !== view) e.currentTarget.currentTime = Math.max(0, v.start - v.origin + 0.01);
+              }}
+            />
+          ),
+      )}
       {cover}
       {children}
     </div>

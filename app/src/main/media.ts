@@ -1,6 +1,7 @@
 // `cliper-media://` — the only way the renderer reads project media.
 //
-//   cliper-media://project/<projectId>/<rel>   whitelisted files below <projectsRoot>/<projectId>
+//   cliper-media://project/<projectId>/<rel>   whitelisted files below the project's folder
+//                                               (ProjectSummary.dir; <projectsRoot>/<projectId> by default)
 //                                               (Range requests supported for <video> seeking)
 //
 // Whitelist: overview.peaks, probs.bin, cache/window_*.wav (engine `audio.window` results for the
@@ -27,6 +28,9 @@ const MIME: Record<string, string> = {
 
 export interface MediaContext {
   projectsRoot: () => string | null;
+  /** a project's own folder (`ProjectSummary.dir`, from the engine) — projects can live
+   *  outside the projects folder (Project locations); null = unknown */
+  projectDir: (projectId: string) => Promise<string | null>;
   /** origins allowed to read media with fetch() (the app's own origin) */
   allowOrigin: (origin: string | null) => boolean;
 }
@@ -39,12 +43,12 @@ export function isProjectId(id: string): boolean {
   return ID_RE.test(id) && !id.includes("..");
 }
 
-/** Resolve a project-relative media path, or null if it is not allowed. */
-export function resolveProjectFile(root: string, projectId: string, rel: string): string | null {
+/** Resolve a project-relative media path inside the project's folder, or null if it is not allowed. */
+export function resolveProjectFile(projectDir: string, projectId: string, rel: string): string | null {
   if (!isProjectId(projectId)) return null;
   if (!REL_RE.test(rel)) return null;
-  const base = resolve(root);
-  const full = resolve(base, projectId, rel);
+  const base = resolve(projectDir);
+  const full = resolve(base, rel);
   return isInside(base, full) ? full : null;
 }
 
@@ -111,7 +115,10 @@ export function createMediaHandler(ctx: MediaContext) {
     }
     if (url.host === "project") {
       const [projectId, ...rest] = parts;
-      const file = resolveProjectFile(root, projectId ?? "", rest.join("/"));
+      if (!isProjectId(projectId ?? "")) return deny(403, "forbidden");
+      // the project's own folder (another location), else <projects folder>/<id>
+      const dir = (await ctx.projectDir(projectId)) ?? resolve(root, projectId);
+      const file = resolveProjectFile(dir, projectId ?? "", rest.join("/"));
       if (!file) return deny(403, "forbidden");
       const res = await serveFile(file, req);
       const origin = req.headers.get("origin");

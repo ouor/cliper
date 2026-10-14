@@ -11,6 +11,7 @@ import { storageAll } from "@/lib/video";
 import { fmtBytes, fmtRelative } from "@/lib/format";
 import { friendly } from "@/lib/errors";
 import { loadVideo } from "@/state/video";
+import { removeLocation } from "@/lib/locations";
 
 export const LEVELS: { id: DropLevel; label: string; deletes: string; keeps: string; again: string }[] = [
   { id: "unused", label: "곡에 안 쓰는 영상", deletes: "어떤 곡의 앞뒤 여유에도 들지 않는 영상 (제외한 곡, 직접 받아 본 범위)", keeps: "나머지 전부", again: "필요하면 다시 받아요." },
@@ -18,6 +19,12 @@ export const LEVELS: { id: DropLevel; label: string; deletes: string; keeps: str
   { id: "video", label: "영상과 나눈 소리 (추천)", deletes: "받은 영상 전부 + 나눈 소리", keeps: "방송 전체 소리, 지도, 모든 결정", again: "다시보기가 있으면 같은 경계 그대로 영상을 다시 받을 수 있어요." },
   { id: "audio", label: "소리까지", deletes: "위 + 방송 전체 소리", keeps: "모든 결정 (곡 목록, 경계, 멘트 구간, 설정, 내보내기 기록)", again: "소리를 다시 받으면(약 1분) 지도가 돌아와요." },
 ];
+
+/** the end of a long path (the part that tells folders apart): …\scratchpad\qa2\projects */
+function tail(p: string, n = 3): string {
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  return parts.length > n ? "…\\" + parts.slice(-n).join("\\") : p;
+}
 
 /** bytes a level would free for one project */
 export function freedBy(u: StorageUsage, level: DropLevel): number {
@@ -42,10 +49,16 @@ export function StorageTab() {
   const [level, setLevel] = useState<DropLevel>("video");
   const [busy, setBusy] = useState(false);
 
+  const [locs, setLocs] = useState<{ roots: string[]; projects: string[] } | null>(null);
   const load = async () => {
     const r = await storageAll();
     if (r) setData({ projects: r.projects, free: r.free });
+    const l = await call("projects.locations", {}).catch(() => null);
+    setLocs(l ? { roots: l.roots, projects: l.projects } : null);
   };
+  // one separator style, no doubled or trailing separators, case-insensitive (Windows)
+  const norm = (x: string) => x.replace(/[\\/]+/g, "\\").replace(/\\$/, "").toLowerCase();
+  const outside = (dir?: string) => !!dir && !!root && !norm(dir).startsWith(norm(root) + "\\");
   useEffect(() => {
     void load();
     void refreshList();
@@ -185,6 +198,11 @@ export function StorageTab() {
                   {gone && <span className="tag doubt st-tag">다시보기 없음</span>}
                 </span>
                 {u.unused_video > 1e6 && <span className="faint st-unused">곡에 안 쓰는 영상 {fmtBytes(u.unused_video)}</span>}
+                {outside(s?.dir) && (
+                  <span className="faint st-unused mono ellipsis" title={s?.dir}>
+                    위치: {tail(s?.dir ?? "")}
+                  </span>
+                )}
               </span>
               <span className="mono">{fmtBytes(u.audio)}</span>
               <span className="mono">{fmtBytes(u.video)}</span>
@@ -228,6 +246,26 @@ export function StorageTab() {
         )}
         <div className="faint">앱은 정리를 제안만 하고, 스스로 지우지 않아요.</div>
       </div>
+
+      {locs && (locs.roots.length > 0 || locs.projects.length > 0) && (
+        <div className="st-locs">
+          <div className="st-locs-title">다른 위치 · 목록에 함께 보이는 곳</div>
+          {[...locs.roots.map((p) => ({ p, kind: "이전 작업 폴더" })), ...locs.projects.map((p) => ({ p, kind: "작업 하나" }))].map(({ p, kind }) => (
+            <div key={p} className="st-loc">
+              <span className="tag outline">{kind}</span>
+              <span className="grow ellipsis mono" title={p}>
+                {tail(p)}
+              </span>
+              <button className="btn xs ghost" onClick={() => void window.cliper.openPath(p)}>
+                <FolderOpen size={12} /> 열기
+              </button>
+              <button className="btn xs ghost" onClick={() => void removeLocation(p).then(load)} data-tip="목록에서만 빼요. 폴더와 파일은 그대로예요." data-tip-pos="left">
+                목록에서 빼기
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

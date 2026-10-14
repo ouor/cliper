@@ -2,6 +2,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Cookie, Copy, Cpu, Download, Film, FolderOpen, HardDrive, Info, Keyboard, Mic2, RotateCcw, Scissors, Search, Settings2, Upload, X } from "lucide-react";
 import { StorageTab } from "./Storage";
+import { rememberOldRoot } from "@/lib/locations";
 import { MarginPicker } from "./workspace/VideoControls";
 import { useApp, updateSettings, toast, ask, applyTheme, type SettingsTab } from "@/state/app";
 import { getProject } from "@/state/projects";
@@ -168,7 +169,7 @@ export function SettingsScreen() {
     if (!chk.ok) return toast("이 폴더에는 저장할 수 없어요. 다른 폴더를 골라 주세요.", { kind: "error" });
     const r = await ask({
       title: "작업 폴더를 바꿀까요?",
-      body: ["처리 엔진이 새 폴더로 다시 시작해요. 진행 중인 작업은 멈춰요.", "기존 작업은 원래 폴더에 그대로 남아요. 다시 그 폴더를 고르면 볼 수 있어요."],
+      body: ["새 작업부터 새 폴더에 만들어요. 처리 엔진이 다시 시작하고, 진행 중인 작업은 멈춰요.", "기존 작업은 원래 폴더에 그대로 두고, 목록에서 계속 보이고 그 자리에서 열려요."],
       icon: "question",
       buttons: [
         { id: "cancel", label: "취소", kind: "ghost" },
@@ -176,6 +177,7 @@ export function SettingsScreen() {
       ],
     });
     if (r === "ok") {
+      await rememberOldRoot(st.projectsRoot);
       useApp.setState({ route: { name: "home" } });
       await updateSettings({ projectsRoot: p });
     }

@@ -7,6 +7,7 @@ import { applyTheme, ask, go, openSettings, toast, useApp } from "./state/app";
 import { applyChanged, loadProject, refreshList } from "./state/projects";
 import { markEngineLost, reconcileJobs, takeInterrupted, useJobs, wireJobs } from "./state/jobs";
 import { loadAllVideo, wireVideo } from "./state/video";
+import { addPendingRoot } from "./lib/locations";
 import { onNotification } from "./lib/rpc";
 import { comboFromEvent, keysFor } from "./lib/keys";
 import { DialogHost, isTyping, Toasts } from "./components/common";
@@ -49,6 +50,7 @@ async function boot() {
       void reconcileJobs();
       void loadAllVideo();
       void onEngineReady();
+      void addPendingRoot();
     } else if (wasReady) {
       // any way out of "ready" (crash, user restart, root/device change) ends the running jobs
       markEngineLost();

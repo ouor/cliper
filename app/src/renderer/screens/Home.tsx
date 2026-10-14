@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Info, Clipboard, Film, FolderOpen, HardDrive, History, Layers, ListPlus, Mic2, MoreHorizontal, Pin, PinOff, Play, Search, Settings2, Trash2, Users, X } from "lucide-react";
 import type { StorageUsage } from "@ipc/generated/StorageUsage";
 import { storageAll } from "@/lib/video";
+import { openOtherProject } from "@/lib/locations";
 import type { Project } from "@ipc/generated/Project";
 import type { ProjectSummary } from "@ipc/generated/ProjectSummary";
 import type { AudioTrack } from "@ipc/generated/AudioTrack";
@@ -646,7 +647,12 @@ export function Home() {
           )}
 
           <section className="home-section">
-            <div className="section-title">최근 작업</div>
+            <div className="section-title">
+              최근 작업
+              <button className="btn xs ghost" onClick={() => void openOtherProject()} disabled={!engineReady} data-tip={"탐색기에서 옮긴 작업 폴더나 다른 드라이브의 작업을 목록에 넣어요\nproject.json이 있는 작업 폴더를 고르세요"} data-tip-pos="left">
+                <FolderOpen size={13} /> 다른 위치의 작업 열기
+              </button>
+            </div>
             {(filtered.length > 0 || search) && (
               <div className="row list-tools">
                 <div className="search">
