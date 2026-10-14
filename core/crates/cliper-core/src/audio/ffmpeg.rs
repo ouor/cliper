@@ -120,6 +120,19 @@ pub fn decode(input: &Path, sample_rate: u32, channels: u32, start: Option<f64>,
         c.args(["-t", &format!("{d:.6}")]);
     }
     c.args(["-vn", "-ac", &channels.to_string(), "-ar", &sample_rate.to_string(), "-f", "f32le", "-"]);
+    spawn_pcm(c, channels)
+}
+
+/// Decode with custom input arguments (`-f concat … -i list`, `-map …`):
+/// `input` goes before the output options.
+pub fn decode_input(input: &[std::ffi::OsString], sample_rate: u32, channels: u32) -> Result<PcmReader, FfmpegError> {
+    let mut c = command();
+    c.args(input);
+    c.args(["-vn", "-ac", &channels.to_string(), "-ar", &sample_rate.to_string(), "-f", "f32le", "-"]);
+    spawn_pcm(c, channels)
+}
+
+fn spawn_pcm(mut c: Command, channels: u32) -> Result<PcmReader, FfmpegError> {
     let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(map_spawn)?;
     let stderr = drain_stderr(&mut child);
     Ok(PcmReader { child, channels: channels as usize, buf: Vec::new(), stderr, finished: false })

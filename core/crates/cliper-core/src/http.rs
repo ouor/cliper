@@ -7,7 +7,70 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONNECTION, CONTENT_RANGE, COOKIE, RANGE};
+
+/// App-wide cap on in-flight HTTP requests (audio and video, every job and
+/// project together): the user's "at most 4 downloads at once" (Q-S9).
+pub const MAX_IN_FLIGHT: usize = 4;
+
+fn slots() -> &'static tokio::sync::Semaphore {
+    static S: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    S.get_or_init(|| tokio::sync::Semaphore::new(MAX_IN_FLIGHT))
+}
+
+static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static PEAK: AtomicU64 = AtomicU64::new(0);
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+/// Network counters (for diagnostics and the concurrency test).
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct NetStats {
+    /// the cap (4)
+    pub limit: u64,
+    /// requests on the wire now
+    pub in_flight: u64,
+    /// most requests ever on the wire at once since the last reset
+    pub peak: u64,
+    /// requests sent since the last reset
+    pub requests: u64,
+}
+
+pub fn net_stats(reset: bool) -> NetStats {
+    let s = NetStats {
+        limit: MAX_IN_FLIGHT as u64,
+        in_flight: IN_FLIGHT.load(Ordering::Relaxed),
+        peak: PEAK.load(Ordering::Relaxed),
+        requests: REQUESTS.load(Ordering::Relaxed),
+    };
+    if reset {
+        PEAK.store(IN_FLIGHT.load(Ordering::Relaxed), Ordering::Relaxed);
+        REQUESTS.store(0, Ordering::Relaxed);
+    }
+    s
+}
+
+/// One slot of the app-wide limit, held for a whole request (headers + body).
+struct Slot(#[allow(dead_code)] tokio::sync::SemaphorePermit<'static>);
+
+impl Slot {
+    async fn take() -> Self {
+        let p = slots().acquire().await.expect("semaphore never closed");
+        let n = IN_FLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
+        PEAK.fetch_max(n, Ordering::Relaxed);
+        REQUESTS.fetch_add(1, Ordering::Relaxed);
+        Slot(p)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Network-level failure. Kept distinct from parse errors: the extractor escalates
 /// these to a fallback variant, while parse anomalies fall back to a full-segment read.
@@ -177,6 +240,7 @@ impl Http {
         let mut last = None;
         for attempt in 0..retries {
             let res = async {
+                let _slot = Slot::take().await;
                 let resp = self.client.head(url).send().await?;
                 let status = resp.status();
                 if !status.is_success() {
@@ -219,6 +283,7 @@ impl Http {
             // drop a poisoned keep-alive connection
             req = req.header(CONNECTION, "close");
         }
+        let _slot = Slot::take().await;
         let resp = req.send().await?;
         let status = resp.status();
         if !status.is_success() {

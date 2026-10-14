@@ -56,7 +56,7 @@ pub struct VideoClip {
 }
 
 /// fMP4 segment sanity: every top-level box fits inside the payload.
-fn fmp4_complete(seg: &[u8]) -> bool {
+pub(crate) fn fmp4_complete(seg: &[u8]) -> bool {
     let boxes = mp4::iter_boxes(seg, 0, seg.len());
     match boxes.last() {
         Some((_, b)) => b.end() == seg.len() && boxes.iter().any(|(t, _)| t == b"mdat"),
