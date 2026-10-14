@@ -110,7 +110,7 @@ cd core && cargo build --release
 cd ../app && npm run dist:win
 ```
 
-- `app/dist/cliper-v0.1.0-amd64.exe`(포터블)과 `app/dist/cliper-v0.1.0-amd64-installer.exe`(설치 파일)이 나와요. 엔진, ffmpeg, 모델이 들어 있고 CUDA는 빠져 있어요.
+- `app/dist/cliper-v<버전>-amd64.exe`(포터블)이 나와요. v0.3.0부터 릴리즈에는 포터블만 올려요. 엔진, ffmpeg, 모델이 들어 있고 CUDA는 빠져 있어요.
 - 처음 빌드할 때 electron-builder가 NSIS·7zip 도구를 받아요.
 - 자세한 패키징 구성은 [app/README.md](../app/README.md)의 "패키징"을 봐 주세요.
 

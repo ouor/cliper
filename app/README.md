@@ -108,7 +108,7 @@ app/
 
 ```sh
 npm run pack:win         # dist/win-unpacked (설치 파일 없이 빠른 확인)
-npm run dist:win         # dist/cliper-v0.1.0-amd64.exe (포터블) + dist/cliper-v0.1.0-amd64-installer.exe (NSIS)
+npm run dist:win         # dist/cliper-v<ver>-amd64.exe (포터블; v0.3.0부터 릴리스는 포터블만)
 npm run pack:cuda-addon  # ../var/release의 정본 애드온 zip을 엔진에 고정된 크기·sha256으로 확인하고 dist/로 복사
 ```
 

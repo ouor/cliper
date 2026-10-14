@@ -1,6 +1,6 @@
 // electron-builder config for the Windows build. What the packager expects: app/README.md "패키징".
 //   npm run pack:win  → dist/win-unpacked (no installer; quick check)
-//   npm run dist:win  → dist/cliper-v<ver>-amd64.exe (portable) + dist/cliper-v<ver>-amd64-installer.exe (NSIS)
+//   npm run dist:win  → dist/cliper-v<ver>-amd64.exe (portable; releases ship only this since v0.3.0)
 //
 // Native payload (none of it is in git) is copied into resources/:
 //   resources/engine/   cliper.exe + its DLLs      ← CLIPER_PACK_ENGINE_DIR (default ../core/target/release)
@@ -69,7 +69,6 @@ module.exports = {
   },
   win: {
     target: [
-      { target: "nsis", arch: ["x64"] },
       { target: "portable", arch: ["x64"] },
     ],
     // editing the exe (icon / version info / signing) needs the winCodeSign bundle from GitHub;
