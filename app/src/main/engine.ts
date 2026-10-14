@@ -35,6 +35,12 @@ const TIMEOUTS: Record<string, number> = {
   "system.probe_gpu": 180_000,
   "system.check_cookies": 60_000,
   "project.drop_media": 120_000,
+  "media.drop": 300_000,
+  "storage.usage": 120_000,
+  "video.view": 300_000,
+  "video.fetch": 120_000,
+  "video.estimate": 120_000,
+  "vod.check": 120_000,
   "project.delete": 120_000,
   "project.export_metadata": 60_000,
   "detect.rerun": 60_000,
@@ -185,7 +191,7 @@ export class Engine extends EventEmitter {
         if (p.timer) clearTimeout(p.timer);
         if (msg.error) {
           const e = msg.error;
-          p.resolve({ ok: false, error: { code: e.code ?? -32000, message: e.message ?? "unknown error", engineCode: e.data?.code ?? (e.code === -32601 ? "METHOD" : e.code === -32602 ? "INVALID_PARAMS" : "INTERNAL") } });
+          p.resolve({ ok: false, error: { code: e.code ?? -32000, message: e.message ?? "unknown error", engineCode: e.data?.code ?? (e.code === -32601 ? "METHOD" : e.code === -32602 ? "INVALID_PARAMS" : "INTERNAL"), data: e.data && typeof e.data === "object" ? e.data : undefined } });
         } else {
           p.resolve({ ok: true, result: msg.result });
           this.emitSafe("result", p.method, msg.result);

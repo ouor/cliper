@@ -1,12 +1,14 @@
 // 곡 상세 타임라인 (멘트 다듬기): 원본 · 목소리 · 멘트 구간 · 노래 띠.
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Clip } from "@ipc/generated/Clip";
 import type { Mute } from "@ipc/generated/Mute";
 import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
 import { begin, colors, drawGrid, drawRuler, drawWave, hatch, panView, useCanvasSize, useThemeVersion, zoomView } from "@/canvas/draw";
 import type { Peaks, Probs } from "@/lib/peaks";
-import { auditionedMute, clipCovered, SING_THRESHOLD } from "@/lib/song";
+import { auditionedMute, SING_THRESHOLD } from "@/lib/song";
+import { piecesIn, unseparated, vodGone } from "@/lib/video";
+import { useVideo } from "@/state/video";
+import { useMapData } from "./OverviewMap";
 import { fmtTime } from "@/lib/format";
 import { useWs } from "@/state/ws";
 import { player, usePlayer, LISTEN_LABEL } from "@/audio/player";
@@ -26,7 +28,14 @@ type Drag =
   | { kind: "edge"; edge: "start" | "end"; t: number; orig: number }
   | { kind: "pan"; x0: number; view: [number, number]; moved: boolean; t: number };
 
-export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Project; s: Song; clip: Clip; orig: Peaks | null; voc: Peaks | null; probs: Probs | null; muteOn: boolean }) {
+/**
+ * `bounds` = song ± margin (14.6); `origin` = VOD time of the stem span's peak 0. Parts without
+ * video are dimmed with the video lane's marks; parts not separated yet show the original only.
+ */
+export function DetailTimeline({ p, s, bounds, origin, orig, voc, probs, muteOn }: { p: Project; s: Song; bounds: [number, number]; origin: number; orig: Peaks | null; voc: Peaks | null; probs: Probs | null; muteOn: boolean }) {
+  const vs = useVideo((x) => x.byProject[p.id]);
+  const { peaks: overview } = useMapData(p);
+  const notSeparated = useNotSeparated(p);
   const ws = useWs();
   const mode = usePlayer((x) => x.mode);
   const loopOn = usePlayer((x) => x.loopOn);
@@ -36,10 +45,8 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
   const playheadRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
-  const cov = clipCovered(clip)!;
-  const origin = clip.video!.vod_start + clip.offset;
-  const lo = Math.max(cov[0], s.start - p.settings.margin_before);
-  const hi = Math.min(cov[1], s.end + p.settings.margin_after);
+  const cov = bounds;
+  const [lo, hi] = bounds;
   const view: [number, number] = useMemo(() => ws.detailView ?? [lo, hi], [ws.detailView, lo, hi]);
   const span = view[1] - view[0];
   const xOf = (t: number) => ((t - view[0]) / span) * w;
@@ -77,7 +84,17 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
       if (drag.edge === "start") sa = Math.min(drag.t, sb - 1);
       else sb = Math.max(drag.t, sa + 1);
     }
-    // waves
+    // waves: the span's 100/s peaks; outside it the whole-VOD peaks (not separated there)
+    const spanEnd = orig ? origin + orig.count / orig.rate : origin;
+    if (overview && (!orig || t0 < origin || t1 > spanEnd)) {
+      ctx.globalAlpha = 0.7;
+      if (!orig) drawWave(ctx, overview, 0, t0, t1, w, yOrig + LANE_ORIG / 2, LANE_ORIG / 2 - 3, col.wave, 1.2);
+      else {
+        if (t0 < origin) drawWave(ctx, overview, 0, t0, t1, w, yOrig + LANE_ORIG / 2, LANE_ORIG / 2 - 3, col.wave, 1.2, t0, origin);
+        if (t1 > spanEnd) drawWave(ctx, overview, 0, t0, t1, w, yOrig + LANE_ORIG / 2, LANE_ORIG / 2 - 3, col.wave, 1.2, spanEnd, t1);
+      }
+      ctx.globalAlpha = 1;
+    }
     if (orig) drawWave(ctx, orig, origin, t0, t1, w, yOrig + LANE_ORIG / 2, LANE_ORIG / 2 - 3, col.wave, 1.2);
     const mutes = mutesForDraw();
     if (voc) drawWave(ctx, voc, origin, t0, t1, w, yVoc + LANE_VOC / 2, LANE_VOC / 2 - 3, col["wave-vocal"], 1.4);
@@ -208,6 +225,28 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
       ctx.fillRect(xOf(loop[0]), 0, Math.max(1, xOf(loop[1]) - xOf(loop[0])), 3);
       ctx.globalAlpha = 1;
     }
+    // video lane (top strip) + parts without video dimmed; parts not separated: voice lane hatched
+    for (const pc of piecesIn(vs, t0, t1, vodGone(p))) {
+      const xa0 = Math.max(0, xOf(pc.a));
+      const xb0 = Math.min(w, xOf(pc.b));
+      if (xb0 <= xa0) continue;
+      if (pc.state === "have") {
+        ctx.fillStyle = col.accent;
+        ctx.fillRect(xa0, HEAD - 4, xb0 - xa0, 3);
+        continue;
+      }
+      ctx.fillStyle = pc.state === "failed" ? col.danger : pc.state === "gone" ? hatch(ctx, col.excluded, "transparent", 4) : pc.state === "fetching" ? hatch(ctx, col.accent, "transparent", 4) : col["grid-strong"];
+      ctx.fillRect(xa0, HEAD - 4, xb0 - xa0, 3);
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.fillRect(xa0, HEAD, xb0 - xa0, yRuler - HEAD);
+    }
+    for (const [a, b] of [...notSeparated.parts(t0, t1)]) {
+      const xa0 = Math.max(0, xOf(a));
+      const xb0 = Math.min(w, xOf(b));
+      if (xb0 <= xa0) continue;
+      ctx.fillStyle = hatch(ctx, col["grid-strong"], "transparent", 5);
+      ctx.fillRect(xa0, yVoc, xb0 - xa0, LANE_VOC);
+    }
     // dim outside the song
     ctx.fillStyle = "rgba(0,0,0,0.38)";
     const xa = xOf(sa);
@@ -244,7 +283,7 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
     ctx.stroke();
     drawRuler(ctx, t0, t1, w, yRuler, RULER, col, (t, step) => fmtTime(t - s.start, step < 0.1 ? 2 : step < 1 ? 1 : 0), s.start);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p, s, orig, voc, probs, view, w, h, dpr, drag, ws.selectedMute, ws.markStart, theme, muteOn, loop, loopOn]);
+  }, [p, s, orig, voc, overview, vs, probs, view, w, h, dpr, drag, ws.selectedMute, ws.markStart, theme, muteOn, loop, loopOn]);
 
   useEffect(
     () =>
@@ -456,8 +495,8 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
         <canvas ref={ref} role="img" aria-label={`곡 상세 타임라인: 멘트 구간 ${s.mutes.length}개. 구간 목록에서 Tab으로 고를 수 있어요.`} />
         <div className="playhead" ref={playheadRef} />
         <div className={`mode-badge m${mode}`}>
-          듣는 중 · {LISTEN_LABEL[mode]}
-          {(mode === 1 || mode === 2) && muteOn && auditionedMute(s, ws.selectedMute, ws.audition) ? " + 고른 제안 적용" : ""}
+          듣는 중 · {mode !== 0 && notSeparated.here ? "원본 · 이 부분은 아직 나누지 않았어요" : LISTEN_LABEL[mode]}
+          {(mode === 1 || mode === 2) && muteOn && !notSeparated.here && auditionedMute(s, ws.selectedMute, ws.audition) ? " + 고른 제안 적용" : ""}
         </div>
         {tip && (
           <div className="map-tip" style={{ left: Math.min(tip.x + 12, w - 220), top: Math.max(0, tip.y - 36) }}>
@@ -485,4 +524,26 @@ export function selectMute(m: Mute, play = false) {
   player.setLoop(muteLoopRange(m));
   if (play) void player.play(Math.max(0, m.start - pad));
   else if (!usePlayer.getState().playing) player.seek(Math.max(0, m.start - pad));
+}
+
+/**
+ * Where the stems don't reach (14.8): `here` = the playhead is outside every separated span
+ * (W/E/R play the original there), `parts` = stretches with video but not separated yet.
+ */
+function useNotSeparated(p: Project) {
+  const vs = useVideo((x) => x.byProject[p.id]);
+  const [here, setHere] = useState(false);
+  const spans = p.stems ?? [];
+  useEffect(() => {
+    let cur: boolean | null = null;
+    return player.onFrame((pos) => {
+      const out = !spans.some((sp) => pos >= sp.start && pos <= sp.end);
+      if (out !== cur) {
+        cur = out;
+        setHere(out);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spans.map((sp) => sp.id).join(",")]);
+  return { here, parts: (t0: number, t1: number) => unseparated(p, vs, t0, t1) };
 }

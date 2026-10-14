@@ -6,6 +6,7 @@ import { startJob } from "@/state/jobs";
 import { getProject, updateProjectSettings } from "@/state/projects";
 import { toast, useApp } from "@/state/app";
 import type { ExportOptions } from "@ipc/generated/ExportOptions";
+import { fetchVideo } from "./video";
 
 /** App defaults (설정) → a new project's engine settings. */
 export async function applyDefaultSettings(id: string, extra: Partial<Settings> = {}) {
@@ -46,15 +47,17 @@ export async function startAnalysis(id: string, fetchAudio: boolean) {
   } else await detect();
 }
 
-/** 영상 받기 (+ 나누기 + 멘트 제안) for the given songs. */
-export async function fetchSongs(id: string, songIds: string[], label?: string) {
+/**
+ * 영상 받기 (+ 나누기 + 멘트 제안) for the given songs: song ± margins, only what is missing
+ * (`video.fetch`, process: true separates once the video is in). One song = what the user is
+ * looking at (priority now), several = a user request in order.
+ */
+export async function fetchSongs(id: string, songIds: string[], _label?: string) {
   if (songIds.length === 0) return;
-  // exact: only these songs (± margins), not close neighbours that share a merged clip
-  const jobId = await startJob("clips.fetch", { id, song_ids: songIds, exact: true }, { label: label ?? (songIds.length === 1 ? "이 곡 받기" : `영상 받기 ${songIds.length}곡`) });
-  if (jobId === null) toast("앞 작업이 끝나면 시작해요.", { kind: "info" });
+  await fetchVideo(id, { song_ids: songIds, priority: songIds.length === 1 ? "now" : "user", reason: "song", process: true });
 }
 
-/** "밤새 전부 처리하기": reviewed songs → clips (+ optional export without mute removal). */
+/** "밤새 전부 처리하기": songs → video + stems at batch priority (+ export that waits for its video). */
 export async function processAll(id: string, opts: { exportToo: boolean }) {
   const p = getProject(id);
   if (!p) return;
@@ -65,18 +68,13 @@ export async function processAll(id: string, opts: { exportToo: boolean }) {
     toast("받을 곡이 없어요. 먼저 곡을 확인해 주세요.", { kind: "warn" });
     return;
   }
-  await startJob(
-    "clips.fetch",
-    { id, song_ids: ids, exact: true },
-    {
-      label: `밤새 처리 · 영상 받기 ${ids.length}곡`,
-      then: opts.exportToo
-        ? () => {
-            const opt: Partial<ExportOptions> = { song_ids: ids, format: "mp4", include_unconfirmed: false };
-            void startJob("export.run", { id, ...opt }, { label: `밤새 처리 · 내보내기 ${ids.length}곡` });
-          }
-        : undefined,
-    },
-  );
+  const plan = await fetchVideo(id, { song_ids: ids, priority: "batch", reason: "batch", process: true, quiet: true });
+  if (!plan) return;
+  if (plan.request_id === null) void startJob("stems.ensure", { id, song_ids: ids }, { label: "목소리 나누기" });
+  if (opts.exportToo) {
+    const opt: Partial<ExportOptions> = { song_ids: ids, format: "mp4", include_unconfirmed: false, fetch: true };
+    void startJob("export.run", { id, ...opt }, { label: `밤새 처리 · 내보내기 ${ids.length}곡` });
+  }
+  toast(`밤새 처리: 영상 ${ids.length}곡을 받고 나눠요${opts.exportToo ? " · 받는 대로 내보내요" : ""}.`, { kind: "info" });
   useApp.setState({ jobsOpen: true });
 }

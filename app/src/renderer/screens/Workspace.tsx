@@ -13,7 +13,11 @@ import { player, usePlayer, type ListenMode } from "@/audio/player";
 import { bindings, comboFromEvent, type KeyAction } from "@/lib/keys";
 import { isTyping, Progress } from "@/components/common";
 import { fmtEta, fmtShortDate, fmtTime } from "@/lib/format";
-import { hostClip, platformLabel, projectTitle, reviewStatus, songNumbers, unconfirmedMutes, videoState } from "@/lib/song";
+import { platformLabel, projectTitle, reviewStatus, songNumbers, unconfirmedMutes } from "@/lib/song";
+import { fetchHere, songVideo, spanFor, vodGone } from "@/lib/video";
+import { useVideo, videoOf } from "@/state/video";
+import { FitVideoButton, ProjectMenu, ReplayBanner, useAutoTopUp, usePrioritizeSelected, useVodCheck } from "./workspace/VideoControls";
+import { fmtDurationKo } from "@/lib/format";
 import { addSong, confirmSong, deleteMute, deleteSong, endSongHere, mergeSongs, nextUnreviewed, setEdge, splitMute, splitSong, toggleExclude, updateMute, addMute } from "@/lib/edits";
 import { fetchSongs, processAll, startAnalysis } from "@/lib/pipeline";
 import { friendly } from "@/lib/errors";
@@ -87,14 +91,17 @@ function NextBanner({ p }: { p: Project }) {
   const ws = useWs(useShallow((s) => ({ selected: s.selected })));
   const audioJob = runningJobs(jobs, p.id, "audio.fetch")[0];
   const detectJob = runningJobs(jobs, p.id, "detect.run")[0];
+  const vs = useVideo((s) => s.byProject[p.id]);
   const clipsJob = runningJobs(jobs, p.id, "clips.fetch")[0];
   const failed = lastFailed(jobs, p.id, ["audio.fetch", "detect.run"]);
   const songs = p.songs.filter((s) => s.enabled);
   const doubts = songs.filter((s) => reviewStatus(s) === "doubt");
   const unreviewed = songs.filter((s) => !s.reviewed);
   const reviewed = songs.filter((s) => s.reviewed);
-  const needVideo = reviewed.filter((s) => videoState(p, s) !== "ready");
-  const unconf = songs.reduce((n, s) => n + (hostClip(p, s)?.stems ? unconfirmedMutes(s) : 0), 0);
+  // reviewed songs without any video yet (partly covered ones: [영상 맞추기] / top-ups)
+  const needVideo = vodGone(p) ? [] : reviewed.filter((s) => songVideo(p, vs, s).state === "none");
+  const fetchingSongs = songs.filter((s) => songVideo(p, vs, s).pending);
+  const unconf = songs.reduce((n, s) => n + (spanFor(p, s.start, s.end) ? unconfirmedMutes(s) : 0), 0);
 
   if (failed && !p.detection && !audioJob && !detectJob) {
     return (
@@ -198,6 +205,22 @@ function NextBanner({ p }: { p: Project }) {
       </div>
     );
   }
+  if (needVideo.length === 0 && fetchingSongs.length > 0) {
+    return (
+      <div className="next-banner progress">
+        <div className="spinner" />
+        <span className="nb-text">
+          {vs?.paused ? "영상 받기가 일시정지됐어요" : `영상 받는 중 · ${fetchingSongs.length}곡`}
+          {vs && vs.queued_sec + vs.fetching_sec > 0 ? ` · 남은 분량 ${fmtDurationKo(vs.queued_sec + vs.fetching_sec)}` : ""}
+          {!vs?.paused && vs?.eta_sec ? ` · ${fmtEta(vs.eta_sec)}` : ""}
+        </span>
+        <span className="faint">받는 동안에도 경계를 고치고 다른 곡을 볼 수 있어요</span>
+        <button className="btn sm ghost" onClick={() => useApp.setState({ jobsOpen: true })}>
+          작업 현황
+        </button>
+      </div>
+    );
+  }
   if (needVideo.length > 0) {
     return (
       <div className="next-banner ok">
@@ -293,6 +316,11 @@ export function Workspace({ projectId }: { projectId: string }) {
     if (!st.selected || !proj.songs.some((s) => s.id === st.selected)) useWs.setState({ selected: sortSongs(proj, "attention", "")[0]?.id ?? null });
   }, [songCount, projectId]);
 
+  // video: boundary top-ups, the selected song first, replay check in the background
+  useAutoTopUp(p);
+  usePrioritizeSelected(projectId, ws.selected);
+  useVodCheck(projectId, engineReady);
+
   // remember the selected song
   useEffect(() => {
     if (ws.selected) setProjectUi(projectId, { lastSongId: ws.selected });
@@ -343,8 +371,8 @@ export function Workspace({ projectId }: { projectId: string }) {
       const combo = comboFromEvent(e);
       if (!combo) return;
       if (combo === "Escape") {
-        if (st.pendingRange || st.candidate !== null || st.multi.length || st.markStart !== null) {
-          useWs.setState({ pendingRange: null, candidate: null, multi: [], markStart: null });
+        if (st.pendingRange || st.candidate !== null || st.multi.length || st.markStart !== null || st.videoRange || st.topupAsk) {
+          useWs.setState({ pendingRange: null, candidate: null, multi: [], markStart: null, videoRange: null, topupAsk: null });
           e.preventDefault();
         }
         return;
@@ -426,6 +454,9 @@ export function Workspace({ projectId }: { projectId: string }) {
           return player.nudge(0.1);
         case "loop":
           return player.toggleLoop();
+        case "video.here":
+          if (vodGone(proj)) return toast("다시보기를 더 이상 열 수 없어서 영상을 받을 수 없어요.", { kind: "warn" });
+          return void fetchHere(projectId, t, total);
         // review
         case "song.prev":
           if (idx > 0) useWs.setState({ selected: ordered[idx - 1].id, multi: [], candidate: null, pendingRange: null });
@@ -485,12 +516,11 @@ export function Workspace({ projectId }: { projectId: string }) {
           return s && void deleteSong(projectId, s.id);
         case "song.finish":
           if (!s) return;
-          if (videoState(proj, s) === "ready") {
+          if (songVideo(proj, videoOf(projectId), s).state === "ready" && spanFor(proj, s.start, s.end)) {
             setMode("talk");
             return;
           }
           void fetchSongs(projectId, [s.id]);
-          toast("이 곡만 먼저 받아요. 끝나면 멘트 다듬기에서 확인하세요.", { kind: "info" });
           return;
         // talk
         case "listen.orig":
@@ -579,7 +609,7 @@ export function Workspace({ projectId }: { projectId: string }) {
   const excluded = p.songs.length - songs.length;
   const nums = songNumbers(p);
   const sel = p.songs.find((s) => s.id === ws.selected);
-  const talkDone = songs.length > 0 && songs.every((s) => videoState(p, s) !== "ready" || unconfirmedMutes(s) === 0) && songs.some((s) => videoState(p, s) === "ready");
+  const talkDone = songs.length > 0 && songs.every((s) => !spanFor(p, s.start, s.end) || unconfirmedMutes(s) === 0) && songs.some((s) => spanFor(p, s.start, s.end));
   const exportDone = songs.length > 0 && songs.every((s) => s.export);
   const stepDone = { review: songs.length > 0 && reviewed === songs.length, talk: talkDone, export: exportDone };
 
@@ -598,6 +628,7 @@ export function Workspace({ projectId }: { projectId: string }) {
         <span className="spacer" />
         <TrackPicker p={p} />
         <OriginalBadge />
+        <ProjectMenu p={p} />
         <button className="btn ghost icon sm" onClick={() => openSettings()} aria-label="설정" data-tip="설정 (Ctrl+,)" data-tip-pos="left">
           <Settings2 size={16} />
         </button>
@@ -614,6 +645,7 @@ export function Workspace({ projectId }: { projectId: string }) {
           </div>
         ))}
         <span className="spacer" />
+        <FitVideoButton p={p} />
         <span className="step-stat">
           확인 <b>{reviewed}</b>/{songs.length}
           {excluded > 0 && <> · 제외 {excluded}</>}
@@ -625,6 +657,7 @@ export function Workspace({ projectId }: { projectId: string }) {
           <Redo2 size={15} />
         </button>
       </nav>
+      <ReplayBanner p={p} />
 
       {mode === "review" && (
         <>

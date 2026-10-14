@@ -1190,7 +1190,7 @@
 .video-loading.err {
   color: #ffb4b2;
 }
-/* playhead outside the bound clip: hide the (stale) frame entirely */
+/* no picture at the playhead (14.5): cover the whole box — never a frame from another time */
 .video-outside {
   position: absolute;
   inset: 0;
@@ -1198,22 +1198,24 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   background: var(--bg-2);
   color: var(--text-3);
   font-size: var(--fs-xs);
   text-align: center;
   padding: 12px;
 }
-.video-tag {
-  position: absolute;
-  left: 8px;
-  top: 8px;
-  padding: 2px 8px;
-  border-radius: var(--r-full);
-  background: rgba(0, 0, 0, 0.6);
-  color: #e9ecf2;
-  font-size: var(--fs-2xs);
+.video-outside .vo-title {
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.video-outside .vo-sub {
+  margin-bottom: 6px;
+}
+.video-outside.quiet {
+  background: #000;
+  color: #9aa3b2;
 }
 .detail-panel {
   flex: 1;
@@ -2360,4 +2362,96 @@
 }
 .ex-quality .ex-lab {
   line-height: 30px;
+}
+
+/* ── cycle 2: segment video (기획서 14장) ── */
+.map-cov {
+  font-size: var(--fs-2xs);
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.map-notices {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 8px 6px 12px;
+}
+.map-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  font-size: var(--fs-xs);
+}
+.project-menu {
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pm-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.pm-sec + .pm-sec {
+  border-top: 1px solid var(--line-1);
+  padding-top: 10px;
+}
+.pm-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-sm);
+}
+.pm-hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+.margin-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.seg.sm button {
+  padding: 3px 8px;
+  font-size: var(--fs-xs);
+}
+.margin-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+}
+.margin-custom input {
+  width: 56px;
+}
+.margin-custom.on input {
+  border-color: var(--accent);
+}
+.btn.pinned {
+  color: var(--accent);
+}
+.fit-video {
+  margin-right: 8px;
+}
+.replay-banner {
+  margin: 8px 12px 0;
+}
+.replay-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 16px 0;
+  font-size: var(--fs-xs);
+}
+.dp-video {
+  margin-top: 4px;
 }

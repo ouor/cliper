@@ -1,25 +1,9 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, HelpCircle, Info, VideoOff, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, HelpCircle, Info, X, XCircle } from "lucide-react";
 import { dismissToast, useApp } from "@/state/app";
-import { usePlayer } from "@/audio/player";
 
 export function Kbd({ k }: { k: string }) {
   return <kbd>{k}</kbd>;
-}
-
-/**
- * Covers a `.video-box` while the playhead is outside the bound clip, so a frame from another
- * time is never shown (#1). Renders nothing otherwise.
- */
-export function VideoOutside() {
-  const outside = usePlayer((s) => s.videoOutside);
-  if (!outside) return null;
-  return (
-    <div className="video-outside" role="status">
-      <VideoOff size={18} />
-      <span>이 위치의 영상은 받지 않았어요</span>
-    </div>
-  );
 }
 
 export function Progress({ value, indeterminate, tone }: { value?: number | null; indeterminate?: boolean; tone?: "accent" | "warn" | "danger" }) {

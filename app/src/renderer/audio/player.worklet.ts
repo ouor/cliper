@@ -4,6 +4,8 @@
 //   stems  — a window of the clip's orig.wav / vocals.wav (int16 stereo, 48 kHz),
 //            used by 멘트 다듬기 for the four listening modes;
 //   stream — decoded windows of the whole-VOD audio (orig only), used by 곡 검수.
+// In stems mode with `fallback` on, positions outside the stems window play the stream chunks
+// (original only: vocals = 0, so 결과/반주 = original and 지운 목소리 = silence there; 14.8).
 // Positions are VOD seconds everywhere.
 //
 // Listening modes (docs/ipc.md):
@@ -47,6 +49,8 @@ class CliperPlayer extends AudioWorkletProcessor {
   private chunkSec = 6;
   private chunks = new Map<number, Float32Array>();
   private duration = Infinity;
+  /** stems mode: play stream chunks outside the stems window */
+  private fallback = false;
 
   private pos = 0;
   private playing = false;
@@ -105,11 +109,19 @@ class CliperPlayer extends AudioWorkletProcessor {
       }
       case "stream:init":
         this.src = "stream";
+        this.fallback = false;
         this.chunkSec = m.chunkSec;
         this.duration = m.duration || Infinity;
         this.chunks.clear();
         this.orig = new Int16Array(0);
         this.voc = new Int16Array(0);
+        break;
+      case "fallback":
+        this.fallback = !!m.on;
+        if (m.on) {
+          this.chunkSec = m.chunkSec;
+          this.duration = m.duration || Infinity;
+        }
         break;
       case "stream:chunk":
         this.chunks.set(m.index, m.data as Float32Array);
@@ -292,7 +304,7 @@ class CliperPlayer extends AudioWorkletProcessor {
       let vR = 0;
       if (this.src === "stems") {
         const f = (t - this.origin) * sampleRate;
-        if (f >= this.frames - 1 && !(this.loop && step > 0)) {
+        if ((this.fallback ? t >= this.duration : f >= this.frames - 1) && !(this.loop && step > 0)) {
           ended = true;
           L.fill(0, i);
           R.fill(0, i);
@@ -312,13 +324,26 @@ class CliperPlayer extends AudioWorkletProcessor {
           oR = (this.orig[j + 1] + (this.orig[j + 3] - this.orig[j + 1]) * a) * I16;
           vL = (this.voc[j] + (this.voc[j + 2] - this.voc[j]) * a) * I16;
           vR = (this.voc[j + 1] + (this.voc[j + 3] - this.voc[j + 1]) * a) * I16;
+        } else if (this.fallback && t >= 0 && t < this.duration) {
+          // not separated here: the analysis audio (original only)
+          const k = Math.floor(t / this.chunkSec);
+          const c = this.chunks.get(k);
+          const local = Math.floor((t - k * this.chunkSec) * sampleRate);
+          if (!c || local * 2 + 1 >= c.length) {
+            stalled = true;
+            L.fill(0, i);
+            R.fill(0, i);
+            break;
+          }
+          oL = c[local * 2];
+          oR = c[local * 2 + 1];
         } else if (f < 0 && step < 0) {
           ended = true;
           L.fill(0, i);
           R.fill(0, i);
           break;
         }
-        // outside the loaded window (e.g. loop padding before it): silence, keep moving
+        // outside the loaded window without fallback (e.g. loop padding before it): silence
       } else {
         if (t < 0 || t >= this.duration) {
           ended = true;

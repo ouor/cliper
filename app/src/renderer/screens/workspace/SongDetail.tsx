@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, ArrowDownToLine, Check, Combine, Download, Headphones, Plus, RefreshCw, Scissors, SkipBack, SkipForward, Trash2, Undo2, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowDownToLine, Check, Combine, Download, Headphones, Plus, Scissors, SkipBack, SkipForward, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
-import type { Clip } from "@ipc/generated/Clip";
 import { useWs } from "@/state/ws";
 import { useApp } from "@/state/app";
 import { editSong } from "@/state/projects";
@@ -10,11 +9,12 @@ import { songProgress, useJobs } from "@/state/jobs";
 import { player } from "@/audio/player";
 import { addSong, confirmSong, deleteSong, mergeSongs, setEdge, splitSong, toggleExclude } from "@/lib/edits";
 import { fmtTime, parseTime } from "@/lib/format";
-import { clipCovered, hasUnsafeFileChars, hostClip, reviewStatus, songLabels, songNumbers, videoState } from "@/lib/song";
-import { mediaUrl } from "@/lib/peaks";
+import { hasUnsafeFileChars, reviewStatus, songLabels, songNumbers } from "@/lib/song";
+import { fetchVideo, songVideo, vodGone } from "@/lib/video";
+import { useVideo } from "@/state/video";
+import { VideoPane } from "@/components/VideoPane";
 import { fetchSongs } from "@/lib/pipeline";
 import { EdgeScopes } from "./EdgeScopes";
-import { VideoOutside } from "@/components/common";
 import { useMapData } from "./OverviewMap";
 
 export function TimeField({ value, onCommit, label }: { value: number; onCommit: (v: number) => void; label: string }) {
@@ -104,59 +104,10 @@ export function listenEnd(s: Song) {
   void player.play(Math.max(0, s.end - pre), { stopAt: s.end + 3 });
 }
 
-/**
- * The downloaded clip to show for the playhead: the selected song's clip while the playhead is
- * in it, else another downloaded clip that covers the playhead, else the song's clip (the view
- * then hides its stale frame — `VideoOutside`). Updates only when the answer changes (#1).
- */
-function useClipAtPlayhead(p: Project, host: Clip | null): Clip | null {
-  const [id, setId] = useState<string | null>(null);
-  const cur = useRef<string | null>(null);
-  useEffect(() => {
-    if (!host?.video) return;
-    const covers = (c: Clip, pos: number) => {
-      const cov = clipCovered(c);
-      return !!cov && pos >= cov[0] && pos <= cov[1];
-    };
-    const pick = (pos: number) => {
-      const next = covers(host, pos) ? host.id : (p.clips.find((c) => c.id !== host.id && covers(c, pos))?.id ?? host.id);
-      if (next !== cur.current) {
-        cur.current = next;
-        setId(next);
-      }
-    };
-    pick(player.now());
-    return player.onFrame(pick);
-  }, [p.clips, host]);
-  if (!host?.video) return host;
-  return p.clips.find((c) => c.id === id && c.video) ?? host;
-}
-
-function VideoPreview({ p, s }: { p: Project; s: Song }) {
-  const host = hostClip(p, s);
-  const clip = useClipAtPlayhead(p, host);
-  const ref = useRef<HTMLVideoElement>(null);
-  const [errClip, setErrClip] = useState<string | null>(null);
-  useEffect(() => {
-    if (!clip?.video) {
-      player.attachVideo(null);
-      return;
-    }
-    player.attachVideo(ref.current, clip.video.vod_start + clip.offset, clip.video.duration);
-    return () => player.attachVideo(null);
-  }, [clip?.id, clip?.video, clip?.offset]);
-  if (clip?.video && errClip !== clip.id) {
-    const other = clip.id !== host?.id;
-    const nums = other ? songNumbers(p) : null;
-    const n = other ? clip.song_ids.map((id) => nums!.get(id)).find((x) => x !== undefined) : undefined;
-    return (
-      <div className="video-box">
-        <video key={clip.id} ref={ref} src={mediaUrl(p.id, `clips/${clip.id}/source.mp4`)} muted playsInline preload="auto" onError={() => setErrClip(clip.id)} />
-        {other && <div className="video-tag">재생 위치의 영상{n ? ` · 곡 ${String(n).padStart(2, "0")}` : ""}</div>}
-        <VideoOutside />
-      </div>
-    );
-  }
+function VideoPreview({ p }: { p: Project }) {
+  const vs = useVideo((x) => x.byProject[p.id]);
+  // no video anywhere yet: the review works by sound (the box says so instead of a cover)
+  if (vs && (vs.local || vs.have_sec > 0 || vs.requests.length > 0 || vs.failed_sec > 0 || vodGone(p))) return <VideoPane p={p} />;
   const thumb = p.source?.catalog.thumbnail;
   return (
     <div className="video-box empty">
@@ -221,8 +172,8 @@ export function SongDetail({ p }: { p: Project }) {
   const ws = useWs();
   const { probs } = useMapData(p);
   const shortSec = useApp((s) => s.settings.shortSec);
-  const margin = p.settings.margin_before;
   const jobs = useJobs();
+  const vsAll = useVideo((x) => x.byProject[p.id]);
   const s = p.songs.find((x) => x.id === ws.selected);
 
   if (ws.pendingRange) return <PendingPanel p={p} r={ws.pendingRange} />;
@@ -239,7 +190,7 @@ export function SongDetail({ p }: { p: Project }) {
   }
   const n = songNumbers(p).get(s.id);
   const st = reviewStatus(s);
-  const vs = videoState(p, s);
+  const sv = songVideo(p, vsAll, s);
   const prog = songProgress(jobs, p.id).get(s.id);
   const labels = songLabels(p, s, shortSec);
   const sorted = [...p.songs].filter((x) => x.enabled).sort((a, b) => a.start - b.start);
@@ -247,7 +198,7 @@ export function SongDetail({ p }: { p: Project }) {
 
   return (
     <div className="detail">
-      <VideoPreview p={p} s={s} />
+      <VideoPreview p={p} />
       <div className="detail-panel">
         <div className="dp-title-row">
           <span className="dp-num mono">{n ? String(n).padStart(2, "0") : "–"}</span>
@@ -288,15 +239,20 @@ export function SongDetail({ p }: { p: Project }) {
         <EdgeScopes p={p} s={s} probs={probs} />
         <TextField className="note-input" value={s.note} placeholder="메모 (M) · 예: 다시 부름, 메들리, 2:13 말소리 들림" field="note" maxLength={500} onCommit={(v) => void editSong(p.id, s.id, "메모", (x) => void (x.note = v))} />
 
-        {vs === "refetch" && (
-          <div className="banner warn">
-            <RefreshCw size={15} />
-            <span className="grow">앞뒤 여유({margin}초)를 넘어서 이 곡의 영상을 다시 받아야 해요 (약 10초).</span>
-            <div className="actions">
-              <button className="btn sm primary" onClick={() => void fetchSongs(p.id, [s.id], "영상 다시 받기")}>
-                지금 받기
-              </button>
-            </div>
+        {s.enabled && sv.state !== "none" && sv.state !== "ready" && (
+          <div className={`banner ${sv.state === "gone" || sv.state === "failed" ? "warn" : "info"} dp-video`}>
+            {sv.pending ? <Download size={15} /> : <AlertTriangle size={15} />}
+            <span className="grow">
+              {sv.label}
+              {sv.state === "partial" && <span className="faint"> · 내보내기 전에 받아야 해요</span>}
+            </span>
+            {(sv.state === "partial" || sv.state === "failed") && (
+              <div className="actions">
+                <button className="btn sm subtle" onClick={() => void fetchVideo(p.id, { song_ids: [s.id], priority: "now", reason: "fit", process: (p.stems ?? []).some((x) => x.end > s.start && x.start < s.end) })}>
+                  모자란 부분 받기
+                </button>
+              </div>
+            )}
           </div>
         )}
         {prog && (
@@ -323,7 +279,7 @@ export function SongDetail({ p }: { p: Project }) {
             <Trash2 size={13} />
           </button>
           <span className="spacer" />
-          {vs === "none" && s.enabled && (
+          {sv.state === "none" && s.enabled && !vodGone(p) && (
             <button className="btn sm subtle" onClick={() => void fetchSongs(p.id, [s.id])} data-tip="영상 받기 → 목소리 나누기 → 멘트 제안을 한 번에" data-tip-pos="left">
               <Zap size={13} /> 이 곡만 완성 <kbd>Ctrl+Shift+E</kbd>
             </button>

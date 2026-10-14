@@ -6,7 +6,7 @@ import type { SystemInfo } from "@ipc/generated/SystemInfo";
 
 export type WorkspaceMode = "review" | "talk" | "export";
 export type Route = { name: "home" } | { name: "workspace"; projectId: string; mode: WorkspaceMode };
-export type SettingsTab = "general" | "detect" | "video" | "talk" | "export" | "keys" | "advanced";
+export type SettingsTab = "general" | "detect" | "video" | "storage" | "talk" | "export" | "keys" | "advanced";
 
 export interface Toast {
   id: number;
@@ -41,6 +41,8 @@ interface AppStore {
   jobsOpen: boolean;
   toasts: Toast[];
   dialog: (DialogSpec & { resolve: (id: string) => void }) | null;
+  /** open the storage screen with these projects selected (and this cleanup level) */
+  storageFocus: { ids: string[]; level: "unused" | "stems" | "video" | "audio" | null } | null;
 }
 
 export const useApp = create<AppStore>(() => ({
@@ -54,6 +56,7 @@ export const useApp = create<AppStore>(() => ({
   jobsOpen: false,
   toasts: [],
   dialog: null,
+  storageFocus: null,
 }));
 
 export async function updateSettings(patch: Partial<AppSettings>) {

@@ -13,7 +13,7 @@ import { getProject } from "./projects";
 import { useApp } from "./app";
 import { projectTitle } from "@/lib/song";
 
-export type JobKind = "audio.fetch" | "detect.run" | "clips.fetch" | "export.run";
+export type JobKind = "audio.fetch" | "detect.run" | "clips.fetch" | "stems.ensure" | "export.run";
 type JobMethod = Extract<Method, JobKind>;
 
 export const KIND_LABEL: Record<string, string> = {
@@ -21,6 +21,7 @@ export const KIND_LABEL: Record<string, string> = {
   "audio.fetch": "소리 받기",
   "detect.run": "곡 찾기",
   "clips.fetch": "영상 받기 · 목소리 나누기",
+  "stems.ensure": "목소리 나누기 · 멘트 찾기",
   "export.run": "내보내기",
 };
 
@@ -69,6 +70,12 @@ export function noteKo(note?: Note | null): string | undefined {
       return "소리 푸는 중";
     case "alignment_weak":
       return "영상과 소리의 시간 맞춤이 불확실해요. 이 곡은 시작·끝을 한 번 확인해 주세요";
+    case "stems_reseparated":
+      return "예전에 나눈 소리가 영상과 맞지 않아 다시 나눴어요";
+    case "reencode_joined":
+      return "나눠 받은 영상을 이어 붙이느라 다시 인코딩해요";
+    case "gpu_out_of_memory":
+      return "그래픽카드 메모리가 부족해 CPU로 나눠요 (느려요)";
     case "silent_segments":
       return `받지 못한 구간 ${args.count ?? "일부"}개는 무음으로 채웠어요`;
     default:
@@ -180,7 +187,7 @@ function upsert(id: string, patch: Partial<Job> & { kind?: string; projectId?: s
 function computeFraction(j: Job, pr: Progress): number | null {
   const stageFrac = pr.total > 0 ? Math.min(1, pr.done / pr.total) : null;
   if (j.kind === "audio.fetch" || j.kind === "detect.run") return stageFrac;
-  const table = j.kind === "clips.fetch" ? CLIP_STAGE_WEIGHT : j.kind === "export.run" ? EXPORT_STAGE_WEIGHT : null;
+  const table = j.kind === "clips.fetch" || j.kind === "stems.ensure" ? CLIP_STAGE_WEIGHT : j.kind === "export.run" ? EXPORT_STAGE_WEIGHT : null;
   const n = Math.max(1, pr.items_total ?? j.items.length);
   if (!table) return stageFrac;
   const [off, w] = table[pr.stage] ?? [0, 0];
@@ -235,7 +242,7 @@ function applyProgress(jobId: string, kind: string, projectId: string, pr: Progr
   const samples = fraction !== null ? [...j.samples.filter(([t]) => now - t < 20000), [now, fraction] as [number, number]] : j.samples;
   let eta: number | null = j.eta;
   const singleStage = kind === "audio.fetch" || kind === "detect.run" || (pr.items_total ?? items.length) <= 1;
-  if (singleStage && typeof pr.eta_sec === "number" && kind !== "clips.fetch" && kind !== "export.run") {
+  if (singleStage && typeof pr.eta_sec === "number" && kind !== "clips.fetch" && kind !== "stems.ensure" && kind !== "export.run") {
     // the engine's estimate covers the current stage = the whole job here
     eta = pr.eta_sec;
   } else if (fraction !== null && now - j.startedAt > 5000 && samples.length > 2) {
@@ -273,7 +280,7 @@ async function notifyDone(j: Job, ok: boolean) {
   let body = ok ? `${label} 완료` : `${label} 실패 · ${j.error?.title ?? ""}`;
   if (ok && j.kind === "clips.fetch" && p) {
     const pending = p.songs.reduce((n, s) => n + s.mutes.filter((m) => !m.confirmed).length, 0);
-    body = `영상 ${j.items.length}개 받기 완료${pending ? ` · 멘트 확인 ${pending}개 대기` : ""}`;
+    body = `영상 ${j.items.length}곡 받기 완료${pending ? ` · 멘트 확인 ${pending}개 대기` : ""}`;
   }
   if (ok && j.kind === "detect.run" && p) body = `곡 ${p.songs.filter((s) => s.enabled).length}개를 찾았어요`;
   if (ok && j.kind === "export.run") body = `${j.items.length}곡 내보내기 완료`;
@@ -488,17 +495,14 @@ export function songProgress(s: JobsStore, projectId: string): Map<string, { lab
   const p = getProject(projectId);
   if (!p) return out;
   for (const j of runningJobs(s, projectId)) {
-    if (j.kind === "clips.fetch") {
-      for (const clipId of j.items) {
-        const ids = p.clips.find((c) => c.id === clipId)?.song_ids ?? [];
-        const songs = p.songs.filter((x) => ids.includes(x.id) || x.clip_id === clipId || x.id === clipId);
-        const isCur = j.item === clipId;
-        const isDone = j.itemsDone.includes(clipId);
-        if (isDone) continue;
-        const stageFrac = j.total > 0 ? j.done / j.total : null;
-        for (const song of songs) {
-          out.set(song.id, isCur ? { label: STAGE_LABEL[j.stage] ?? "처리 중", fraction: j.stage === "video.fetch" || j.stage === "separate" ? stageFrac : null } : { label: "대기", fraction: null, waiting: true });
-        }
+    if (j.kind === "clips.fetch" || j.kind === "stems.ensure") {
+      // items = song ids (clips.fetch); stems.ensure: the songs it was asked for
+      const ids = j.items.length ? j.items : ((j.request?.params as { song_ids?: string[] | null } | undefined)?.song_ids ?? []);
+      const stageFrac = j.total > 0 ? j.done / j.total : null;
+      for (const id of ids) {
+        if (j.itemsDone.includes(id)) continue;
+        const isCur = !j.items.length || j.item === id;
+        out.set(id, isCur ? { label: STAGE_LABEL[j.stage] ?? "처리 중", fraction: j.stage === "video.fetch" || j.stage === "separate" ? stageFrac : null } : { label: "나누기 대기", fraction: null, waiting: true });
       }
     } else if (j.kind === "export.run") {
       for (const songId of j.items) {

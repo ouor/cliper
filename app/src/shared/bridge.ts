@@ -24,6 +24,8 @@ export interface RpcFailure {
   message: string;
   /** engine ApiError code (BUSY, NETWORK, …) or ENGINE_DOWN */
   engineCode: string;
+  /** engine error details next to data.code (e.g. ranges for VIDEO_MISSING, need/free for NO_SPACE) */
+  data?: Record<string, unknown>;
 }
 
 export type CallResult = { ok: true; result: unknown } | { ok: false; error: RpcFailure };

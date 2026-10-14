@@ -28,6 +28,12 @@ interface WsStore {
   setlistOpen: boolean;
   /** 멘트 다듬기: hear the selected (unconfirmed) suggestion applied in 결과/지운 목소리 (P) */
   audition: boolean;
+  /** Shift+drag on the map: a VOD range to fetch video for ([이 범위 영상 받기]) */
+  videoRange: [number, number] | null;
+  /** a boundary top-up over the automatic limit (5 min) waiting for [받기] / [나중에] (14.4) */
+  topupAsk: { songId: string; ranges: [number, number][]; sec: number; bytes: number } | null;
+  /** margin changed: offer to fill the larger margin for songs that already have video (14.6) */
+  marginAsk: { songIds: string[]; sec: number; bytes: number } | null;
 }
 
 export const useWs = create<WsStore>(() => ({
@@ -49,6 +55,9 @@ export const useWs = create<WsStore>(() => ({
   detectOpen: false,
   setlistOpen: false,
   audition: false,
+  videoRange: null,
+  topupAsk: null,
+  marginAsk: null,
 }));
 
 export function requestFocus(field: "title" | "note" | "search") {
@@ -65,6 +74,9 @@ export function resetWs(projectId: string) {
     mapView: null,
     detailView: null,
     pendingRange: null,
+    videoRange: null,
+    topupAsk: null,
+    marginAsk: null,
     markStart: null,
     search: "",
     detectOpen: false,

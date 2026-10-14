@@ -23,10 +23,8 @@ export interface PlayerState {
   volume: number;
   source: "none" | "stream" | "stems";
   /** stems window currently loaded (`paged`: a long song held a page at a time) */
-  stems: { projectId: string; clipId: string; start: number; end: number; progress: number; paged?: boolean; error?: string } | null;
+  stems: { projectId: string; dir: string; start: number; end: number; progress: number; paged?: boolean; error?: string } | null;
   streamError?: string;
-  /** a video is bound but the playhead is outside its clip (its frame would be stale) */
-  videoOutside: boolean;
 }
 
 export const usePlayer = create<PlayerState>(() => ({
@@ -40,7 +38,6 @@ export const usePlayer = create<PlayerState>(() => ({
   volume: 0.9,
   source: "none",
   stems: null,
-  videoOutside: false,
 }));
 
 const SR = 48000;
@@ -53,9 +50,11 @@ const STEMS_EDGE = 15;
 
 interface VideoBinding {
   el: HTMLVideoElement;
-  /** VOD seconds at video t = 0 */
+  /** VOD seconds at video t = 0 (`video.view` origin) */
   origin: number;
-  duration: number;
+  /** VOD range the file has pictures for */
+  start: number;
+  end: number;
 }
 
 class Player {
@@ -75,10 +74,13 @@ class Player {
   private stemsAbort: AbortController | null = null;
   private stemsGen = 0;
   /** the requested stems range (frames from the clip start); a long one is held a page at a time */
-  private stemsRange: { key: string; projectId: string; clipId: string; origin: number; f0: number; f1: number; bust: string; capped: boolean } | null = null;
+  private stemsRange: { key: string; projectId: string; dir: string; origin: number; f0: number; f1: number; bust: string; capped: boolean } | null = null;
   private stemsKey = "";
   private video: VideoBinding | null = null;
   private loopTouched = false;
+  /** stems mode: project / duration whose analysis audio fills what the span doesn't cover */
+  private fallbackProject: string | null = null;
+  private fallbackDuration = 0;
 
   private listeners = new Set<(pos: number) => void>();
   private dbgResolve: ((v: unknown) => void) | null = null;
@@ -164,9 +166,24 @@ class Player {
     for (const l of this.listeners) l(pos);
     if (st.source === "stream" && (st.playing || st.buffering)) this.prefetch(pos, st.rate);
     if (st.source === "stems" && st.playing) this.pageStems(pos, st.rate);
+    if (st.source === "stems") this.prefetchOutsideStems(pos, st.playing ? st.rate : 0);
     this.syncVideo(pos, st.playing && !st.buffering, st.rate);
     requestAnimationFrame(this.tick);
   };
+
+  /** Stems mode: fetch analysis-audio chunks for where the playhead is / goes outside the span. */
+  private prefetchOutsideStems(pos: number, rate: number) {
+    if (!this.fallbackProject || this.streamProject !== this.fallbackProject) return;
+    const st = usePlayer.getState();
+    const r = this.stemsRange;
+    if (!r) return;
+    const rs = r.origin + r.f0 / SR;
+    const re = r.origin + r.f1 / SR;
+    const targets = [pos];
+    if (rate !== 0) targets.push(pos + 6 * Math.sign(rate));
+    if (st.loop && st.loopOn) targets.push(st.loop[0]);
+    for (const t of targets) if (t < rs || t > re) this.prefetch(t, rate || 1);
+  }
 
   /** Long stems ranges: move the page when the playhead leaves it or nears its end. */
   private pageStems(pos: number, rate: number) {
@@ -188,6 +205,7 @@ class Player {
   async useStream(projectId: string, duration: number) {
     await this.init();
     if (this.streamProject === projectId && usePlayer.getState().source === "stream") return;
+    this.fallbackProject = null;
     this.stopStems();
     for (const c of this.inflight.values()) c.abort();
     this.inflight.clear();
@@ -256,21 +274,26 @@ class Player {
   }
 
   /**
-   * Load a window [start, end] (VOD s) of a clip's stems. `origin` = VOD time of clip
-   * t=0 (vod_start + offset); `clipFrames` bounds the window.
+   * Load a window [start, end] (VOD s) of a stem span (`dir` = project-relative folder with
+   * orig.wav / vocals.wav). `origin` = VOD time of the span's frame 0; `clipFrames` bounds the
+   * window. `fallbackDuration` > 0: outside the span the worklet plays the analysis audio
+   * (original only — not separated there yet, 14.8) fetched like the review stream.
    */
-  async useStems(projectId: string, clipId: string, origin: number, clipFrames: number, start: number, end: number, bust = "") {
+  async useStems(projectId: string, dir: string, origin: number, clipFrames: number, start: number, end: number, bust = "", fallbackDuration = 0) {
     await this.init();
+    this.fallbackProject = fallbackDuration > 0 ? projectId : null;
+    this.fallbackDuration = fallbackDuration;
+    this.post({ type: "fallback", on: fallbackDuration > 0, chunkSec: CHUNK, duration: fallbackDuration });
     const rf0 = Math.max(0, Math.floor((start - origin) * SR));
     const rf1 = Math.min(clipFrames, Math.ceil((end - origin) * SR));
-    const rangeKey = `${projectId}/${clipId}/${rf0}/${rf1}/${bust}`;
+    const rangeKey = `${projectId}/${dir}/${rf0}/${rf1}/${bust}`;
     if (this.stemsRange?.key === rangeKey) return;
     // reuse when the requested range is inside the loaded (uncapped) one
     const cur = usePlayer.getState().stems;
     const r = this.stemsRange;
-    if (r && !r.capped && cur && !cur.error && r.projectId === projectId && r.clipId === clipId && r.bust === bust && r.f0 <= rf0 && r.f1 >= rf1) return;
+    if (r && !r.capped && cur && !cur.error && r.projectId === projectId && r.dir === dir && r.bust === bust && r.f0 <= rf0 && r.f1 >= rf1) return;
     const capped = rf1 - rf0 > STEMS_MAX_SEC * SR;
-    this.stemsRange = { key: rangeKey, projectId, clipId, origin, f0: rf0, f1: rf1, bust, capped };
+    this.stemsRange = { key: rangeKey, projectId, dir, origin, f0: rf0, f1: rf1, bust, capped };
     const now = this.now();
     const anchor = now >= start && now <= end ? now : start;
     await this.loadStemsPage(anchor, true);
@@ -288,12 +311,14 @@ class Player {
       f1 = Math.min(r.f1, f0 + max);
       f0 = Math.max(r.f0, f1 - max);
     }
-    const { projectId, clipId, origin, bust } = r;
-    const key = `${projectId}/${clipId}/${f0}/${f1}/${bust}`;
+    const { projectId, dir, origin, bust } = r;
+    const key = `${projectId}/${dir}/${f0}/${f1}/${bust}`;
     if (key === this.stemsKey) return;
     this.stopStems();
     this.stemsKey = key;
-    this.streamProject = null;
+    // outside the span: analysis audio chunks (fallback), else nothing
+    this.streamProject = this.fallbackProject;
+    this.streamDuration = this.fallbackDuration;
     for (const c of this.inflight.values()) c.abort();
     this.inflight.clear();
     this.sent.clear();
@@ -307,7 +332,7 @@ class Player {
     const ob = new Int16Array(frames * 2);
     const vb = new Int16Array(frames * 2);
     this.post({ type: "stems:init", gen, origin: wStart, frames, orig: ob, voc: vb }, [ob.buffer, vb.buffer]);
-    usePlayer.setState({ source: "stems", stems: { projectId, clipId, start: wStart, end: wEnd, progress: 0, paged: r.capped } });
+    usePlayer.setState({ source: "stems", stems: { projectId, dir, start: wStart, end: wEnd, progress: 0, paged: r.capped } });
     const ac = new AbortController();
     this.stemsAbort = ac;
     let doneO = 0;
@@ -318,7 +343,7 @@ class Player {
     };
     let lastUpd = 0;
     const load = async (which: 0 | 1) => {
-      const url = mediaUrl(projectId, `clips/${clipId}/${which === 0 ? "orig" : "vocals"}.wav`);
+      const url = mediaUrl(projectId, `${dir}/${which === 0 ? "orig" : "vocals"}.wav`);
       // header first (small range) to find the data chunk
       const head = await fetch(url, { headers: { range: "bytes=0-4095" }, signal: ac.signal });
       const hb = new DataView(await head.arrayBuffer());
@@ -375,6 +400,7 @@ class Player {
 
   async clearSource() {
     await this.init();
+    this.fallbackProject = null;
     this.stopStems();
     this.stemsRange = null;
     this.streamProject = null;
@@ -417,7 +443,10 @@ class Player {
     usePlayer.setState({ pos: p });
     this.post({ type: "seek", pos: p });
     if (usePlayer.getState().source === "stream") this.prefetch(p, usePlayer.getState().rate);
-    if (usePlayer.getState().source === "stems") this.pageStems(p, 0);
+    if (usePlayer.getState().source === "stems") {
+      this.pageStems(p, 0);
+      this.prefetchOutsideStems(p, 0);
+    }
     for (const l of this.listeners) l(p);
   }
 
@@ -493,24 +522,22 @@ class Player {
 
   // ── video ──
 
-  attachVideo(el: HTMLVideoElement | null, origin = 0, duration = 0) {
+  /** Bind a <video> playing a `video.view` file: currentTime = vod − origin, valid in [start, end]. */
+  attachVideo(el: HTMLVideoElement | null, origin = 0, start = 0, end = 0) {
     if (!el) {
       this.video = null;
       return;
     }
-    this.video = { el, origin, duration };
+    this.video = { el, origin, start, end };
     el.muted = true;
   }
 
   private syncVideo(pos: number, playing: boolean, rate: number) {
     const v = this.video;
-    // playhead outside the bound clip: the last frame would belong to another time, so the
-    // views hide it and say so (#1)
-    const outside = !!v && !(pos - v.origin >= 0 && pos - v.origin <= (v.duration || v.el.duration || Infinity));
-    if (outside !== usePlayer.getState().videoOutside) usePlayer.setState({ videoOutside: outside });
     if (!v || v.el.readyState < 1) return;
     const t = pos - v.origin;
-    if (outside) {
+    // outside the view the pane covers the picture (VideoPane); just stop the element
+    if (pos < v.start - 0.05 || pos > v.end + 0.05) {
       if (!v.el.paused) v.el.pause();
       return;
     }

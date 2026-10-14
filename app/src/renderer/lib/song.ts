@@ -1,5 +1,4 @@
-// Song/mute domain helpers: status, labels, clip state, positions, links, templates.
-import type { Clip } from "@ipc/generated/Clip";
+// Song/mute domain helpers: status, labels, positions, links, templates (video state: lib/video.ts).
 import type { Mute } from "@ipc/generated/Mute";
 import type { Params } from "@ipc/generated/Params";
 import type { Project } from "@ipc/generated/Project";
@@ -41,43 +40,6 @@ export function songNumbers(p: Project): Map<string, number> {
   return m;
 }
 
-export function clipById(p: Project, id: string | null | undefined): Clip | null {
-  if (!id) return null;
-  return p.clips.find((c) => c.id === id) ?? null;
-}
-
-export function clipCovered(c: Clip): [number, number] | null {
-  if (!c.video) return null;
-  return [c.video.vod_start + c.offset, c.video.vod_start + c.offset + c.video.duration];
-}
-
-/** The fetched clip that fully contains the song (what the engine would use). */
-export function hostClip(p: Project, s: Song): Clip | null {
-  const own = clipById(p, s.clip_id);
-  if (own?.video) {
-    const cov = clipCovered(own)!;
-    if (cov[0] <= s.start && s.end <= cov[1]) return own;
-  }
-  for (const c of p.clips) {
-    const cov = clipCovered(c);
-    if (cov && cov[0] <= s.start && s.end <= cov[1]) return c;
-  }
-  return null;
-}
-
-export type VideoState = "none" | "ready" | "stemsMissing" | "refetch";
-
-export function videoState(p: Project, s: Song): VideoState {
-  const host = hostClip(p, s);
-  if (host) return host.stems ? "ready" : "stemsMissing";
-  // a fetched clip overlaps the song but does not contain it → grew past its margins
-  const overlaps = p.clips.some((c) => {
-    const cov = clipCovered(c);
-    return cov && cov[0] < s.end && s.start < cov[1];
-  });
-  return overlaps ? "refetch" : "none";
-}
-
 /** Song edited by hand: a manual song, or an auto song whose range differs from the detector. */
 export function isEdited(p: Project, s: Song): boolean {
   if (s.origin === "manual") return true;
@@ -115,8 +77,6 @@ export function songLabels(p: Project, s: Song, shortSec: number): Label[] {
       out.push({ text: `같은 제목 (${idx})`, kind: "info", tip: "앵콜이나 다시 부른 곡일 수 있어요" });
     }
   }
-  const al = clipById(p, s.clip_id)?.alignment;
-  if (al && !al.ok) out.push({ text: "타이밍 확인 필요", kind: "doubt", tip: "받은 영상과 소리의 시간을 확인하지 못했어요.\n시작·끝 듣기로 자른 위치를 확인해 주세요." });
   if (isEdited(p, s)) out.push({ text: s.origin === "manual" ? "직접 추가" : "직접 고침", kind: "plain" });
   return out;
 }
@@ -164,13 +124,6 @@ export function singOverlap(m: Mute, probs: Probs | null): number {
   let n = 0;
   for (let i = i0; i < i1; i++) if (probs.sing[i] > SING_THRESHOLD) n++;
   return n / probs.fps;
-}
-
-/** Mutes that lie outside the fetched video can't be exported. */
-export function muteOutsideClip(m: Mute, clip: Clip | null): boolean {
-  const cov = clip ? clipCovered(clip) : null;
-  if (!cov) return false;
-  return m.start < cov[0] - 0.01 || m.end > cov[1] + 0.01;
 }
 
 // ── detection sensitivity (1 확실한 곡만 … 5 애매한 곡도) ──

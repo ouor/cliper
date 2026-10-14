@@ -32,6 +32,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: "seek.fineBack", scope: "play", keys: [","], label: "0.1초 뒤로" },
   { id: "seek.fineFwd", scope: "play", keys: ["."], label: "0.1초 앞으로" },
   { id: "loop", scope: "play", keys: ["Ctrl+L"], label: "구간 반복 켜기/끄기" },
+  { id: "video.here", scope: "play", keys: ["V"], label: "여기 영상 받기 (재생 위치 앞뒤 1분)" },
 
   { id: "song.prev", scope: "review", keys: ["ArrowUp"], label: "이전 곡" },
   { id: "song.next", scope: "review", keys: ["ArrowDown"], label: "다음 곡" },

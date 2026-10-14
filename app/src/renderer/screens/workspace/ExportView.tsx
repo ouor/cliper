@@ -9,10 +9,16 @@ import { setMode, toast, updateSettings, useApp } from "@/state/app";
 import { projectUi, setProjectUi, updateProjectSettings, useProjects } from "@/state/projects";
 import { runningJobs, songProgress, startJob, useJobs } from "@/state/jobs";
 import { useWs } from "@/state/ws";
-import { hostClip, renderDescription, songNumbers, songTitle, unconfirmedMutes, videoState, vodLink } from "@/lib/song";
+import { renderDescription, songNumbers, songTitle, unconfirmedMutes, vodLink } from "@/lib/song";
+import { estimate, len, partsIn, songVideo, type SongVideo } from "@/lib/video";
+import { useVideo } from "@/state/video";
+import { editSong } from "@/state/projects";
+import type { Song } from "@ipc/generated/Song";
+import type { ApiError } from "@ipc/generated/ApiError";
+import type { VideoState } from "@ipc/generated/VideoState";
 import { fromSettings, toSettings, type ExportQuality } from "@/lib/quality";
 import { QualityPicker } from "@/components/QualityPicker";
-import { fmtBytes, fmtEta, fmtTime } from "@/lib/format";
+import { fmtBytes, fmtDurationKo, fmtEta, fmtTime } from "@/lib/format";
 import { call } from "@/lib/rpc";
 import { friendly } from "@/lib/errors";
 import type { ExportPreset } from "../../../shared/settings";
@@ -52,9 +58,32 @@ function previewName(p: Project, tpl: string, songId: string | undefined): strin
   return out.replace(/^[_\- ]+|[_\- ]+$/g, "") || "_";
 }
 
+/** [받은 범위에 맞추기] (14.10, Q-S8): move the song's edges to the ends of its downloaded video. */
+async function fitToVideo(p: Project, s: Song, vs: VideoState | undefined) {
+  const have = partsIn(vs, s.start, s.end, ["have"]);
+  if (!have.length) {
+    toast("이 곡 범위에는 받은 영상이 없어요. 내보낼 수 없어요.", { kind: "warn" });
+    return;
+  }
+  const a = have[0][0];
+  const b = have[have.length - 1][1];
+  await editSong(p.id, s.id, "받은 범위에 맞추기", (x) => {
+    x.start = a;
+    x.end = b;
+  });
+  toast(
+    have.length > 1
+      ? "곡 경계를 받은 범위 끝으로 옮겼어요. 곡 중간에도 영상이 없는 곳이 있어 그대로는 내보낼 수 없어요."
+      : `곡 경계를 받은 영상 범위로 옮겼어요 (${fmtTime(a, 1)} ~ ${fmtTime(b, 1)}). Ctrl+Z로 되돌릴 수 있어요.`,
+    { kind: have.length > 1 ? "warn" : "ok" },
+  );
+}
+
 export function ExportView({ p }: { p: Project }) {
   const settings = useApp((s) => s.settings);
   const jobs = useJobs();
+  const vs = useVideo((x) => x.byProject[p.id]);
+  const svOf = (s: Song): SongVideo => songVideo(p, vs, s);
   const ui = useProjects((s) => s.ui[p.id]) ?? projectUi(p.id);
   const songs = useMemo(() => [...p.songs].filter((s) => s.enabled).sort((a, b) => a.start - b.start), [p.songs]);
   const nums = useMemo(() => songNumbers(p), [p]);
@@ -65,9 +94,10 @@ export function ExportView({ p }: { p: Project }) {
   const [refVideo, setRefVideo] = useState(false);
   const [alsoRender, setAlsoRender] = useState(false);
   const [tpl, setTpl] = useState(p.settings.filename_template);
-  const [checked, setChecked] = useState<Set<string>>(() => new Set(songs.filter((s) => (s.reviewed || !songs.some((x) => x.reviewed)) && videoState(p, s) === "ready").map((s) => s.id)));
+  // default: reviewed songs that have video (a song without any video can be checked: [받고 내보내기])
+  const [checked, setChecked] = useState<Set<string>>(() => new Set(songs.filter((s) => (s.reviewed || !songs.some((x) => x.reviewed)) && songVideo(p, useVideo.getState().byProject[p.id], s).touched).map((s) => s.id)));
   const [free, setFree] = useState<number | null>(null);
-  const [results, setResults] = useState<{ exports: { song_id: string; result: ExportResult }[]; stems: { song_id: string; stems: StemsResult }[] } | null>(null);
+  const [results, setResults] = useState<{ exports: { song_id: string; result: ExportResult }[]; stems: { song_id: string; stems: StemsResult }[]; failed?: { song_id: string; error: ApiError }[] } | null>(null);
   const [lastJob, setLastJob] = useState<string | null>(null);
   const outDir = p.settings.output_dir || `${useApp.getState().engine.projectsRoot ?? ""}\\${p.id}\\exports`;
 
@@ -84,15 +114,21 @@ export function ExportView({ p }: { p: Project }) {
       const r = finished.result as NonNullable<typeof results>;
       setResults(r);
       const first = r.exports[0]?.result.path ?? r.stems[0]?.stems.dir;
-      toast(`${r.exports.length || r.stems.length}곡 내보내기를 마쳤어요. 원본은 그대로예요.`, { kind: "ok", action: first ? { label: "폴더 열기", run: () => void window.cliper.showItem(first) } : undefined });
+      const nFail = r.failed?.length ?? 0;
+      toast(`${r.exports.length || r.stems.length}곡 내보내기를 마쳤어요${nFail ? ` · ${nFail}곡은 영상을 받지 못해 내보내지 못했어요` : ""}. 원본은 그대로예요.`, {
+        kind: nFail ? "warn" : "ok",
+        ttl: nFail ? 9000 : undefined,
+        action: first ? { label: "폴더 열기", run: () => void window.cliper.showItem(first) } : undefined,
+      });
       requestAnimationFrame(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
   }, [finished?.status, finished?.result]);
   const prog = songProgress(jobs, p.id);
 
+  // any song can be exported ([받고 내보내기] fetches what is missing) unless its replay is gone
   const ready = (id: string) => {
     const s = p.songs.find((x) => x.id === id)!;
-    return videoState(p, s) === "ready";
+    return svOf(s).state !== "gone";
   };
   const selected = songs.filter((s) => checked.has(s.id) && ready(s.id));
   const totalDur = selected.reduce((n, s) => n + (s.end - s.start), 0);
@@ -101,9 +137,23 @@ export function ExportView({ p }: { p: Project }) {
   const showQuality = hasVideoTrack && (preset === "accurate" || preset === "archive" || (preset === "editor" && alsoRender));
   // smallest fetched video among the selection (engine never upscales)
   const sourceHeight = useMemo(() => {
-    const hs = selected.map((s) => Number(hostClip(p, s)?.video?.resolution.split("x")[1])).filter((h) => h > 0);
+    const hs = selected.flatMap((s) => (vs?.ranges ?? []).filter((r) => r.state === "have" && r.end > s.start && r.start < s.end).map((r) => r.height ?? 0)).filter((h) => h > 0);
     return hs.length ? Math.min(...hs) : null;
-  }, [p, selected.map((s) => s.id).join()]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p, vs, selected.map((s) => s.id).join()]);
+  // selected songs whose own range lacks video: [받고 내보내기] fetches it first (14.11)
+  const lacking = selected.filter((s) => svOf(s).missingSec > 0.05 && hasVideoTrack);
+  const lackingKey = lacking.map((s) => `${s.id}:${s.start}:${s.end}`).join(",");
+  const [lackEst, setLackEst] = useState<{ key: string; sec: number; bytes: number } | null>(null);
+  useEffect(() => {
+    if (!lacking.length || local) return;
+    let alive = true;
+    void estimate(p.id, { ranges: lacking.flatMap((s) => svOf(s).missing) }).then((r) => alive && r && setLackEst({ key: lackingKey, sec: r.missing_sec, bytes: r.estimated_bytes }));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lackingKey, p.id]);
   const mp4Bps = quality.videoK && preset !== "fast" ? ((quality.videoK + quality.audioK) * 1000) / 8 : (p.source?.variants[0]?.bandwidth || 8e6) / 8;
   const estBytes = preset === "audio" ? totalDur * (format === "wav" ? 384000 : format === "flac" ? 200000 : 40000) : preset === "editor" ? totalDur * 384000 * 4 + (alsoRender ? totalDur * mp4Bps : 0) : totalDur * mp4Bps;
   const estSec = preset === "fast" ? selected.length * 4 : preset === "audio" ? selected.length * 3 : preset === "editor" ? selected.length * 8 : totalDur * 0.15;
@@ -148,6 +198,8 @@ export function ExportView({ p }: { p: Project }) {
       also_render: preset === "editor" ? alsoRender : false,
       handles: preset === "editor" ? 3 : null,
       reference_video: preset === "editor" ? refVideo : false,
+      // [받고 내보내기]: fetch the missing video first, export the others meanwhile
+      fetch: lacking.length > 0,
     };
     setResults(null);
     try {
@@ -210,15 +262,16 @@ export function ExportView({ p }: { p: Project }) {
         </div>
         <div className="ex-list">
           {songs.map((s) => {
-            const vs = videoState(p, s);
+            const sv = svOf(s);
+            const ok = sv.state !== "gone";
             const unconf = unconfirmedMutes(s);
             const off = !s.mute_enabled;
             const pr = prog.get(s.id);
             const n = nums.get(s.id);
             return (
-              <label key={s.id} className={`ex-row${vs !== "ready" ? " disabled" : ""}`}>
+              <label key={s.id} className={`ex-row${!ok ? " disabled" : ""}`}>
                 <span className="check">
-                  <input type="checkbox" checked={checked.has(s.id) && vs === "ready"} disabled={vs !== "ready"} onChange={() => toggle(s.id)} />
+                  <input type="checkbox" checked={checked.has(s.id) && ok} disabled={!ok} onChange={() => toggle(s.id)} />
                 </span>
                 <span className="mono faint">{n ? String(n).padStart(2, "0") : "–"}</span>
                 <span className={`grow ellipsis${s.title ? "" : " faint"}`}>{songTitle(s)}</span>
@@ -229,12 +282,19 @@ export function ExportView({ p }: { p: Project }) {
                       {pr.label}
                       {pr.fraction !== null && ` ${Math.floor(pr.fraction * 100)}%`}
                     </span>
-                  ) : vs === "none" ? (
-                    <span className="faint">영상 없음</span>
-                  ) : vs === "refetch" ? (
-                    <span className="tag doubt">다시 받기 필요</span>
-                  ) : vs === "stemsMissing" ? (
-                    <span className="faint">나누기 전</span>
+                  ) : sv.state === "gone" ? (
+                    <>
+                      <span className="tag doubt" data-tip="다시보기가 사라져서 모자란 영상을 받을 수 없어요" data-tip-pos="left">
+                        {sv.label}
+                      </span>
+                      <button className="btn xs subtle" onClick={(e) => (e.preventDefault(), void fitToVideo(p, s, vs))} data-tip="곡 경계를 받은 영상 범위 끝으로 옮겨요 (되돌리기 가능)" data-tip-pos="left">
+                        받은 범위에 맞추기
+                      </button>
+                    </>
+                  ) : sv.state === "none" ? (
+                    <span className="faint">영상 받기 전 · 받고 내보내요</span>
+                  ) : sv.missingSec > 0.05 ? (
+                    <span className={sv.pending ? "faint" : "tag doubt"}>{sv.label}</span>
                   ) : off ? (
                     <span className="tag">멘트 지우기 끔</span>
                   ) : unconf ? (
@@ -255,7 +315,7 @@ export function ExportView({ p }: { p: Project }) {
               </label>
             );
           })}
-          {songs.some((s) => videoState(p, s) !== "ready") && <div className="hint ex-hint">영상을 받은 곡만 내보낼 수 있어요. 곡 검수 화면에서 [확인한 곡 영상 받기]를 눌러 주세요.</div>}
+          {songs.some((s) => svOf(s).missingSec > 0.05) && <div className="hint ex-hint">영상이 모자란 곡도 고를 수 있어요. 모자란 부분을 받은 뒤 이어서 내보내고, 그사이 다른 곡을 먼저 내보내요.</div>}
         </div>
       </div>
 
@@ -366,6 +426,22 @@ export function ExportView({ p }: { p: Project }) {
 
         <section className="ex-card">
           <div className="ex-card-title">내보내기 전 점검</div>
+          {lacking.map((s) => (
+            <div key={s.id} className="check-line warn">
+              <AlertTriangle size={14} />
+              <span className="grow">
+                {String(nums.get(s.id) ?? "").padStart(2, "0")} {songTitle(s)}: {svOf(s).state === "none" ? "영상을 아직 받지 않았어요." : `영상 ${missingWhere(s, svOf(s))}이 아직 없어요.`} 받은 뒤 이어서 내보내요.
+              </span>
+            </div>
+          ))}
+          {(results?.failed ?? []).map((f) => (
+            <div key={f.song_id} className="check-line err">
+              <AlertTriangle size={14} />
+              <span className="grow">
+                {String(nums.get(f.song_id) ?? "").padStart(2, "0")} {songTitle(p.songs.find((x) => x.id === f.song_id) ?? ({ title: "" } as Song))}: 영상을 받지 못해 내보내지 못했어요{f.error.code === "VIDEO_MISSING" && (f.error.data as { vod_gone?: boolean } | undefined)?.vod_gone ? " · 다시보기가 사라졌어요" : ""}.
+              </span>
+            </div>
+          ))}
           {unconfSongs.map((s) => (
             <div key={s.id} className="check-line warn">
               <AlertTriangle size={14} />
@@ -420,6 +496,11 @@ export function ExportView({ p }: { p: Project }) {
             <div>
               선택 {selected.length}곡 · {fmtEta(estSec).replace(" 남음", "").replace("곧 끝나요", "몇 초")} 걸려요 · 약 {fmtBytes(estBytes)}
             </div>
+            {lacking.length > 0 && (
+              <div className="faint">
+                먼저 영상 {lackEst?.key === lackingKey ? `${fmtDurationKo(lackEst.sec)} · 약 ${fmtBytes(lackEst.bytes)}` : `${fmtDurationKo(lacking.reduce((n, x) => n + len(svOf(x).missing), 0))} 분량`}을 받아요 ({lacking.length}곡)
+              </div>
+            )}
             {running && (
               <div className="col" style={{ gap: 4, marginTop: 6 }}>
                 <Progress value={running.fraction} />
@@ -430,7 +511,7 @@ export function ExportView({ p }: { p: Project }) {
             )}
           </div>
           <button className="btn primary lg" onClick={() => void start()} disabled={!selected.length || diskShort || !!running}>
-            <Rocket size={16} /> 내보내기 시작 <kbd>↵</kbd>
+            <Rocket size={16} /> {lacking.length ? "받고 내보내기" : "내보내기 시작"} <kbd>↵</kbd>
           </button>
         </div>
 
@@ -500,4 +581,14 @@ export function ExportView({ p }: { p: Project }) {
       </div>
     </div>
   );
+}
+
+/** "앞 20초" / "뒤 15초" / "1분 10초" — where a song's video is missing */
+function missingWhere(s: Song, sv: SongVideo): string {
+  if (sv.missing.length === 1) {
+    const [a, b] = sv.missing[0];
+    if (a <= s.start + 0.05 && b < s.end - 0.05) return `앞 ${fmtDurationKo(b - a)}`;
+    if (b >= s.end - 0.05 && a > s.start + 0.05) return `뒤 ${fmtDurationKo(b - a)}`;
+  }
+  return fmtDurationKo(sv.missingSec);
 }

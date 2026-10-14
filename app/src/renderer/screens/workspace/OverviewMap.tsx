@@ -1,12 +1,15 @@
 // 방송 전체 지도: 노래 곡선, 파형, 곡 막대, 후보 구간, 받은 영상 범위. Canvas, mipmapped peaks.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ListMusic, Maximize2, SlidersHorizontal, ZoomIn, ZoomOut } from "lucide-react";
+import { Download, ListMusic, Maximize2, SlidersHorizontal, ZoomIn, ZoomOut } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import { begin, colors, drawCurve, drawGrid, drawRuler, drawWave, hatch, panView, roundRect, useCanvasSize, useThemeVersion, zoomView } from "@/canvas/draw";
 import { invalidateMedia, loadPeaks, loadProbs, mediaUrl, type Peaks, type Probs } from "@/lib/peaks";
-import { clipCovered, reviewStatus, songNumbers, songTitle, videoState } from "@/lib/song";
+import { reviewStatus, songNumbers, songTitle } from "@/lib/song";
+import { coverageSummary, len, partsIn, piecesIn, requestsAt, songVideo, vodGone, estimate, fetchVideo } from "@/lib/video";
+import { useVideo } from "@/state/video";
+import { fmtBytes, fmtDurationKo } from "@/lib/format";
 import { useWs } from "@/state/ws";
-import { useApp, updateSettings } from "@/state/app";
+import { ask, useApp, updateSettings } from "@/state/app";
 import { player, usePlayer } from "@/audio/player";
 import { setEdge } from "@/lib/edits";
 import { fmtTime } from "@/lib/format";
@@ -19,14 +22,16 @@ const LANE_EXTRA = 16;
 const LANE_PROB = 38;
 const LANE_WAVE = 34;
 const LANE_BARS = 26;
-const BAND = 5;
+/** the video lane (14.3): have / fetching / queued / none / failed / unavailable */
+const BAND = 10;
 const RULER = 18;
 
 type Drag =
   | { kind: "edge"; songId: string; edge: "start" | "end"; t: number; orig: number; x0: number }
   | { kind: "create"; a: number; b: number; x0: number }
   | { kind: "pan"; x0: number; view: [number, number]; moved: boolean; t: number }
-  | { kind: "bar"; songId: string; x0: number; shift: boolean };
+  | { kind: "bar"; songId: string; x0: number; shift: boolean }
+  | { kind: "vrange"; a: number; b: number; x0: number };
 
 /**
  * Overview peaks + PANNs curves. While `audio.fetch` runs the engine rewrites overview.peaks every
@@ -67,6 +72,9 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
   // only the two jobs the map shows (the store updates ~4 Hz while jobs run)
   const [audioJob, detectJob] = useJobs(useShallow((s) => [runningJobs(s, p.id, "audio.fetch")[0], runningJobs(s, p.id, "detect.run")[0]] as const));
   const theme = useThemeVersion();
+  const vs = useVideo((s) => s.byProject[p.id]);
+  const videoRange = useWs((s) => s.videoRange);
+  const gone = vodGone(p);
   const { ref, w, h, dpr } = useCanvasSize();
   const playheadRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -183,12 +191,39 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
       });
     }
 
-    // clip coverage bands (받은 영상 범위)
-    for (const cl of p.clips) {
-      const cov = clipCovered(cl);
-      if (!cov) continue;
-      ctx.fillStyle = col.clipband;
-      ctx.fillRect(xOf(cov[0]), yBand + 1, Math.max(2, xOf(cov[1]) - xOf(cov[0])), BAND - 2);
+    // video lane: solid = have, stripes = fetching, outline = queued, red dashes = failed,
+    // grey hatch = can't be fetched (replay gone), empty = none — never colour alone (7.7)
+    ctx.fillStyle = col["bg-1"];
+    ctx.fillRect(0, yBand, w, BAND);
+    for (const pc of piecesIn(vs, t0, t1, gone)) {
+      const xa = Math.max(0, xOf(pc.a));
+      const xb = Math.min(w, xOf(pc.b));
+      const bw = Math.max(pc.state === "none" ? 0 : 2, xb - xa);
+      const y0 = yBand + 2;
+      const bh = BAND - 4;
+      if (pc.state === "have") {
+        ctx.fillStyle = col.clipband;
+        ctx.fillRect(xa, y0, bw, bh);
+      } else if (pc.state === "fetching") {
+        ctx.fillStyle = hatch(ctx, col.clipband, col["accent-soft"], 4);
+        ctx.fillRect(xa, y0, bw, bh);
+      } else if (pc.state === "queued") {
+        ctx.strokeStyle = col.clipband;
+        ctx.strokeRect(xa + 0.5, y0 + 0.5, Math.max(1, bw - 1), bh - 1);
+      } else if (pc.state === "failed") {
+        ctx.strokeStyle = col.danger;
+        ctx.setLineDash([3, 2]);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(xa, y0 + bh / 2);
+        ctx.lineTo(xa + bw, y0 + bh / 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1;
+      } else if (pc.state === "gone") {
+        ctx.fillStyle = hatch(ctx, col.excluded, "transparent", 4);
+        ctx.fillRect(xa, y0, bw, bh);
+      }
     }
 
     // songs
@@ -257,9 +292,20 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
         ctx.fillRect(x0 - 2, y + 3, 3, bh - 6);
         ctx.fillRect(x0 + bw - 1, y + 3, 3, bh - 6);
       }
-      if (videoState(p, s) === "refetch") {
-        ctx.fillStyle = col.doubt;
-        ctx.fillRect(x0, yBand + 1, bw, BAND - 2);
+      // song wider than its video: the bar's missing ends turn orange (14.3)
+      if (s.enabled && st !== "excluded") {
+        const sv = songVideo(p, vs, { ...s, start: a, end: b });
+        if (sv.touched && sv.state !== "ready") {
+          ctx.fillStyle = col.doubt;
+          for (const [ma, mb] of sv.missing) ctx.fillRect(Math.max(x0, xOf(ma)), y + bh - 4, Math.max(2, Math.min(x0 + bw, xOf(mb)) - Math.max(x0, xOf(ma))), 4);
+        }
+      }
+      // exported: ⬆ on the bar (14.10)
+      if (s.export && bw > 14) {
+        ctx.fillStyle = st === "reviewed" ? "rgba(0,0,0,0.78)" : col["text-1"];
+        ctx.font = `700 10px ${col.font}`;
+        ctx.fillText("⬆", x0 + bw - 12, y + bh / 2 + 0.5);
+        ctx.font = `600 10.5px ${col.font}`;
       }
       // label
       const n = nums.get(s.id);
@@ -290,8 +336,20 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
       ctx.setLineDash([]);
       ctx.lineWidth = 1;
     }
+    // Shift+drag video range
+    const vr = drag?.kind === "vrange" ? [Math.min(drag.a, drag.b), Math.max(drag.a, drag.b)] : videoRange;
+    if (vr) {
+      const x0 = xOf(vr[0]);
+      const x1 = xOf(vr[1]);
+      ctx.fillStyle = col["accent-soft"];
+      ctx.fillRect(x0, yBand - 2, x1 - x0, BAND + 4);
+      ctx.strokeStyle = col.accent;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(x0 + 0.5, yBand - 1.5, x1 - x0 - 1, BAND + 3);
+      ctx.setLineDash([]);
+    }
     drawRuler(ctx, t0, t1, w, yRuler, RULER, col, (t, step) => fmtTime(t, step < 1 ? 1 : 0));
-  }, [p, peaks, probs, view, w, h, dpr, ws.selected, ws.multi, ws.candidate, ws.pendingRange, ws.showExcluded, drag, theme, extraLanes.length, showCandidates, audioJob?.fraction, audioJob?.peaksUntil, nums, xOf, yBars, yBand, yProb, yRuler, yWave, total, ref, lanes]);
+  }, [vs, gone, videoRange, p, peaks, probs, view, w, h, dpr, ws.selected, ws.multi, ws.candidate, ws.pendingRange, ws.showExcluded, drag, theme, extraLanes.length, showCandidates, audioJob?.fraction, audioJob?.peaksUntil, nums, xOf, yBars, yBand, yProb, yRuler, yWave, total, ref, lanes]);
 
   // playhead (no React re-render per frame)
   useEffect(() => {
@@ -324,6 +382,32 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
     return null;
   };
 
+  const bandTip = (t: number): string => {
+    const pc = piecesIn(vs, t, t + 0.001, gone)[0];
+    if (!pc) return "";
+    const r = (vs?.ranges ?? []).find((x) => t >= x.start && t < x.end);
+    const a = r?.start ?? pc.a;
+    const b = r?.end ?? pc.b;
+    switch (pc.state) {
+      case "have":
+        return vs?.local ? "녹화 파일 영상" : `영상 받음 ${fmtTime(a, 0)}~${fmtTime(b, 0)} (${fmtDurationKo(b - a)})`;
+      case "fetching": {
+        const reqs = requestsAt(vs, t);
+        const tot = reqs.reduce((n, q) => n + q.total_sec, 0);
+        const hv = reqs.reduce((n, q) => n + q.have_sec, 0);
+        return `받는 중${tot ? ` ${Math.floor((hv / tot) * 100)}%` : ""}${vs?.eta_sec ? ` · 약 ${fmtDurationKo(vs.eta_sec)}` : ""}`;
+      }
+      case "queued":
+        return vs?.paused ? "대기 중 · 영상 받기가 일시정지됐어요" : "대기 중 · 앞 작업이 끝나면 받아요";
+      case "failed":
+        return `받지 못했어요${r?.code === "NETWORK" ? " · 연결이 끊겼어요" : ""} · 작업 현황에서 다시 시도할 수 있어요`;
+      case "gone":
+        return "다시보기를 더 이상 열 수 없어요";
+      default:
+        return "영상을 받지 않았어요 · 소리는 들을 수 있어요\nShift+드래그로 범위를 골라 받을 수 있어요";
+    }
+  };
+
   const hitCandidate = (x: number) => (p.detection?.candidates ?? []).findIndex((c) => x >= xOf(c.start) - 2 && x <= xOf(c.end) + 2);
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -332,6 +416,11 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
     const y = e.clientY - rect.top;
     const t = tOf(x);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    // Shift+drag outside the song bars: pick a range to fetch video for (14.5)
+    if (e.shiftKey && !(y >= yBars && y < yBand && hitSong(x))) {
+      setDrag({ kind: "vrange", a: t, b: t, x0: x });
+      return;
+    }
     if (y >= yBars && y < yRuler) {
       const hit = hitSong(x);
       if (hit?.edge) {
@@ -364,6 +453,11 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
     if (!drag) {
       // hover feedback
       const el = e.currentTarget as HTMLElement;
+      if (y >= yBand && y < yBand + BAND) {
+        el.style.cursor = "default";
+        setHover({ x, y, text: bandTip(t) });
+        return;
+      }
       if (y >= yBars && y < yRuler) {
         const hit = hitSong(x);
         el.style.cursor = hit?.edge ? "ew-resize" : hit ? "pointer" : "crosshair";
@@ -391,6 +485,10 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
       const snapped = e.altKey ? t : Math.round(t * 10) / 10;
       setDrag({ ...drag, t: Math.max(0, Math.min(total, snapped)) });
       setHover({ x, y, text: `${fmtTime(snapped, 1)}  (${snapped - drag.orig >= 0 ? "+" : ""}${(snapped - drag.orig).toFixed(1)}초)` });
+    } else if (drag.kind === "vrange") {
+      const b = Math.max(0, Math.min(total, t));
+      setDrag({ ...drag, b });
+      setHover({ x, y, text: `영상 받을 범위 ${fmtTime(Math.min(drag.a, b), 0)} ~ ${fmtTime(Math.max(drag.a, b), 0)} (${fmtDurationKo(Math.abs(b - drag.a))})` });
     } else if (drag.kind === "create") {
       setDrag({ ...drag, b: Math.max(0, Math.min(total, t)) });
       setHover({ x, y, text: `${fmtTime(Math.min(drag.a, t), 0)} ~ ${fmtTime(Math.max(drag.a, t), 0)}` });
@@ -411,7 +509,11 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
     if (!d) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const x = e.clientX - rect.left;
-    if (d.kind === "edge") {
+    if (d.kind === "vrange") {
+      const a = Math.min(d.a, d.b);
+      const b = Math.max(d.a, d.b);
+      useWs.setState({ videoRange: Math.abs(x - d.x0) > 4 && b - a > 1 ? [a, b] : null });
+    } else if (d.kind === "edge") {
       if (Math.abs(d.t - d.orig) > 0.05) void setEdge(p.id, d.songId, d.edge, d.t);
     } else if (d.kind === "create") {
       const a = Math.min(d.a, d.b);
@@ -468,7 +570,8 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
     ...extraLanes.map((k) => ({ y: 0, h: LANE_EXTRA, text: { music: "음악", speech: "말소리", sing: "가창" }[k] })),
     { y: 0, h: LANE_PROB, text: "노래" },
     { y: 0, h: LANE_WAVE, text: "파형" },
-    { y: 0, h: LANE_BARS + BAND, text: "곡" },
+    { y: 0, h: LANE_BARS, text: "곡" },
+    { y: 0, h: BAND, text: "영상" },
   ];
   const zoomPct = Math.round((total / (view[1] - view[0])) * 100);
 
@@ -482,8 +585,13 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
           <span className="lg unreviewed">미확인</span>
           <span className="lg doubt">애매함</span>
           <span className="lg cand">후보</span>
-          <span className="lg band">받은 영상</span>
+          <span className="lg band" data-tip={"영상 줄: 실선 받음 · 줄무늬 받는 중 · 테두리 받을 예정\n빨간 점선 받지 못함 · 회색 빗금 받을 수 없음"} data-tip-pos="top">
+            받은 영상
+          </span>
         </div>
+        <span className="map-cov faint" data-tip="받은 영상 / 방송 길이 · 디스크 사용량" data-tip-pos="top">
+          {vs && !vs.local && vs.have_sec > 0 ? `영상 ${fmtDurationKo(vs.have_sec)} / ${fmtTime(total, 0, true)} · ${fmtBytes(vs.bytes)}` : coverageSummary(vs)}
+        </span>
         <span className="spacer" />
         <div className="popover-anchor">
           <button className="btn xs ghost" onClick={() => setLanesOpen(!lanesOpen)}>
@@ -528,6 +636,7 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
           <Maximize2 size={13} />
         </button>
       </div>
+      <MapNotices p={p} />
       <div className="map-body">
         <div className="map-gutter" style={{ width: GUTTER }}>
           {laneLabels.map((l, i) => (
@@ -570,3 +679,101 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
     </section>
   );
 });
+
+/**
+ * One-line prompts above the map (not dialogs, 14.4–14.6): the Shift+drag range, a boundary
+ * top-up over the automatic limit, and filling a larger margin for songs that have video.
+ */
+function MapNotices({ p }: { p: Project }) {
+  const vs = useVideo((s) => s.byProject[p.id]);
+  const { videoRange, topupAsk, marginAsk } = useWs(useShallow((s) => ({ videoRange: s.videoRange, topupAsk: s.topupAsk, marginAsk: s.marginAsk })));
+  const nums = useMemo(() => songNumbers(p), [p]);
+  const [est, setEst] = useState<{ key: string; sec: number; bytes: number } | null>(null);
+  const key = videoRange ? `${videoRange[0].toFixed(1)}-${videoRange[1].toFixed(1)}` : "";
+  useEffect(() => {
+    if (!videoRange) return;
+    let alive = true;
+    void estimate(p.id, { ranges: [videoRange] }).then((r) => alive && r && setEst({ key, sec: r.missing_sec, bytes: r.estimated_bytes }));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, p.id]);
+  const gone = vodGone(p);
+  if (!videoRange && !topupAsk && !marginAsk) return null;
+  const fetchRange = async () => {
+    if (!videoRange) return;
+    const missing = est?.key === key ? est.sec : len(partsIn(vs, videoRange[0], videoRange[1]));
+    if (missing > 30 * 60) {
+      const r = await ask({
+        title: `영상 ${fmtDurationKo(missing)}을 받을까요?`,
+        body: [`약 ${est?.key === key ? fmtBytes(est.bytes) : "?"}를 써요. 받는 동안에도 편집은 그대로 할 수 있어요.`],
+        icon: "info",
+        buttons: [
+          { id: "cancel", label: "취소", kind: "ghost" },
+          { id: "ok", label: "받기", kind: "primary" },
+        ],
+      });
+      if (r !== "ok") return;
+    }
+    useWs.setState({ videoRange: null });
+    await fetchVideo(p.id, { ranges: [videoRange], priority: "user", reason: "range" });
+  };
+  return (
+    <div className="map-notices">
+      {videoRange && (
+        <div className="map-notice">
+          <Download size={13} />
+          <span className="grow">
+            고른 범위 <span className="mono">{fmtTime(videoRange[0], 0)} ~ {fmtTime(videoRange[1], 0)}</span>
+            {est?.key === key ? (est.sec > 0 ? ` · 영상 ${fmtDurationKo(est.sec)} 더 필요 · 약 ${fmtBytes(est.bytes)}` : " · 영상이 이미 다 있어요") : " · 계산 중…"}
+          </span>
+          <button className="btn xs primary" disabled={gone || (est?.key === key && est.sec <= 0)} onClick={() => void fetchRange()} data-tip={gone ? "다시보기를 더 이상 열 수 없어요" : undefined}>
+            이 범위 영상 받기
+          </button>
+          <button className="btn xs ghost" onClick={() => useWs.setState({ videoRange: null })}>
+            취소 <kbd>Esc</kbd>
+          </button>
+        </div>
+      )}
+      {topupAsk && (
+        <div className="map-notice">
+          <Download size={13} />
+          <span className="grow">
+            곡 {String(nums.get(topupAsk.songId) ?? "").padStart(2, "0")}: 영상 {fmtDurationKo(topupAsk.sec)}(약 {fmtBytes(topupAsk.bytes)})이 더 필요해요.
+          </span>
+          <button
+            className="btn xs primary"
+            onClick={() => {
+              useWs.setState({ topupAsk: null });
+              void fetchVideo(p.id, { song_ids: [topupAsk.songId], priority: "user", reason: "topup", process: (p.stems ?? []).length > 0 });
+            }}
+          >
+            받기
+          </button>
+          <button className="btn xs ghost" onClick={() => useWs.setState({ topupAsk: null })}>
+            나중에
+          </button>
+        </div>
+      )}
+      {marginAsk && (
+        <div className="map-notice">
+          <Download size={13} />
+          <span className="grow">앞뒤 여유를 바꿨어요. 이미 영상을 받은 곡에는 그대로예요.</span>
+          <button
+            className="btn xs subtle"
+            onClick={() => {
+              useWs.setState({ marginAsk: null });
+              void fetchVideo(p.id, { song_ids: marginAsk.songIds, priority: "user", reason: "margin", process: (p.stems ?? []).length > 0 });
+            }}
+          >
+            받은 곡에도 적용 · {marginAsk.songIds.length}곡 · 약 {fmtDurationKo(marginAsk.sec)} 분량
+          </button>
+          <button className="btn xs ghost" onClick={() => useWs.setState({ marginAsk: null })}>
+            괜찮아요
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

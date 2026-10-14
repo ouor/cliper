@@ -4,7 +4,9 @@
 //                                               (Range requests supported for <video> seeking)
 //
 // Whitelist: overview.peaks, probs.bin, cache/window_*.wav (engine `audio.window` results for the
-// review preview), clips/<clip>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks}.
+// review preview), clips/<clip>/{source.mp4, orig.wav, vocals.wav, orig.peaks, vocals.peaks} (clips
+// adopted from protocol-2 projects), video/views/<key>.mp4 (`video.view` remuxes) and
+// stems/<span>/{orig,vocals}.{wav,peaks} (stem spans).
 // Anything else (other paths, `..`, absolute paths, other projects roots) is refused.
 import { createReadStream, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -13,7 +15,8 @@ import { Readable } from "node:stream";
 // one path segment: no separators, reserved characters or control chars (ids can contain
 // non-ASCII, e.g. local recordings named in Korean); containment is re-checked after resolve
 const ID_RE = /^(?!\.{1,2}$)[^\\\/:*?"<>|\u0000-\u001f]{1,160}$/u;
-const REL_RE = /^(overview\.peaks|probs\.bin|cache\/window_[0-9_]{3,64}\.wav|clips\/[A-Za-z0-9_-]{1,64}\/(source\.mp4|orig\.wav|vocals\.wav|orig\.peaks|vocals\.peaks))$/;
+const REL_RE =
+  /^(overview\.peaks|probs\.bin|cache\/window_[0-9_]{3,64}\.wav|clips\/[A-Za-z0-9_-]{1,64}\/(source\.mp4|orig\.wav|vocals\.wav|orig\.peaks|vocals\.peaks)|video\/views\/[A-Za-z0-9_-]{1,128}\.mp4|stems\/[A-Za-z0-9_-]{1,64}\/(orig|vocals)\.(wav|peaks))$/;
 
 const MIME: Record<string, string> = {
   mp4: "video/mp4",

@@ -7,16 +7,22 @@ import type { Mute } from "@ipc/generated/Mute";
 import { useWs } from "@/state/ws";
 import { ask, useApp } from "@/state/app";
 import { projectUi, setProjectUi, editSong } from "@/state/projects";
-import { songProgress, useJobs } from "@/state/jobs";
+import { runningJobs, songProgress, startJob, useJobs } from "@/state/jobs";
+import { useVideo } from "@/state/video";
 import { player, usePlayer, LISTEN_KEY, LISTEN_LABEL, type ListenMode } from "@/audio/player";
-import { clipCovered, hostClip, muteOutsideClip, mutePosition, previewMutes, singOverlap, songNumbers, songTitle, unconfirmedMutes, videoState } from "@/lib/song";
+import { mutePosition, previewMutes, singOverlap, songNumbers, songTitle, unconfirmedMutes } from "@/lib/song";
+import { marginOf, partsIn, songVideo, spanFor, unseparated, vodGone } from "@/lib/video";
 import { loadPeaks, mediaUrl, type Peaks } from "@/lib/peaks";
 import { fmtTime } from "@/lib/format";
 import { fetchSongs } from "@/lib/pipeline";
 import { addMute, deleteMute, deleteSuggestions, endSongHere, isSuggestion, splitMute, updateMute } from "@/lib/edits";
 import { DetailTimeline, selectMute } from "./DetailTimeline";
 import { useMapData } from "./OverviewMap";
-import { Progress, VideoOutside } from "@/components/common";
+import { Progress } from "@/components/common";
+import { VideoPane } from "@/components/VideoPane";
+
+/** stems.ensure asked once per song and unseparated state (no loop when it can't separate) */
+const askedEnsure = new Set<string>();
 
 const MODE_TIP = [
   "방송 그대로 (기준)",
@@ -130,18 +136,37 @@ export function TalkEditor({ p }: { p: Project }) {
   const playing = usePlayer((s) => s.playing);
   const jobs = useJobs();
   const { probs } = useMapData(p);
+  const vs = useVideo((x) => x.byProject[p.id]);
   const s = p.songs.find((x) => x.id === ws.selected);
-  const clip = s ? hostClip(p, s) : null;
-  const vs = s ? videoState(p, s) : "none";
+  const total = p.audio?.duration || p.source?.duration || 0;
+  const margin = marginOf(p);
+  // the editor's range: song ± margin (14.6); stems follow the separated spans (14.8)
+  const lo = s ? Math.max(0, s.start - margin) : 0;
+  const hi = s ? (total > 0 ? Math.min(total, s.end + margin) : s.end + margin) : 0;
+  const span = s ? spanFor(p, s.start, s.end) : null;
+  const sv = s ? songVideo(p, vs, s) : null;
+  const unsep = s ? unseparated(p, vs, lo, hi) : [];
+  const unsepKey = unsep.map(([a, b]) => `${a.toFixed(1)}-${b.toFixed(1)}`).join(",");
+  const separating = runningJobs(jobs, p.id).some((j) => j.kind === "stems.ensure" || j.kind === "clips.fetch") || jobs.waiting.some((w) => w.projectId === p.id && (w.method === "stems.ensure" || w.method === "clips.fetch"));
   const muteOn = s ? s.mute_enabled : true;
   const [peaks, setPeaks] = useState<{ orig: Peaks | null; voc: Peaks | null }>({ orig: null, voc: null });
-  const videoRef = useRef<HTMLVideoElement>(null);
   const [notesOpen, setNotesOpen] = useState(false);
+
+  // video arrived but isn't separated (new song, widened boundary, cleaned stems): separate it
+  // now — only the new parts (stems.ensure, 14.8); once per state so a failure doesn't loop
+  useEffect(() => {
+    if (!s || !s.enabled || !unsep.length || separating) return;
+    const key = `${p.id}|${s.id}|${unsepKey}`;
+    if (askedEnsure.has(key)) return;
+    askedEnsure.add(key);
+    void startJob("stems.ensure", { id: p.id, song_ids: [s.id] }, { label: "목소리 나누기" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.id, s?.id, unsepKey, separating]);
 
   // pick a song with video when entering with nothing useful selected
   useEffect(() => {
     if (s && s.enabled) return;
-    const withVideo = [...p.songs].filter((x) => x.enabled && hostClip(p, x)?.stems).sort((a, b) => a.start - b.start);
+    const withVideo = [...p.songs].filter((x) => x.enabled && spanFor(p, x.start, x.end)).sort((a, b) => a.start - b.start);
     const first = withVideo.find((x) => unconfirmedMutes(x) > 0) ?? withVideo[0];
     if (first) useWs.setState({ selected: first.id, selectedMute: null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -158,39 +183,28 @@ export function TalkEditor({ p }: { p: Project }) {
   }, []);
 
   // stems window + peaks
+  const audioOk = !!p.audio && !p.audio.dropped;
   useEffect(() => {
-    if (!s || !clip?.stems || !clip.video) return;
-    const cov = clipCovered(clip)!;
-    // song ± margins (+ loop padding) — bounded so long merged clips stay small in memory
+    if (!s || !span) return;
+    // song ± margins (+ loop padding) of the span; outside the span the original plays (fallback)
     const pad = useApp.getState().settings.loopPad + 2;
-    const a = Math.max(cov[0], s.start - p.settings.margin_before - pad);
-    const b = Math.min(cov[1], s.end + p.settings.margin_after + pad);
-    void player.useStems(p.id, clip.id, clip.video.vod_start + clip.offset, clip.stems.frames, a, b, clip.stems.model + clip.stems.elapsed_sec);
+    const a = Math.max(0, lo - pad);
+    const b = hi + pad;
+    void player.useStems(p.id, span.dir, span.start, span.frames, a, b, span.id, audioOk ? total : 0);
     const now = player.now();
     if (now < a || now > b) player.seek(Math.max(a, s.start - 2));
     let alive = true;
-    const bust = String(clip.stems.elapsed_sec);
-    void Promise.all([loadPeaks(mediaUrl(p.id, `clips/${clip.id}/orig.peaks`, bust)).catch(() => null), loadPeaks(mediaUrl(p.id, `clips/${clip.id}/vocals.peaks`, bust)).catch(() => null)]).then(([orig, voc]) => alive && setPeaks({ orig, voc }));
+    void Promise.all([loadPeaks(mediaUrl(p.id, `${span.dir}/orig.peaks`, span.id)).catch(() => null), loadPeaks(mediaUrl(p.id, `${span.dir}/vocals.peaks`, span.id)).catch(() => null)]).then(([orig, voc]) => alive && setPeaks({ orig, voc }));
     return () => {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [s?.id, s?.start, s?.end, clip?.id, clip?.stems?.elapsed_sec]);
+  }, [s?.id, lo, hi, span?.id, audioOk]);
 
   // mutes → worklet: what the export applies (confirmed only) + the auditioned suggestion (#4)
   useEffect(() => {
     if (s) player.setMutes(previewMutes(s, ws.selectedMute, ws.audition), muteOn);
   }, [s, muteOn, ws.selectedMute, ws.audition]);
-
-  // video
-  useEffect(() => {
-    if (!clip?.video) {
-      player.attachVideo(null);
-      return;
-    }
-    player.attachVideo(videoRef.current, clip.video.vod_start + clip.offset, clip.video.duration);
-    return () => player.attachVideo(null);
-  }, [clip?.id, clip?.video, clip?.offset]);
 
   // "listened" (export pre-check): result mode played for a while on this song
   const listenAcc = useRef(0);
@@ -208,7 +222,7 @@ export function TalkEditor({ p }: { p: Project }) {
 
   // 조용한 반주: exact accompaniment level inside each mute (computed in the worklet once loaded)
   const [quiet, setQuiet] = useState<Set<string>>(new Set());
-  const stemsReady = !!stems && stems.progress >= 1 && !stems.error && stems.clipId === clip?.id;
+  const stemsReady = !!stems && stems.progress >= 1 && !stems.error && stems.dir === span?.dir;
   const muteKey = s ? s.mutes.map((m) => `${m.id}:${m.start.toFixed(2)}:${m.end.toFixed(2)}`).join("|") : "";
   useEffect(() => {
     if (!s || !stemsReady) return;
@@ -231,12 +245,13 @@ export function TalkEditor({ p }: { p: Project }) {
       const w: string[] = [];
       if (singOverlap(m, probs) >= 0.3) w.push("노래 겹침");
       if (quiet.has(m.id) && m.start < s.end && m.end > s.start) w.push("조용한 반주");
-      if (muteOutsideClip(m, clip)) w.push("받은 영상 밖");
+      // inside the song (what is exported) but without video on disk
+      if (partsIn(vs, Math.max(m.start, s.start), Math.min(m.end, s.end)).length) w.push("받은 영상 밖");
       if (m.end <= s.start || m.start >= s.end) w.push("곡 밖");
       out.set(m.id, w);
     }
     return out;
-  }, [s, probs, clip, quiet]);
+  }, [s, probs, vs, quiet]);
 
   if (!s) {
     return (
@@ -248,31 +263,42 @@ export function TalkEditor({ p }: { p: Project }) {
   }
   const prog = songProgress(jobs, p.id).get(s.id);
   const n = songNumbers(p).get(s.id);
-  if (!clip?.stems || !clip.video) {
+  if (!span) {
+    const fetching = sv?.pending;
     return (
       <div className="talk-empty">
         <div className="te-title">
           {n ? String(n).padStart(2, "0") + " " : ""}
           {songTitle(s)}
         </div>
-        {prog ? (
+        {prog || (unsep.length > 0 && separating) ? (
           <div className="te-progress">
             <div className="row">
-              <Download size={15} /> {prog.label}
-              {prog.fraction !== null ? ` · ${Math.floor(prog.fraction * 100)}%` : ""}
+              <Download size={15} /> {prog?.label ?? "목소리와 반주 나누는 중"}
+              {prog?.fraction != null ? ` · ${Math.floor(prog.fraction * 100)}%` : ""}
             </div>
-            <Progress value={prog.fraction} />
-            <div className="faint">{prog.waiting ? "앞 작업이 끝나면 시작해요. 다른 곡을 먼저 확인해도 돼요." : "목소리와 반주를 나누는 데 GPU에서 5분 곡 약 8초 걸려요. 다른 곡을 먼저 확인해도 돼요."}</div>
+            <Progress value={prog?.fraction ?? null} />
+            <div className="faint">{prog?.waiting ? "앞 작업이 끝나면 시작해요. 다른 곡을 먼저 확인해도 돼요." : "목소리와 반주를 나누는 데 GPU에서 5분 곡 약 8초 걸려요. 다른 곡을 먼저 확인해도 돼요."}</div>
           </div>
-        ) : vs === "refetch" ? (
-          <>
-            <p>곡 범위를 앞뒤 여유({p.settings.margin_before}초) 밖으로 늘려서 이 곡의 영상을 다시 받아야 해요 (약 10초).</p>
-            <button className="btn primary" onClick={() => void fetchSongs(p.id, [s.id], "영상 다시 받기")}>
-              <Zap size={14} /> 지금 받기 <kbd>Ctrl+Shift+E</kbd>
-            </button>
-          </>
+        ) : fetching ? (
+          <div className="te-progress">
+            <div className="row">
+              <Download size={15} /> {sv?.label}
+            </div>
+            <Progress value={sv?.fraction ?? null} />
+            <div className="faint">영상을 받으면 목소리와 반주를 나누고 멘트를 찾아요. 다른 곡을 먼저 확인해도 돼요.</div>
+          </div>
+        ) : unsep.length > 0 ? (
+          <div className="te-progress">
+            <div className="row">
+              <Download size={15} /> 목소리와 반주를 나눌 준비 중이에요
+            </div>
+            <Progress value={null} />
+          </div>
         ) : !s.enabled ? (
           <p className="muted">제외한 곡이에요. 곡 검수 화면에서 복원할 수 있어요.</p>
+        ) : vodGone(p) ? (
+          <p className="muted">다시보기를 더 이상 열 수 없어서 이 곡의 영상을 받을 수 없어요. 받아 둔 영상이 있는 곡은 계속 다듬을 수 있어요.</p>
         ) : (
           <>
             <p>이 곡의 영상을 아직 받지 않았어요. 멘트 다듬기는 영상을 받은 뒤에 할 수 있어요.</p>
@@ -305,22 +331,20 @@ export function TalkEditor({ p }: { p: Project }) {
     if (r === "delete") void deleteSuggestions(p.id, suggestSongs.map((x) => x.id), "모든 곡의 제안 지우기");
   };
   const selWarn = sel ? warnings.get(sel.id) ?? [] : [];
-  const loadingStems = stems && stems.clipId === clip.id && stems.progress < 1 && !stems.error;
+  const loadingStems = stems && stems.dir === span.dir && stems.progress < 1 && !stems.error;
 
   return (
     <div className="talk">
       <div className="talk-top">
         <div className="talk-video">
-          <div className="video-box">
-            <video ref={videoRef} src={mediaUrl(p.id, `clips/${clip.id}/source.mp4`)} muted playsInline preload="auto" />
-            <VideoOutside />
+          <VideoPane p={p}>
             {loadingStems && (
               <div className="video-loading">
                 <span className="spinner" /> 소리 불러오는 중 {Math.floor((stems?.progress ?? 0) * 100)}%
               </div>
             )}
             {stems?.error && <div className="video-loading err">소리를 불러오지 못했어요 · {stems.error}</div>}
-          </div>
+          </VideoPane>
         </div>
         <div className="mute-panel">
           <div className="mp-head">
@@ -411,7 +435,7 @@ export function TalkEditor({ p }: { p: Project }) {
         </span>
       </div>
 
-      <DetailTimeline p={p} s={s} clip={clip} orig={peaks.orig} voc={peaks.voc} probs={probs} muteOn={muteOn} />
+      <DetailTimeline p={p} s={s} bounds={[lo, hi]} origin={span.start} orig={peaks.orig} voc={peaks.voc} probs={probs} muteOn={muteOn} />
 
       <div className="mute-inspector">
         {sel ? (

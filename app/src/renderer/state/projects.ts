@@ -15,6 +15,8 @@ import { call, EngineError } from "@/lib/rpc";
 import { friendly } from "@/lib/errors";
 import { toast } from "./app";
 import { useWs } from "./ws";
+import { len, separatedIn } from "@/lib/video";
+import { loadVideo } from "./video";
 
 /** App-only per-project state (not part of the engine's project.json). */
 export interface ProjectUi {
@@ -108,8 +110,10 @@ function summarize(p: Project): ProjectSummary {
     updated_at: p.updated_at,
     unreviewed: enabled.filter((s) => !s.reviewed).length,
     unconfirmed_mutes: enabled.reduce((n, s) => n + s.mutes.filter((m) => !m.confirmed).length, 0),
-    clips_ready: enabled.filter((s) => p.clips.some((c) => c.id === s.clip_id && c.video && c.stems)).length,
-    has_audio: !!p.audio,
+    clips_ready: enabled.filter((s) => len(separatedIn(p, s.start, s.end)) >= s.end - s.start - 0.5).length,
+    pinned: p.pinned,
+    vod: p.vod ?? undefined,
+    has_audio: !!p.audio && !p.audio.dropped,
     has_detection: !!p.detection,
     last_error: p.last_error,
   };
@@ -154,6 +158,7 @@ export async function refreshList() {
 export async function loadProject(id: string): Promise<Project> {
   const p = await call("project.get", { id });
   setEngine(p);
+  void loadVideo(id);
   await loadUi(id);
   return useProjects.getState().projects[id] ?? p;
 }

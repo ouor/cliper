@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef } from "react";
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Circle, Download, Plus, RefreshCw, Scissors, Search, Upload } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, ChevronDown, ChevronRight, Circle, Download, Plus, RefreshCw, Scissors, Search, Upload } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
 import { useWs, type SortMode } from "@/state/ws";
 import { useApp } from "@/state/app";
 import { songProgress, useJobs } from "@/state/jobs";
-import { reviewStatus, songLabels, songNumbers, songTitle, unconfirmedMutes, videoState } from "@/lib/song";
+import { reviewStatus, songLabels, songNumbers, songTitle, unconfirmedMutes } from "@/lib/song";
+import { songVideo, spanFor, type SongVideo } from "@/lib/video";
+import { useVideo } from "@/state/video";
 import { fmtTime } from "@/lib/format";
 import { player } from "@/audio/player";
 import { addSong } from "@/lib/edits";
@@ -21,33 +23,33 @@ export function sortSongs(p: Project, mode: SortMode, search: string): Song[] {
   return list;
 }
 
-function StatusIcon({ p, s, prog, talk }: { p: Project; s: Song; prog?: { label: string; fraction: number | null; waiting?: boolean }; talk: boolean }) {
+function StatusIcon({ s, sv, ready, prog, talk }: { s: Song; sv: SongVideo; ready: boolean; prog?: { label: string; fraction: number | null; waiting?: boolean }; talk: boolean }) {
   const st = reviewStatus(s);
-  const vs = videoState(p, s);
-  if (prog && !prog.waiting) return <Download size={14} className="si si-progress" aria-label="받는 중" />;
-  if (st !== "excluded" && vs === "refetch") return <RefreshCw size={14} className="si si-warn" aria-label="영상 다시 받기 필요" />;
-  if (talk && vs === "ready" && unconfirmedMutes(s) > 0) return <Scissors size={14} className="si si-suggest" aria-label="멘트 확인 대기" />;
+  if ((prog && !prog.waiting) || (st !== "excluded" && sv.pending)) return <Download size={14} className="si si-progress" aria-label="받는 중" />;
+  if (st !== "excluded" && sv.state === "gone") return <Ban size={14} className="si si-warn" aria-label="영상 부족 · 다시보기 없음" />;
+  if (st !== "excluded" && (sv.state === "partial" || sv.state === "failed")) return <RefreshCw size={14} className="si si-warn" aria-label="영상 부족" />;
+  if (talk && ready && unconfirmedMutes(s) > 0) return <Scissors size={14} className="si si-suggest" aria-label="멘트 확인 대기" />;
   if (st !== "excluded" && s.export && !talk) return <Upload size={14} className="si si-ok" aria-label="내보냄" />;
   if (st === "reviewed") return <CheckCircle2 size={14} className="si si-ok" aria-label="확인" />;
   if (st === "doubt") return <AlertTriangle size={14} className="si si-warn" aria-label="확인 필요" />;
   return <Circle size={9} className="si si-dot" aria-label="미확인" />;
 }
 
-function Row({ p, s, n, selected, multi, prog, talk, shortSec }: { p: Project; s: Song; n?: number; selected: boolean; multi: boolean; prog?: { label: string; fraction: number | null; waiting?: boolean }; talk: boolean; shortSec: number }) {
+function Row({ p, s, sv, n, selected, multi, prog, talk, shortSec }: { p: Project; s: Song; sv: SongVideo; n?: number; selected: boolean; multi: boolean; prog?: { label: string; fraction: number | null; waiting?: boolean }; talk: boolean; shortSec: number }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (selected) ref.current?.scrollIntoView({ block: "nearest" });
   }, [selected]);
   const st = reviewStatus(s);
-  const vs = videoState(p, s);
+  // the talk editor works where the song has separated audio
+  const ready = !!spanFor(p, s.start, s.end);
   const labels = songLabels(p, s, shortSec).filter((l) => !(talk && l.kind === "plain"));
   const unconf = unconfirmedMutes(s);
   const muteOff = !s.mute_enabled;
   const statusText = (() => {
     if (st === "excluded") return "제외됨";
     const parts: string[] = [st === "reviewed" ? "확인" : "미확인"];
-    if (vs === "ready") parts.push("영상 ✓");
-    if (vs === "refetch") parts.push("다시 받기 필요");
+    if (sv.label) parts.push(sv.label);
     if (s.export) parts.push("내보냄");
     return parts.join(" · ");
   })();
@@ -66,7 +68,7 @@ function Row({ p, s, n, selected, multi, prog, talk, shortSec }: { p: Project; s
       }}
       onDoubleClick={() => void player.play(Math.max(0, s.start - useApp.getState().settings.listenPreroll))}
     >
-      <StatusIcon p={p} s={s} prog={prog} talk={talk} />
+      <StatusIcon s={s} sv={sv} ready={ready} prog={prog} talk={talk} />
       <span className="sr-num mono">{n ? String(n).padStart(2, "0") : "–"}</span>
       <div className="sr-main">
         <div className="sr-line1">
@@ -89,7 +91,7 @@ function Row({ p, s, n, selected, multi, prog, talk, shortSec }: { p: Project; s
             </span>
           ) : talk ? (
             <span className="sr-status">
-              {vs === "ready" ? (
+              {ready ? (
                 muteOff ? (
                   <span className="tag">멘트 지우기 끔</span>
                 ) : s.mutes.length === 0 ? (
@@ -99,8 +101,8 @@ function Row({ p, s, n, selected, multi, prog, talk, shortSec }: { p: Project; s
                 ) : (
                   <span className="tag mute">멘트 {s.mutes.length} ✓</span>
                 )
-              ) : vs === "refetch" ? (
-                <span className="tag doubt">다시 받기 필요</span>
+              ) : sv.label ? (
+                <span className={sv.state === "fetching" ? "faint" : "tag doubt"}>{sv.label}</span>
               ) : (
                 <span className="faint">영상 받기 전</span>
               )}
@@ -123,6 +125,7 @@ function Row({ p, s, n, selected, multi, prog, talk, shortSec }: { p: Project; s
 export function SongList({ p, talk = false }: { p: Project; talk?: boolean }) {
   const ws = useWs();
   const jobs = useJobs();
+  const vsAll = useVideo((x) => x.byProject[p.id]);
   const shortSec = useApp((s) => s.settings.shortSec);
   const searchRef = useRef<HTMLInputElement>(null);
   const nums = useMemo(() => songNumbers(p), [p]);
@@ -183,7 +186,7 @@ export function SongList({ p, talk = false }: { p: Project; talk?: boolean }) {
       </div>
       <div className="sl-body" role="listbox" aria-label="곡 목록">
         {active.map((s) => (
-          <Row key={s.id} p={p} s={s} n={nums.get(s.id)} selected={ws.selected === s.id} multi={ws.multi.includes(s.id) && ws.multi.length > 1} prog={prog.get(s.id)} talk={talk} shortSec={shortSec} />
+          <Row key={s.id} p={p} s={s} sv={songVideo(p, vsAll, s)} n={nums.get(s.id)} selected={ws.selected === s.id} multi={ws.multi.includes(s.id) && ws.multi.length > 1} prog={prog.get(s.id)} talk={talk} shortSec={shortSec} />
         ))}
         {active.length === 0 && p.detection && <div className="sl-empty">{ws.search ? "검색 결과가 없어요." : "곡이 없어요."}</div>}
         {excluded.length > 0 && (
@@ -192,7 +195,7 @@ export function SongList({ p, talk = false }: { p: Project; talk?: boolean }) {
               {ws.showExcluded ? <ChevronDown size={14} /> : <ChevronRight size={14} />} 제외됨 ({excluded.length})
               <span className="faint">· X로 복원</span>
             </button>
-            {ws.showExcluded && excluded.map((s) => <Row key={s.id} p={p} s={s} selected={ws.selected === s.id} multi={false} talk={talk} shortSec={shortSec} />)}
+            {ws.showExcluded && excluded.map((s) => <Row key={s.id} p={p} s={s} sv={songVideo(p, vsAll, s)} selected={ws.selected === s.id} multi={false} talk={talk} shortSec={shortSec} />)}
           </>
         )}
       </div>

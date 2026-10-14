@@ -34,10 +34,16 @@ import type { Song } from "./generated/Song";
 import type { StemsResult } from "./generated/StemsResult";
 import type { SystemInfo } from "./generated/SystemInfo";
 
-// The engine speaks protocol 3 (segment-based video, docs/ipc.md "What changed
-// in protocol 3"). Bump this to 3 once the UI uses video.* / stems.ensure instead
-// of Project.clips; until then the app shows its version-mismatch notice.
-export const PROTOCOL_VERSION = 2;
+// Protocol 3: segment-based video (docs/ipc.md "What changed in protocol 3"). The UI uses
+// video.* / stems.ensure / project.stems; Project.clips is always [].
+export const PROTOCOL_VERSION = 3;
+
+/** `storage.usage {}`: every project + free bytes on the projects drive. */
+export interface StorageAll {
+  projects: StorageUsage[];
+  free: number;
+  root: string;
+}
 
 /** Returned by every long-running method; follow it via job.* notifications. */
 export interface JobHandle {
@@ -130,8 +136,7 @@ export interface Methods {
    *  and aren't separated yet; default every enabled song. */
   "stems.ensure": { params: { id: string; song_ids?: string[] | null; ranges?: [number, number][] | null }; result: JobHandle };
   /** Bytes by kind for one project, or { projects, free, root } for all. */
-  "storage.usage": { params: { id: string }; result: StorageUsage };
-  /** Cleanup: unused < stems < video < audio. Decisions always stay. PINNED unless force. */
+  "storage.usage": { params: { id: string }; result: StorageUsage };  /** Cleanup: unused < stems < video < audio. Decisions always stay. PINNED unless force. */
   "media.drop": { params: { id: string; level: DropLevel; force?: boolean }; result: { project: Project; freed_bytes: number } };
   "project.set_pinned": { params: { id: string; pinned: boolean }; result: Project };
   /** Is the replay still online? (call in the background when a project opens) */

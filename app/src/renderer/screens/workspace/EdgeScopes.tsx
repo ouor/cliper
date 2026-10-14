@@ -6,7 +6,7 @@ import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
 import { begin, colors, drawCurve, drawWave, useCanvasSize, useThemeVersion } from "@/canvas/draw";
 import { loadPeaks, mediaUrl, type Peaks, type Probs } from "@/lib/peaks";
-import { hostClip } from "@/lib/song";
+import { spanFor } from "@/lib/video";
 import { fmtTime } from "@/lib/format";
 import { player } from "@/audio/player";
 import { setEdge } from "@/lib/edits";
@@ -111,14 +111,15 @@ function Scope({ p, s, edge, peaks, origin, probs }: { p: Project; s: Song; edge
 }
 
 export function EdgeScopes({ p, s, probs }: { p: Project; s: Song; probs: Probs | null }) {
-  const clip = hostClip(p, s);
+  // the stem span's 100/s peaks when it covers both edges (± 8 s), else the whole-VOD 20/s peaks
+  const sp = spanFor(p, s.start, s.end);
+  const span = sp && sp.start <= s.start - 8 && sp.end >= s.end + 8 ? sp : null;
   const [peaks, setPeaks] = useState<{ data: Peaks; origin: number } | null>(null);
-  const key = clip?.stems ? `${clip.id}|${clip.stems.elapsed_sec}` : p.detection ? "overview" : "";
+  const key = span ? span.id : p.detection ? "overview" : "";
   useEffect(() => {
     let alive = true;
-    if (clip?.stems && clip.video) {
-      const origin = clip.video.vod_start + clip.offset;
-      void loadPeaks(mediaUrl(p.id, `clips/${clip.id}/orig.peaks`, String(clip.stems.elapsed_sec))).then((d) => alive && setPeaks({ data: d, origin })).catch(() => {});
+    if (span) {
+      void loadPeaks(mediaUrl(p.id, `${span.dir}/orig.peaks`, span.id)).then((d) => alive && setPeaks({ data: d, origin: span.start })).catch(() => {});
     } else if (p.detection) {
       void loadPeaks(mediaUrl(p.id, "overview.peaks", `${p.audio?.fetched_bytes ?? 0}|${p.audio?.elapsed_sec ?? 0}`)).then((d) => alive && setPeaks({ data: d, origin: 0 })).catch(() => {});
     }

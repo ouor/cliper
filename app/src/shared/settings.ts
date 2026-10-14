@@ -29,6 +29,8 @@ export interface AppSettings {
   // 영상 받기
   videoHeight: number | null; // 이 높이 이하 중 최고 (null = 최고 화질)
   marginSec: number;
+  /** fetch the missing video automatically 3 s after widening a song that has video (14.4) */
+  autoTopUp: boolean;
   onlyReviewedFetch: boolean;
 
   // 멘트 지우기
@@ -80,6 +82,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showLanes: { music: false, speech: false, sing: false },
   videoHeight: 1080,
   marginSec: 30,
+  autoTopUp: true,
   onlyReviewedFetch: true,
   suggestMutes: true,
   muteFadeIn: 0.08,

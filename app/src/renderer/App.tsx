@@ -6,6 +6,7 @@ import { PROTOCOL_VERSION } from "@ipc/protocol";
 import { applyTheme, ask, go, openSettings, toast, useApp } from "./state/app";
 import { applyChanged, loadProject, refreshList } from "./state/projects";
 import { markEngineLost, reconcileJobs, takeInterrupted, useJobs, wireJobs } from "./state/jobs";
+import { loadAllVideo, wireVideo } from "./state/video";
 import { onNotification } from "./lib/rpc";
 import { comboFromEvent, keysFor } from "./lib/keys";
 import { DialogHost, isTyping, Toasts } from "./components/common";
@@ -32,6 +33,7 @@ async function boot() {
 
   await takeInterrupted(); // once per app start (M3)
   wireJobs();
+  wireVideo();
   wireAddon();
   onNotification("project.changed", (p) => applyChanged(p.project));
 
@@ -45,6 +47,7 @@ async function boot() {
       if (wasReady) toast("처리 엔진을 다시 시작했어요. 저장된 작업은 그대로예요.", { kind: "ok" });
       wasReady = true;
       void reconcileJobs();
+      void loadAllVideo();
       void onEngineReady();
     } else if (wasReady) {
       // any way out of "ready" (crash, user restart, root/device change) ends the running jobs

@@ -8,6 +8,8 @@ export class EngineError extends Error {
     public engineCode: string,
     public rpcCode: number,
     public method: string,
+    /** details next to data.code: VIDEO_MISSING ranges / songs, NO_SPACE need / free, … */
+    public data?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -16,7 +18,7 @@ export class EngineError extends Error {
 export async function call<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
   const r = await window.cliper.call(method, params);
   if (r.ok) return r.result as ResultOf<M>;
-  throw new EngineError(r.error.message, r.error.engineCode, r.error.code, method);
+  throw new EngineError(r.error.message, r.error.engineCode, r.error.code, method, r.error.data);
 }
 
 type Handler = (method: NotificationMethod, params: unknown) => void;
