@@ -150,12 +150,14 @@ mod tests {
             reviewed: true,
             note: "a, \"b\"".into(),
             confidence: None,
-            clip_id: None,
             mutes: vec![],
             mute_enabled: true,
             fade_in: None,
             fade_out: None,
             export: None,
+            video_wanted: false,
+            listened: false,
+            extra: Default::default(),
         });
         let c = render(&p, ReportFormat::Chapters, false);
         assert_eq!(c, "00:00:00 시작\n01:12:30 밤편지 - 아이유\n");

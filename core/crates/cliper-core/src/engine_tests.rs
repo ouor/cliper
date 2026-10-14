@@ -4,7 +4,7 @@
 //! missing.
 
 use super::*;
-use crate::project::{Clip, Origin};
+use crate::project::Origin;
 
 fn temp_root(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("cliper-test-{tag}-{}-{}", std::process::id(), project::new_id("")));
@@ -15,7 +15,7 @@ fn temp_root(tag: &str) -> PathBuf {
 fn engine(tag: &str) -> (Arc<Engine>, tokio::sync::mpsc::UnboundedReceiver<Event>, PathBuf) {
     let root = temp_root(tag);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let cfg = EngineConfig { projects_root: root.clone(), models_dir: root.join("models"), prefer_cpu: true, keep_awake: Some(false) };
+    let cfg = EngineConfig { projects_root: root.clone(), models_dir: root.join("models"), prefer_cpu: true, keep_awake: Some(false), prefs_path: None };
     (Engine::new(cfg, tx), rx, root)
 }
 
@@ -31,12 +31,14 @@ fn song(start: f64, end: f64) -> Song {
         reviewed: false,
         note: String::new(),
         confidence: None,
-        clip_id: None,
         mutes: Vec::new(),
         mute_enabled: true,
         fade_in: None,
         fade_out: None,
         export: None,
+        video_wanted: false,
+        listened: false,
+        extra: Default::default(),
     }
 }
 
@@ -174,6 +176,7 @@ fn audio_state(file: &str, frames: Vec<u32>) -> project::AudioState {
         elapsed_sec: 0.0,
         dropped: false,
         track: None,
+        rendition: None,
     }
 }
 
@@ -211,6 +214,7 @@ fn fake_span(eng: &Arc<Engine>, pid: &str, id: &str, start: f64, secs: f64) -> p
         dir: format!("stems/{id}"),
         model: "m".into(),
         device: runtime::Device::Cpu,
+        version: project::STEM_VERSION,
         created_at: project::now(),
     }
 }
@@ -291,7 +295,6 @@ async fn video_requests_need_audio_and_respect_gone_vods() {
     assert_eq!(eng.video_fetch("t3", FetchArgs { ranges: Some(vec![(0.0, 10.0)]), ..Default::default() }).unwrap_err().code, "VOD_GONE");
     let r = crate::ipc::server::dispatch(&eng, "video.status", json!({ "id": "t3" })).await.unwrap();
     assert_eq!(r["ranges"], json!([]));
-    assert_eq!(crate::ipc::server::dispatch(&eng, "clip.extend", json!({})).await.unwrap_err().code, "INVALID_PARAMS");
     let n = crate::ipc::server::dispatch(&eng, "system.net_stats", serde_json::Value::Null).await.unwrap();
     assert_eq!(n["limit"], json!(4));
     let _ = std::fs::remove_dir_all(root);
@@ -307,65 +310,101 @@ async fn clip_projects_are_adopted_without_downloading() {
         wav::write_f32(&dir.join("clips/c1").join(f), 48000, 2, &vec![0.0; 48000 * 2 * 3]).unwrap();
     }
     let mut p = Project::new("old1", "x");
-    p.schema = "cliper/project@1".into();
     p.source = Some(source_info(crate::source::Container::Fmp4));
     p.audio = Some(audio_state("audio.aac", vec![375; 10]));
     let mut s = song(17.0, 19.0);
     s.id = "s1".into();
-    s.clip_id = Some("c1".into());
     p.songs.push(s);
-    p.clips.push(Clip {
-        id: "c1".into(),
-        start: 15.0,
-        end: 21.0,
-        video: Some(crate::hls::video_fetch::VideoClip {
-            path: PathBuf::from("C:/somewhere/else/source.mp4"),
-            variant: 0,
-            resolution: "1920x1080".into(),
-            segments: crate::hls::m3u8::SegRange { first: 1, last: 3, seg_start: 8.0, trim: 0.0 },
-            vod_start: 8.0,
-            duration: 16.0,
-            bytes: 3000,
-            skipped_variants: Vec::new(),
-        }),
-        offset: 0.0123,
-        stems: Some(crate::stems::Stems {
-            orig: PathBuf::from("C:/somewhere/else/orig.wav"),
-            vocals: PathBuf::from("C:/somewhere/else/vocals.wav"),
-            sample_rate: 48000,
-            frames: 48000 * 3,
-            model: "m".into(),
-            device: runtime::Device::Cuda,
-            elapsed_sec: 1.0,
-        }),
-        talk: vec![(17.5, 18.0)],
-        song_ids: vec!["s1".into()],
-        pinned: false,
-        alignment: None,
-    });
-    std::fs::write(dir.join("project.json"), serde_json::to_vec(&p).unwrap()).unwrap();
+    // the @1 file: clips, clip_id, and a field this engine doesn't know
+    let mut v = serde_json::to_value(&p).unwrap();
+    v["schema"] = json!("cliper/project@1");
+    v.as_object_mut().unwrap().remove("uid");
+    v["songs"][0]["clip_id"] = json!("c1");
+    v["songs"][0]["future_song_field"] = json!(7);
+    v["future_field"] = json!({ "keep": true });
+    v["clips"] = json!([{
+        "id": "c1", "start": 15.0, "end": 21.0,
+        "video": { "path": "C:/somewhere/else/source.mp4", "variant": 0, "resolution": "1920x1080",
+                   "segments": { "first": 1, "last": 3, "seg_start": 8.0, "trim": 0.0 },
+                   "vod_start": 8.0, "duration": 16.0, "bytes": 3000, "skipped_variants": [] },
+        "offset": 0.0123,
+        "stems": { "orig": "C:/somewhere/else/orig.wav", "vocals": "C:/somewhere/else/vocals.wav", "sample_rate": 48000,
+                   "frames": 144000, "model": "m", "device": "cuda", "elapsed_sec": 1.0 },
+        "talk": [[17.5, 18.0]], "song_ids": ["s1"], "pinned": false, "alignment": null
+    }]);
+    let original = serde_json::to_vec(&v).unwrap();
+    std::fs::write(dir.join("project.json"), &original).unwrap();
 
     let q = eng.get("old1").unwrap();
     assert_eq!(q.schema, project::SCHEMA);
-    assert!(q.clips.is_empty() && q.songs[0].clip_id.is_none());
+    assert!(!q.uid.is_empty());
     assert_eq!(q.stems.len(), 1);
     let sp = &q.stems[0];
     assert_eq!(sp.dir, "clips/c1");
+    assert_eq!(sp.version, 0, "adopted spans are checked again");
     assert_eq!((sp.start * 48000.0).round() as i64, ((8.0123f64) * 48000.0).round() as i64);
     assert_eq!(sp.frames, 48000 * 3);
     assert_eq!(q.talk, vec![(17.5, 18.0)]);
     assert_eq!(q.talk_scanned, vec![(8.0123, 24.0123)]);
+    // A-2: the original is kept, unknown fields survive, protocol-2 leftovers go
+    assert_eq!(std::fs::read(dir.join("project.json.bak-@1")).unwrap(), original);
+    let saved: Value = serde_json::from_slice(&std::fs::read(dir.join("project.json")).unwrap()).unwrap();
+    assert_eq!(saved["future_field"], json!({ "keep": true }));
+    assert_eq!(saved["songs"][0]["future_song_field"], json!(7));
+    assert!(saved.get("clips").is_none() && saved["songs"][0].get("clip_id").is_none());
     // the clip's two segments count as video on disk; nothing is queued
     let st = eng.video_state("old1").unwrap();
     assert_eq!(st.have_sec, 16.0);
     assert!(st.requests.is_empty());
     assert_eq!(st.ranges[0].height, Some(1080));
     // saved: loading again doesn't migrate twice
-    let idx = vstore::VideoIndex::load(&dir);
+    let idx = vstore::VideoIndex::load(&dir).unwrap();
     assert_eq!(idx.legacy.len(), 1);
     assert_eq!((idx.legacy[0].first, idx.legacy[0].last, idx.legacy[0].file.as_str()), (1, 3, "clips/c1/source.mp4"));
-    let _ = eng.get("old1").unwrap();
-    assert_eq!(vstore::VideoIndex::load(&dir).legacy.len(), 1);
+    let uid = q.uid.clone();
+    eng.forget_ps("old1");
+    let q = eng.get("old1").unwrap();
+    assert_eq!(q.uid, uid, "the uid is stable");
+    assert_eq!(vstore::VideoIndex::load(&dir).unwrap().legacy.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn newer_schemas_are_refused_and_left_alone() {
+    // A-2: a project written by a newer Cliper is not "migrated" down
+    let (eng, _rx, root) = engine("newer");
+    let dir = root.join("new1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut v = serde_json::to_value(Project::new("new1", "x")).unwrap();
+    v["schema"] = json!("cliper/project@99");
+    v["something_new"] = json!(1);
+    let bytes = serde_json::to_vec(&v).unwrap();
+    std::fs::write(dir.join("project.json"), &bytes).unwrap();
+    assert_eq!(eng.get("new1").unwrap_err().code, "SCHEMA_NEWER");
+    assert_eq!(std::fs::read(dir.join("project.json")).unwrap(), bytes, "untouched");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_corrupt_video_index_is_set_aside_not_reset() {
+    // A-3: index.json that doesn't parse: kept as index.json.corrupt-*, the
+    // last good copy (.bak) is used, and the state reports it
+    let (eng, _rx, root) = engine("corrupt");
+    let mut p = eng.store.create("c1", "x").unwrap();
+    p.source = Some(source_info(crate::source::Container::Fmp4));
+    p.audio = Some(audio_state("audio.aac", vec![375; 10]));
+    eng.store.save(&mut p).unwrap();
+    let dir = eng.store.dir("c1");
+    let idx = vstore::VideoIndex { pending_process: vec![(1.0, 2.0)], ..Default::default() };
+    idx.save(&dir).unwrap();
+    idx.save(&dir).unwrap(); // a .bak exists
+    let f = dir.join(vstore::DIR).join("index.json");
+    std::fs::write(&f, b"{ truncated").unwrap();
+    let st = eng.video_state("c1").unwrap();
+    assert_eq!(st.warnings.len(), 1, "{:?}", st.warnings);
+    let names: Vec<String> = std::fs::read_dir(dir.join(vstore::DIR)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().any(|n| n.starts_with("index.json.corrupt-")), "{names:?}");
+    assert_eq!(eng.with_ps("c1", |ps| ps.idx.pending_process.clone()).unwrap(), vec![(1.0, 2.0)]);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -382,6 +421,10 @@ async fn ipc_dispatch_shapes() {
     assert!(r["mute_id"].as_str().is_some_and(|s| !s.is_empty()));
     assert_eq!(r["project"]["songs"][0]["mutes"][0]["confirmed"], json!(false));
     assert_eq!(crate::ipc::server::dispatch(&eng, "nope", json!({})).await.unwrap_err().code, "METHOD_NOT_FOUND");
+    // protocol 4: the protocol-2 leftovers are gone (A-8)
+    for m in ["clips.plan", "clips.fetch", "clip.drop_media", "clip.extend", "project.drop_media"] {
+        assert_eq!(crate::ipc::server::dispatch(&eng, m, json!({ "id": "t1" })).await.unwrap_err().code, "METHOD_NOT_FOUND", "{m}");
+    }
     assert_eq!(crate::ipc::server::dispatch(&eng, "song.update", json!({ "id": "t1" })).await.unwrap_err().code, "INVALID_PARAMS");
     let n = crate::ipc::server::event_to_notification(Event::JobStarted { job_id: "j".into(), kind: "k".into(), project_id: "p".into(), items: vec!["a".into()] });
     assert_eq!(n["method"], "job.started");
@@ -479,6 +522,7 @@ async fn audio_window_is_sample_exact_on_adts() {
         elapsed_sec: 0.0,
         dropped: false,
         track: None,
+        rendition: None,
     });
     eng.store.save(&mut p).unwrap();
     let full = ffmpeg::decode(&aac, 48000, 2, None, None).unwrap().read_all().unwrap();
@@ -623,13 +667,6 @@ fn separator_streams_like_whole_and_keeps_length() {
     assert_eq!(sep.separate(exact, &noop, &c).unwrap().len(), exact.len());
 }
 
-#[test]
-fn clip_type_round_trips() {
-    // older project.json files without the new fields still load
-    let c: Clip = serde_json::from_value(json!({ "id": "c", "start": 1.0, "end": 2.0, "video": null, "stems": null })).unwrap();
-    assert!(!c.pinned && c.alignment.is_none() && c.song_ids.is_empty());
-}
-
 #[tokio::test]
 async fn projects_from_other_locations_stay_listed() {
     let (eng, _rx, root) = engine("locations");
@@ -665,11 +702,11 @@ async fn projects_from_other_locations_stay_listed() {
     let d = Store::new(&dup);
     let mut c = d.create("moved1", "w").unwrap();
     d.save(&mut c).unwrap();
-    assert_eq!(eng.open_project_at(&dup.join("moved1")).await.unwrap_err().code, "CONFLICT");
+    assert_eq!(eng.open_project_at(&dup.join("moved1")).await.unwrap_err().code, "DUPLICATE_PROJECT");
     // remembered across restarts
     drop(eng);
     let (tx, _rx2) = tokio::sync::mpsc::unbounded_channel();
-    let cfg = EngineConfig { projects_root: root.clone(), models_dir: root.join("models"), prefer_cpu: true, keep_awake: Some(false) };
+    let cfg = EngineConfig { projects_root: root.clone(), models_dir: root.join("models"), prefer_cpu: true, keep_awake: Some(false), prefs_path: None };
     let eng = Engine::new(cfg, tx);
     assert_eq!(ids(&eng), vec!["here1", "moved1", "old1"]);
     assert!(eng.remove_location(&other).unwrap());
@@ -690,7 +727,7 @@ async fn concurrent_atomic_writes_of_one_file_all_succeed() {
         let tasks: Vec<_> = (0..8u8)
             .map(|k| {
                 let t = target.clone();
-                tokio::spawn(async move { video_impl::write_atomic_async(&t, &vec![k; 4096 + round]).await })
+                tokio::spawn(async move { video_impl::write_atomic_blocking(t, vec![k; 4096 + round]).await })
             })
             .collect();
         for t in tasks {

@@ -41,6 +41,12 @@ use crate::video::media::{self, Piece};
 pub const CTX: f64 = 10.0;
 /// Crossfade between old and new vocals (s).
 pub const XF: f64 = 1.0;
+/// Longest span written (R-2): a 48 kHz stereo float WAV can't pass 4 GiB
+/// (≈ 3.1 h), and every extension rewrites the span it grows.
+pub const MAX_SPAN_SEC: f64 = 30.0 * 60.0;
+/// Spans that would grow past [`MAX_SPAN_SEC`] stay apart and overlap by this
+/// much instead; readers crossfade across the overlap.
+pub const SPAN_OVERLAP: f64 = 2.0 * CTX;
 /// Old original audio must match the fresh decode to this (max abs, per block).
 const MATCH_TOL: f32 = 1e-4;
 const RATE: f64 = STEM_RATE as f64;
@@ -150,19 +156,20 @@ impl Engine {
     /// Remember ranges to separate after the running `stems.ensure` (fetches
     /// with `process`); starts a job when none runs.
     pub(crate) fn queue_process(self: &Arc<Self>, pid: &str, rs: Vec<Range>) {
-        {
-            let mut q = self.pending_process.lk();
-            let e = q.entry(pid.to_string()).or_default();
-            *e = ranges::union(e, &rs);
-        }
+        // kept in video/index.json until a job takes it (R-14)
+        let _ = self.with_ps(pid, |ps| {
+            ps.idx.pending_process = ranges::union(&ps.idx.pending_process, &rs);
+            ps.idx_dirty = true;
+        });
+        self.save_index(pid);
         self.kick_process(pid);
     }
 
-    fn kick_process(self: &Arc<Self>, pid: &str) {
+    pub(crate) fn kick_process(self: &Arc<Self>, pid: &str) {
         if self.jobs.lk().values().any(|j| j.info.project_id == pid && j.info.kind == "stems.ensure") {
             return;
         }
-        let Some(rs) = self.pending_process.lk().remove(pid) else { return };
+        let rs = self.with_ps(pid, |ps| std::mem::take(&mut ps.idx.pending_process)).unwrap_or_default();
         if rs.is_empty() {
             return;
         }
@@ -170,9 +177,11 @@ impl Engine {
         if let Err(e) = r {
             tracing::warn!("{pid}: separating fetched video: {e}");
             if e.code == "BUSY" {
-                self.pending_process.lk().insert(pid.to_string(), rs);
+                let _ = self.with_ps(pid, |ps| ps.idx.pending_process = ranges::union(&ps.idx.pending_process, &rs));
             }
         }
+        let _ = self.with_ps(pid, |ps| ps.idx_dirty = true);
+        self.save_index(pid);
     }
 
     /// Called when a `stems.ensure` job ends: start the next queued one.
@@ -198,11 +207,25 @@ impl Engine {
                 ps.stretches().into_iter().filter_map(|(a, b, pcs)| tl.as_ref().map(|tl| ((tl.start(a), tl.end(b - 1)), pcs))).collect()
             })?
         };
+        let tl = self.with_ps(pid, |ps| ps.tl.clone()).ok().flatten();
+        let mut checked: Vec<String> = Vec::new();
         for (crange, pieces) in stretches {
             let want = ranges::drop_short(ranges::intersect(targets, &[crange]), 0.5);
-            for t in want {
+            for t in want.into_iter().flat_map(|t| split_target(t, MAX_SPAN_SEC - 2.0 * SPAN_OVERLAP, SPAN_OVERLAP)) {
                 if ranges::covers(&done, t, 0.01) {
-                    continue;
+                    // spans from before the QA-2 fix are checked again where a
+                    // rendition changes inside them (R-10); others just get the new version
+                    let olds: Vec<&StemSpan> = p.stems.iter().filter(|s| s.version < project::STEM_VERSION && s.start < t.1 && s.end > t.0).collect();
+                    if olds.is_empty() {
+                        continue;
+                    }
+                    let segs = tl.as_ref().map(|tl| tl.segments_for(t.0, t.1, 0.0)).unwrap_or(0..0);
+                    let inside: Vec<&Piece> = pieces.iter().filter(|pc| matches!(pc, Piece::Local { .. }) || (pc.first() < segs.end && pc.last() > segs.start)).collect();
+                    let joins = inside.windows(2).any(|w| w[0].variant() != w[1].variant()) || inside.iter().any(|pc| pc.partial());
+                    if !joins {
+                        checked.extend(olds.iter().map(|s| s.id.clone()));
+                        continue;
+                    }
                 }
                 if ctx.cancel.is_cancelled() {
                     return Err(ApiError::new("CANCELLED", "cancelled"));
@@ -218,6 +241,15 @@ impl Engine {
                 }
             }
         }
+        if !checked.is_empty() {
+            self.mutate(pid, |p| {
+                for s in p.stems.iter_mut().filter(|s| checked.contains(&s.id)) {
+                    s.version = project::STEM_VERSION;
+                }
+                Ok(())
+            })
+            .await?;
+        }
         res.separated = ranges::normalize(&res.separated);
         Ok(res)
     }
@@ -226,9 +258,15 @@ impl Engine {
     fn ensure_one(&self, pid: &str, t: Range, crange: Range, pieces: &[Piece], ctx: &JobCtx) -> ApiResult<EnsureResult> {
         let p = self.get(pid)?;
         let dir = self.store.dir(pid);
-        // spans t touches → result range U
-        let olds: Vec<StemSpan> =
+        // spans t touches → result range U; spans that would make U longer
+        // than the cap stay as they are and the new span overlaps them (R-2)
+        let near: Vec<StemSpan> =
             p.stems.iter().filter(|s| s.start <= t.1 + 0.5 && s.end >= t.0 - 0.5 && s.start < crange.1 && s.end > crange.0).cloned().collect();
+        let (merge, t) = plan_span(t, &near.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(), MAX_SPAN_SEC, SPAN_OVERLAP);
+        let olds: Vec<StemSpan> = near.into_iter().enumerate().filter(|(k, _)| merge.contains(k)).map(|(_, s)| s).collect();
+        if t.1 - t.0 < 0.5 && olds.is_empty() {
+            return Ok(EnsureResult::default());
+        }
         let u = olds.iter().fold(t, |acc, s| (acc.0.min(s.start), acc.1.max(s.end)));
         let d = (u.0.max(crange.0), u.1.min(crange.1));
         if d.1 - d.0 < 0.5 {
@@ -274,7 +312,11 @@ impl Engine {
                 let new = wav::read_f32_range(&new_orig, (k - g0) as u64, (ke - k) as u64)?.samples;
                 let same = old.iter().zip(&new).filter(|(x, y)| (*x - *y).abs() <= MATCH_TOL).count();
                 // a decoder cold start at the old span's first block may differ: allow it
-                let ok = same * 2 >= old.len() || (k == sa && same * 4 >= old.len()) || old.iter().all(|x| x.abs() < 1e-6);
+                // a decoder cold start (old span's or this decode's first block,
+                // R-19) may differ; silence only counts when both are silent (R-9)
+                let first_block = k == sa || k == g0;
+                let silent = old.iter().all(|x| x.abs() < 1e-6) && new.iter().all(|x| x.abs() < 1e-6);
+                let ok = same * 2 >= old.len() || (first_block && same * 4 >= old.len()) || silent;
                 if ok {
                     good.push((k, ke));
                 } else {
@@ -347,7 +389,12 @@ impl Engine {
         //    decode and its separation in the new parts, and between them one
         //    crossfade of both together, so orig and vocals always belong to
         //    the same decode and `orig − (1 − g)·vocals` stays consistent
-        let (ug0, ug1) = (grid(u.0).min(g0), grid(u.1).max(g1));
+        // only what was decoded or is kept from old spans (R-9: no silent
+        // "separated" edges where the decode produced nothing)
+        let gk: Vec<(i64, i64)> = good.iter().map(|&(a, b)| (grid(a), grid(b))).collect();
+        let ug0 = gk.iter().map(|x| x.0).fold(g0, i64::min);
+        let ug1 = gk.iter().map(|x| x.1).fold(g1, i64::max);
+        let _ = u;
         let fin_frames = (ug1 - ug0) as u64;
         let mut ow = wav::WavWriter::create(&out_dir.join("orig.wav"), STEM_RATE, 2)?;
         let mut vw = wav::WavWriter::create(&out_dir.join("vocals.wav"), STEM_RATE, 2)?;
@@ -428,6 +475,7 @@ impl Engine {
             model,
             device,
             created_at: project::now(),
+            version: crate::project::STEM_VERSION,
         };
         std::mem::forget(cleanup);
         res.separated = missing.clone();
@@ -486,9 +534,17 @@ impl Engine {
         // rendition tens of ms off). Same-rendition pieces (an adopted clip
         // + new segments) stay one decode: that is bit-exact and warm.
         let mut groups: Vec<Vec<Piece>> = Vec::new();
+        // an adopted clip used only in part (overlapping clips, R-1) or two
+        // adopted clips in a row are decoded on their own: concatenating whole
+        // files would repeat the overlap and shift everything after it
         for pc in sub {
+            let legacy = matches!(pc, Piece::Legacy { .. });
+            let joins = |g: &Vec<Piece>| {
+                let two_clips = legacy && g.iter().any(|x| matches!(x, Piece::Legacy { .. }));
+                g[0].variant() == pc.variant() && !pc.partial() && !g.last().unwrap().partial() && !two_clips
+            };
             match groups.last_mut() {
-                Some(g) if g[0].variant() == pc.variant() => g.push(pc),
+                Some(g) if joins(g) => g.push(pc),
                 _ => groups.push(vec![pc]),
             }
         }
@@ -623,20 +679,80 @@ impl Engine {
         let n = (g1 - g0).max(0) as usize;
         let mut orig = vec![0f32; n * 2];
         let mut voc = vec![0f32; n * 2];
-        // later spans win where spans overlap (migrated projects)
-        for s in &p.stems {
-            let (sa, sb) = (grid(s.start).max(g0), (grid(s.start) + s.frames as i64).min(g1));
+        // where spans overlap (capped spans, adopted clips), crossfade from the
+        // earlier span to the later one across the overlap
+        let mut spans: Vec<&StemSpan> = p.stems.iter().collect();
+        spans.sort_by(|x, y| x.start.total_cmp(&y.start));
+        let mut filled = i64::MIN;
+        for s in spans {
+            let (s0, s1) = (grid(s.start), grid(s.start) + s.frames as i64);
+            let (sa, sb) = (s0.max(g0), s1.min(g1));
             if sb <= sa {
+                filled = filled.max(s1);
                 continue;
             }
             let o = read_span(&dir, s, "orig.wav", sa, sb)?;
             let v = read_span(&dir, s, "vocals.wav", sa, sb)?;
-            let off = ((sa - g0) * 2) as usize;
-            orig[off..off + o.len()].copy_from_slice(&o);
-            voc[off..off + v.len()].copy_from_slice(&v);
+            let ov_end = filled.min(s1);
+            for g in sa..sb {
+                let j = ((g - g0) * 2) as usize;
+                let x = ((g - sa) * 2) as usize;
+                let w = if g < ov_end { raised((g - s0) as f64 / (ov_end - s0).max(1) as f64) as f32 } else { 1.0 };
+                for ch in 0..2 {
+                    orig[j + ch] = (1.0 - w) * orig[j + ch] + w * o[x + ch];
+                    voc[j + ch] = (1.0 - w) * voc[j + ch] + w * v[x + ch];
+                }
+            }
+            filled = filled.max(s1);
         }
         Ok((orig, voc))
     }
+}
+
+/// Split a target longer than `max` into pieces overlapping by `ovl`.
+fn split_target(t: Range, max: f64, ovl: f64) -> Vec<Range> {
+    let mut out = Vec::new();
+    let mut a = t.0;
+    loop {
+        let b = (a + max).min(t.1);
+        out.push((a, b));
+        if b >= t.1 {
+            return out;
+        }
+        a = b - ovl;
+    }
+}
+
+/// Which nearby spans (indices into `near`) a new span over `t` merges with,
+/// and the target trimmed to overlap the others by `ovl` only: merging stops
+/// before the result would exceed `max` (R-2).
+fn plan_span(t: Range, near: &[Range], max: f64, ovl: f64) -> (Vec<usize>, Range) {
+    let mut order: Vec<usize> = (0..near.len()).collect();
+    // closest first: those overlapping t most
+    order.sort_by(|&a, &b| {
+        let ov = |r: Range| (r.1.min(t.1) - r.0.max(t.0)).max(0.0);
+        ov(near[b]).total_cmp(&ov(near[a]))
+    });
+    let mut hull = t;
+    let mut merge = Vec::new();
+    let mut t = t;
+    for k in order {
+        let r = near[k];
+        let h = (hull.0.min(r.0), hull.1.max(r.1));
+        if h.1 - h.0 <= max {
+            hull = h;
+            merge.push(k);
+        } else if r.0 <= t.0 {
+            t.0 = t.0.max(r.1 - ovl);
+        } else {
+            t.1 = t.1.min(r.0 + ovl);
+        }
+    }
+    if t.1 < t.0 {
+        t.1 = t.0;
+    }
+    merge.sort_unstable();
+    (merge, t)
 }
 
 /// Mute suggestions for talk regions in songs (± margins), skipping what
@@ -766,6 +882,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spans_stop_merging_at_the_cap() {
+        // R-2: a 40-min stretch of separated songs + a new song after it
+        let near = [(0.0, 1500.0), (1500.0, 2400.0)];
+        let (merge, t) = plan_span((2400.0, 2600.0), &near, 1800.0, 20.0);
+        // the second span (900 s) merges (1100 s ≤ 1800), the first would exceed: overlap it by 20 s
+        assert_eq!(merge, vec![1]);
+        assert_eq!(t, (2400.0, 2600.0));
+        let (merge, t) = plan_span((1400.0, 1700.0), &[(0.0, 1500.0), (1600.0, 3500.0)], 1800.0, 20.0);
+        assert!(merge.len() == 1);
+        assert!(t.1 - t.0 <= 300.0 && t.1 - t.0 > 0.0);
+        let parts = split_target((0.0, 4000.0), 1760.0, 20.0);
+        assert!(parts.iter().all(|r| r.1 - r.0 <= 1760.0));
+        assert_eq!(parts.first().unwrap().0, 0.0);
+        assert_eq!(parts.last().unwrap().1, 4000.0);
+        assert!(parts.windows(2).all(|w| (w[0].1 - w[1].0 - 20.0).abs() < 1e-9));
+    }
+
+    #[test]
     fn crossfade_weights() {
         // new part [100, 120] separated over [90, 130]: switch at 95 / 125
         let (m, r) = ((100.0, 120.0), (90.0, 130.0));
@@ -797,12 +931,14 @@ mod tests {
             reviewed: false,
             note: String::new(),
             confidence: None,
-            clip_id: None,
             mutes: vec![],
             mute_enabled: true,
             fade_in: None,
             fade_out: None,
             export: None,
+            video_wanted: false,
+            listened: false,
+            extra: Default::default(),
         };
         s.mutes.push(Mute { id: "k".into(), start: 20.0, end: 22.0, fade_in: 0.1, fade_out: 0.1, origin: Origin::Manual, confirmed: true, gain_db: None });
         p.songs.push(s);

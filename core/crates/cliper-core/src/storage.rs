@@ -47,12 +47,74 @@ pub struct StorageUsage {
     pub cache: u64,
     /// exported files inside the project folder (never cleaned; not in `total`)
     pub exports: u64,
-    /// audio + video + stems + cache
+    /// leftovers nothing refers to (A-4): unreferenced stem folders and
+    /// views, interrupted `.part`/`.tmp` writes; swept on project load and
+    /// by `media.drop`
+    pub orphan: u64,
+    /// audio + video + stems + cache + orphan
     pub total: u64,
     pub pinned: bool,
     /// seconds of video on disk
     pub video_sec: f64,
     pub updated_at: String,
+}
+
+/// Files older than this that nothing refers to are removed (younger ones may
+/// still be being written).
+pub const ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Leftovers in a project folder (A-4): stem folders no span refers to,
+/// views not in the index, `.part`/`.tmp` files, each untouched for
+/// `min_age`. Returns (path, bytes).
+pub fn orphans(dir: &std::path::Path, p: &Project, views: &[crate::video::store::ViewEntry], min_age: std::time::Duration) -> Vec<(std::path::PathBuf, u64)> {
+    use crate::video::store::{DIR, dir_size};
+    let old = |e: &std::fs::DirEntry| {
+        e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|a| a >= min_age)
+    };
+    let mut out = Vec::new();
+    let spans: BTreeSet<String> = p.stems.iter().map(|s| s.dir.replace('\\', "/")).collect();
+    for e in std::fs::read_dir(dir.join("stems")).into_iter().flatten().flatten() {
+        let rel = format!("stems/{}", e.file_name().to_string_lossy());
+        if e.path().is_dir() && !spans.contains(&rel) && old(&e) {
+            out.push((e.path(), dir_size(&e.path())));
+        }
+    }
+    let kept: BTreeSet<String> = views.iter().map(|v| v.file.replace('\\', "/")).collect();
+    for e in std::fs::read_dir(dir.join(DIR).join("views")).into_iter().flatten().flatten() {
+        let rel = format!("{DIR}/views/{}", e.file_name().to_string_lossy());
+        if !kept.contains(&rel) && old(&e) {
+            out.push((e.path(), e.metadata().map(|m| m.len()).unwrap_or(0)));
+        }
+    }
+    // interrupted writes, anywhere in the project's own folders
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if n != "exports" {
+                    stack.push(e.path());
+                }
+            } else if (n.ends_with(".part") || n.ends_with(".tmp")) && old(&e) {
+                out.push((e.path(), e.metadata().map(|m| m.len()).unwrap_or(0)));
+            }
+        }
+    }
+    out
+}
+
+/// Remove [`orphans`] older than [`ORPHAN_AGE`]; bytes freed.
+pub fn sweep_orphans(dir: &std::path::Path, p: &Project, views: &[crate::video::store::ViewEntry]) -> u64 {
+    let mut freed = 0;
+    for (f, n) in orphans(dir, p, views, ORPHAN_AGE) {
+        let ok = if f.is_dir() { std::fs::remove_dir_all(&f) } else { std::fs::remove_file(&f) };
+        if ok.is_ok() {
+            tracing::info!("removed leftover {}", f.display());
+            freed += n;
+        }
+    }
+    freed
 }
 
 /// Ranges the project's songs use: enabled songs ± margins.
@@ -129,12 +191,14 @@ mod tests {
             reviewed: false,
             note: String::new(),
             confidence: None,
-            clip_id: None,
             mutes: vec![],
             mute_enabled: true,
             fade_in: None,
             fade_out: None,
             export: None,
+            video_wanted: false,
+            listened: false,
+            extra: Default::default(),
         }
     }
 

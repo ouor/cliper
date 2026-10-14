@@ -29,6 +29,9 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("corrupt project.json: {0}")]
     Json(#[from] serde_json::Error),
+    /// written by a newer engine (schema version)
+    #[error("project {0} was saved by a newer Cliper (schema @{1}); update Cliper to open it")]
+    Newer(String, u32),
 }
 
 /// Projects living outside the projects folder (C2-2): other project roots
@@ -157,19 +160,42 @@ impl Store {
             std::io::ErrorKind::NotFound => StoreError::NotFound(id.to_string()),
             _ => e.into(),
         })?;
-        let mut p: Project = serde_json::from_slice(&b)?;
-        relink_exports(&mut p, &self.dir(id));
-        if p.schema != super::model::SCHEMA {
+        let v: serde_json::Value = serde_json::from_slice(&b)?;
+        let ver = super::migrate::version_of(&v);
+        let cur = super::migrate::current();
+        if ver > cur {
+            // never "migrate" (and so overwrite) what a newer engine wrote (A-2)
+            return Err(StoreError::Newer(id.to_string(), ver));
+        }
+        let mut p: Project = if ver < cur {
             // one migration at a time (concurrent loads of the same project)
             static MIGRATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let _g = MIGRATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let fresh: Project = serde_json::from_slice(&std::fs::read(&path)?)?;
-            p = fresh;
-            if super::migrate::migrate(&mut p, &self.dir(id))? {
-                tracing::info!("migrated project {id} to {}", super::model::SCHEMA);
+            let raw = std::fs::read(&path)?;
+            let mut v: serde_json::Value = serde_json::from_slice(&raw)?;
+            let ver = super::migrate::version_of(&v);
+            if ver < cur {
+                // the original stays next to it, once per old version
+                let bak = path.with_file_name(format!("project.json.bak-@{ver}"));
+                if !bak.exists() {
+                    std::fs::write(&bak, &raw)?;
+                }
+                super::migrate::chain(&mut v, ver, &self.dir(id))?;
+                let p: Project = serde_json::from_value(v)?;
+                tracing::info!("migrated project {id} from @{ver} to {}", super::model::SCHEMA);
                 self.save_raw(&p)?;
+                p
+            } else {
+                serde_json::from_value(v)?
             }
+        } else {
+            serde_json::from_value(v)?
+        };
+        if p.uid.is_empty() {
+            p.uid = super::model::new_uid();
+            self.save_raw(&p)?;
         }
+        relink_exports(&mut p, &self.dir(id));
         Ok(p)
     }
 
@@ -262,10 +288,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static N: AtomicU64 = AtomicU64::new(0);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = path.with_file_name(format!("{name}.{}-{}.tmp", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-    {
+    let written = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     let mut delay = 20u64;
     for attempt in 0..6 {

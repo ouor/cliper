@@ -38,7 +38,6 @@ pub enum VideoError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct VideoClip {
     pub path: PathBuf,
     /// variant actually used

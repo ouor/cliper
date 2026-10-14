@@ -28,13 +28,21 @@ use crate::source::Container;
 pub enum Piece {
     /// segments `[first, last)` of rendition `variant` (files in `video/v<variant>/`)
     Raw { variant: usize, first: usize, last: usize },
-    /// an adopted clip MP4 holding segments `[first, last)`; file t ↔ VOD `t + origin`
-    Legacy { file: PathBuf, variant: usize, first: usize, last: usize, origin: f64 },
+    /// an adopted clip MP4 holding segments `[file_first, file_last)`, of
+    /// which `[first, last)` are used here (clips adopted from @1 can overlap,
+    /// R-1); file t ↔ VOD `t + origin`
+    Legacy { file: PathBuf, variant: usize, first: usize, last: usize, origin: f64, file_first: usize, file_last: usize },
     /// a local recording (the whole file; `track` = audio stream)
     Local { file: PathBuf, track: u32 },
 }
 
 impl Piece {
+    /// An adopted clip of which only part is used (another clip or new
+    /// segments hold the rest): decoded on its own, never concatenated.
+    pub fn partial(&self) -> bool {
+        matches!(self, Piece::Legacy { first, last, file_first, file_last, .. } if first != file_first || last != file_last)
+    }
+
     pub fn variant(&self) -> usize {
         match self {
             Piece::Raw { variant, .. } | Piece::Legacy { variant, .. } => *variant,

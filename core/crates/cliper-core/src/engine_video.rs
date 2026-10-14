@@ -39,8 +39,10 @@ pub(crate) struct MgrState {
     pub projects: HashMap<String, PState>,
     pub inflight: usize,
     pub rate: RateMeter,
-    /// (project, rendition) → media playlist and when it was loaded
-    pub playlists: HashMap<(String, usize), (Arc<MediaPlaylist>, Instant)>,
+    /// (project, rendition key) → media playlist and when it was loaded
+    pub playlists: HashMap<(String, String), (Arc<MediaPlaylist>, Instant)>,
+    /// set while the network is down (R-3)
+    pub offline: Option<Offline>,
 }
 
 pub(crate) struct VideoMgr {
@@ -52,6 +54,8 @@ pub(crate) struct VideoMgr {
     pub started: std::sync::atomic::AtomicBool,
     /// project → lock serialising view builds
     pub view_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// project → lock serialising index.json writes
+    pub save_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl VideoMgr {
@@ -63,6 +67,7 @@ impl VideoMgr {
             paused: std::sync::atomic::AtomicBool::new(paused),
             started: std::sync::atomic::AtomicBool::new(false),
             view_locks: Mutex::new(HashMap::new()),
+            save_locks: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -84,6 +89,8 @@ pub struct FetchArgs {
     pub process: bool,
     /// rendition height for new ranges (default settings.video_height)
     pub height: Option<u32>,
+    /// download even while video downloads are paused (an export waiting for it)
+    pub force: bool,
 }
 
 /// `video.fetch` / `video.estimate` result.
@@ -123,7 +130,44 @@ pub struct VideoView {
 enum SegErr {
     Cancelled,
     VodGone(String),
+    /// the network looks down: the segment stays queued (R-3)
+    Offline(String),
     Failed { code: String, message: String },
+}
+
+/// The network is down: no download starts before `until` (R-3).
+pub(crate) struct Offline {
+    pub since: String,
+    pub until: Instant,
+    pub step: u32,
+    pub reason: String,
+}
+
+/// A transfer error that says "no network" rather than "this segment".
+fn is_offline(e: &crate::http::NetError) -> bool {
+    match e {
+        crate::http::NetError::Request(r) => r.status().is_none(),
+        crate::http::NetError::ShortRead { .. } => true,
+        _ => false,
+    }
+}
+
+fn offline_info(st: &MgrState) -> Option<crate::video::OfflineInfo> {
+    st.offline.as_ref().map(|o| crate::video::OfflineInfo {
+        since: o.since.clone(),
+        retry_in_sec: o.until.saturating_duration_since(Instant::now()).as_secs_f64(),
+        reason: o.reason.clone(),
+    })
+}
+
+fn r_key(src: &crate::source::Source, v: usize) -> String {
+    src.info.variants.get(v).map(store::rendition_key).unwrap_or_default()
+}
+
+/// Write via `project::store::write_atomic` (fsync, rename retried while an
+/// antivirus holds the file, temp removed on error) on a blocking thread (R-8).
+pub(crate) async fn write_atomic_blocking(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || crate::project::store::write_atomic(&path, &bytes)).await.map_err(std::io::Error::other)?
 }
 
 impl Engine {
@@ -131,7 +175,29 @@ impl Engine {
 
     fn new_pstate(&self, p: &Project) -> ApiResult<PState> {
         let dir = self.store.dir(&p.id);
-        let idx = VideoIndex::load(&dir);
+        let mut idx = VideoIndex::load(&dir).map_err(|e| match e {
+            store::IndexError::Newer(_) => ApiError::new("SCHEMA_NEWER", e),
+            store::IndexError::Io(e) => ApiError::new("IO", e),
+        })?;
+        let stored: Vec<crate::hls::m3u8::Variant> = p.source.as_ref().map(|s| s.variants.clone()).unwrap_or_default();
+        let raw_folders: Vec<usize> = store::raw_folders(&dir);
+        let old_version = idx.version;
+        let mut adopted = crate::video::adopt_renditions(&mut idx, &raw_folders, &stored);
+        // written at once: the folder ↔ rendition table must not depend on a
+        // later flush (A-1); the index it came from is kept once
+        if adopted {
+            let f = dir.join(store::DIR).join("index.json");
+            let keep = f.with_file_name(format!("index.json.bak-v{old_version}"));
+            if old_version < store::INDEX_VERSION && f.is_file() && !keep.exists() {
+                let _ = std::fs::copy(&f, &keep);
+            }
+            match idx.save(&dir) {
+                Ok(()) => adopted = false,
+                Err(e) => tracing::warn!("{}: saving the adopted video index: {e}", p.id),
+            }
+        }
+        // leftovers of interrupted writes / drops (A-4)
+        crate::storage::sweep_orphans(&dir, p, &idx.views);
         let have = store::scan(&dir, &idx);
         let local = is_local(p);
         let tl = match (&p.audio, local) {
@@ -140,20 +206,23 @@ impl Engine {
             (None, _) => None,
         };
         let src = p.source.as_ref();
-        Ok(PState {
+        let mut ps = PState {
             dir,
             idx,
             have,
             fetching: HashMap::new(),
             tl,
             container: src.map(|s| s.container).unwrap_or(Container::Fmp4),
-            heights: src.map(|s| s.variants.iter().map(|v| v.height).collect()).unwrap_or_default(),
-            variants: src.map(|s| s.variants.clone()).unwrap_or_default(),
+            heights: Vec::new(),
+            variants: stored,
             local,
             vod_gone: p.vod.as_ref().is_some_and(|v| v.status == VodState::Gone),
             dirty: true,
-            idx_dirty: false,
-        })
+            idx_dirty: adopted,
+            dropping: false,
+        };
+        ps.refresh_heights();
+        Ok(ps)
     }
 
     /// Run `f` on a project's video state (loaded on first use).
@@ -202,17 +271,25 @@ impl Engine {
         let paused = self.video.paused.load(Ordering::Relaxed);
         let st = self.video.st.lk();
         let rate = st.rate.rate();
-        let projects: BTreeMap<String, VideoState> = st.projects.iter().map(|(pid, ps)| (pid.clone(), ps.state(pid, paused, rate))).collect();
+        let off = offline_info(&st);
+        let projects: BTreeMap<String, VideoState> = st.projects.iter().map(|(pid, ps)| (pid.clone(), ps.state(pid, paused, rate, off.clone()))).collect();
         json!({ "paused": paused, "projects": projects })
     }
 
     pub fn video_state(&self, pid: &str) -> ApiResult<VideoState> {
         let paused = self.video.paused.load(Ordering::Relaxed);
-        let rate = self.video.st.lk().rate.rate();
-        self.with_ps(pid, |ps| ps.state(pid, paused, rate))
+        let (rate, off) = {
+            let st = self.video.st.lk();
+            (st.rate.rate(), offline_info(&st))
+        };
+        self.with_ps(pid, |ps| ps.state(pid, paused, rate, off.clone()))
     }
 
     pub(crate) fn save_index(&self, pid: &str) {
+        // one save at a time per project, the snapshot taken inside: a later
+        // save can never be overtaken by an older snapshot (R-5)
+        let lock = self.video.save_locks.lk().entry(pid.to_string()).or_default().clone();
+        let _g = lock.lk();
         let snap = self.video.st.lk().projects.get_mut(pid).map(|ps| {
             ps.idx_dirty = false;
             (ps.dir.clone(), ps.idx.clone())
@@ -271,6 +348,9 @@ impl Engine {
             if ps.vod_gone {
                 return Err(ApiError::new("VOD_GONE", "the replay is no longer available; only video already downloaded can be used"));
             }
+            if ps.dropping {
+                return Err(ApiError::new("VIDEO_BUSY", "this project's media is being cleaned up; try again in a moment"));
+            }
             if let Some(free) = crate::storage::free_space(&ps.dir)
                 && plan.estimated_bytes.saturating_add(SPACE_RESERVE) > free
             {
@@ -294,6 +374,7 @@ impl Engine {
                 song_ranges: args.song_ids.iter().flatten().filter_map(|id| p.song(id)).map(|s| s.with_margins(&p.settings)).collect(),
                 height,
                 process: args.process,
+                force: args.force,
                 created_at: project::now(),
                 seq: ps.idx.next_seq,
             });
@@ -301,6 +382,22 @@ impl Engine {
             ps.dirty = true;
             Ok(plan)
         })??;
+        // the user asked for these songs' video (A-5); top-ups don't count
+        let auto = matches!(args.priority, Some(Priority::Auto)) || matches!(args.reason.as_deref(), Some("topup") | Some("auto"));
+        let wanted: Vec<String> = args.song_ids.iter().flatten().filter(|id| p.song(id).is_some_and(|s| !s.video_wanted)).cloned().collect();
+        if !auto && !wanted.is_empty() {
+            let (eng, pid2) = (self.clone(), pid.to_string());
+            tokio::spawn(async move {
+                let _ = eng
+                    .mutate(&pid2, |p| {
+                        for s in p.songs.iter_mut().filter(|s| wanted.contains(&s.id)) {
+                            s.video_wanted = true;
+                        }
+                        Ok(())
+                    })
+                    .await;
+            });
+        }
         if plan.request_id.is_some() {
             self.save_index(pid);
             self.video.wake.notify_one();
@@ -343,12 +440,14 @@ impl Engine {
     pub fn video_prioritize(&self, pid: &str, request_id: &str, priority: Priority) -> ApiResult<()> {
         let found = self.with_ps(pid, |ps| {
             let next = next_seq();
+            let first = ps.idx.requests.iter().map(|r| r.seq).min().unwrap_or(1);
             match ps.idx.requests.iter_mut().find(|r| r.id == request_id) {
                 Some(r) => {
                     r.priority = priority;
                     // "fetch this first": also first among its priority
+                    // (the latest "now" goes first, R-24)
                     if priority == Priority::Now {
-                        r.seq = 0;
+                        r.seq = first.saturating_sub(1);
                     } else {
                         r.seq = next;
                     }
@@ -388,7 +487,16 @@ impl Engine {
             ps.idx_dirty = true;
             ps.dirty = true;
             // whole segments: keep the edge margin from pulling in neighbours
-            Ok(tl.ranges_of(orphan).into_iter().map(|(a, b)| (a + 2.0 * EDGE_EPS, b - 2.0 * EDGE_EPS)).filter(|(a, b)| b > a).collect())
+            // (short ones, e.g. the VOD's last segment, shrink less so they stay: R-16)
+            Ok(tl
+                .ranges_of(orphan)
+                .into_iter()
+                .map(|(a, b)| {
+                    let m = (2.0 * EDGE_EPS).min((b - a) / 4.0);
+                    (a + m, b - m)
+                })
+                .filter(|(a, b)| b > a)
+                .collect())
         })??;
         self.save_index(pid);
         self.video.wake.notify_one();
@@ -412,9 +520,7 @@ impl Engine {
                 ps.dirty = true;
             }
         }
-        let mut prefs = super::EnginePrefs::load(&self.cfg.projects_root);
-        prefs.video_paused = paused;
-        prefs.save(&self.cfg.projects_root)?;
+        self.update_prefs(|p| p.video_paused = paused)?;
         self.video.wake.notify_one();
         Ok(())
     }
@@ -428,10 +534,14 @@ impl Engine {
         }
         // resume: projects with pending requests
         for id in self.store.ids() {
-            let idx = VideoIndex::load(&self.store.dir(&id));
+            let Ok(idx) = VideoIndex::load(&self.store.dir(&id)) else { continue };
             if !idx.requests.is_empty() {
                 tracing::info!("resuming {} video request(s) of {id}", idx.requests.len());
                 let _ = self.with_ps(&id, |_| ());
+            }
+            if !idx.pending_process.is_empty() {
+                // separation that was waiting when the engine stopped (R-14)
+                self.kick_process(&id);
             }
         }
         let weak = Arc::downgrade(self);
@@ -467,10 +577,11 @@ impl Engine {
         {
             let mut st = self.video.st.lk();
             let rate = st.rate.rate();
+            let off = offline_info(&st);
             for (pid, ps) in st.projects.iter_mut() {
                 if ps.dirty {
                     ps.dirty = false;
-                    out.push(ps.state(pid, paused, rate));
+                    out.push(ps.state(pid, paused, rate, off.clone()));
                 }
                 if ps.idx_dirty {
                     save.push(pid.clone());
@@ -485,24 +596,28 @@ impl Engine {
         }
     }
 
-    /// Start downloads while there are free workers.
+    /// Start downloads while there are free workers. Nothing starts while the
+    /// network is down (R-3: retried with backoff) and, while paused, only
+    /// requests an export is waiting for (`force`).
     fn video_dispatch(self: &Arc<Self>) {
-        if self.video.paused.load(Ordering::Relaxed) {
+        let paused = self.video.paused.load(Ordering::Relaxed);
+        let mut st = self.video.st.lk();
+        if st.offline.as_ref().is_some_and(|o| Instant::now() < o.until) {
             return;
         }
-        let mut st = self.video.st.lk();
         while st.inflight < WORKERS {
             let best = st
                 .projects
                 .iter()
-                .filter(|(_, ps)| !ps.vod_gone && !ps.local && ps.tl.is_some())
-                .filter_map(|(pid, ps)| ps.next_segment().map(|(pr, seq, i)| (pr, seq, pid.clone(), i)))
+                .filter(|(_, ps)| !ps.vod_gone && !ps.local && ps.tl.is_some() && !ps.dropping)
+                .filter_map(|(pid, ps)| ps.next_segment(paused).map(|(pr, seq, i, rid)| (pr, seq, pid.clone(), i, rid)))
                 .min_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-            let Some((_, seq, pid, i)) = best else { break };
+            let Some((_, _, pid, i, rid)) = best else { break };
             let ps = st.projects.get_mut(&pid).unwrap();
-            let height = ps.idx.requests.iter().find(|r| r.seq == seq).and_then(|r| r.height);
-            let preferred = crate::source::pick_variant(&ps.variants, height);
+            let height = ps.idx.requests.iter().find(|r| r.id == rid).and_then(|r| r.height);
+            let preferred = ps.preferred_folder(height);
             let v = ps.choose_variant(i, preferred, &ps.queued());
+            let Some(key) = ps.idx.renditions.get(&v).map(|r| r.key.clone()) else { break };
             let token = tokio_util::sync::CancellationToken::new();
             ps.fetching.insert(i, (v, token.clone()));
             ps.dirty = true;
@@ -511,16 +626,23 @@ impl Engine {
             st.inflight += 1;
             let eng = self.clone();
             tokio::spawn(async move {
-                let r = eng.fetch_segment(&pid, &dir, container, i, v, &token).await;
+                use futures::FutureExt;
+                // a panic must not leak the worker slot or leave "fetching" forever (R-23)
+                let r = std::panic::AssertUnwindSafe(eng.fetch_segment(&pid, &dir, container, i, &key, &token)).catch_unwind().await.unwrap_or_else(|_| {
+                    tracing::error!("{pid}: segment {i} download panicked");
+                    Err(SegErr::Failed { code: "INTERNAL".into(), message: "download panicked".into() })
+                });
                 eng.segment_done(&pid, i, r);
             });
         }
     }
 
     async fn playlist(&self, pid: &str, src: &crate::source::Source, v: usize) -> Result<Arc<MediaPlaylist>, ApiError> {
-        let key = (pid.to_string(), v);
+        // keyed by rendition, not list position (the list can change, A-1)
+        let rkey = src.info.variants.get(v).map(store::rendition_key).unwrap_or_default();
+        let key = (pid.to_string(), rkey.clone());
         // concurrent misses share one download
-        let lock = self.resolve_locks.lk().entry(format!("{pid}#pl{v}")).or_default().clone();
+        let lock = self.resolve_locks.lk().entry(format!("{pid}#pl{rkey}")).or_default().clone();
         let _g = lock.lock().await;
         if let Some((pl, at)) = self.video.st.lk().playlists.get(&key)
             && at.elapsed() < super::SOURCE_TTL
@@ -537,14 +659,30 @@ impl Engine {
         self.video.st.lk().playlists.retain(|(p, _), _| p != pid);
     }
 
-    /// Download one segment (rendition `v`, lower ones if the CDN copy is
-    /// truncated), with [`SEGMENT_RETRIES`] retries. Writes `<index>.<ext>`.
-    async fn fetch_segment(&self, pid: &str, dir: &Path, container: Container, i: usize, v: usize, cancel: &tokio_util::sync::CancellationToken) -> Result<(usize, u64), SegErr> {
+    /// Download one segment of the rendition `key` (lower renditions if the CDN
+    /// copy is truncated), with [`SEGMENT_RETRIES`] retries. The rendition is
+    /// looked up by key in the freshly resolved list and written to that key's
+    /// folder. Returns (folder, bytes).
+    async fn fetch_segment(&self, pid: &str, dir: &Path, container: Container, i: usize, key: &str, cancel: &tokio_util::sync::CancellationToken) -> Result<(usize, u64), SegErr> {
         let failed = |code: &str, m: String| SegErr::Failed { code: code.into(), message: m };
         let p = self.store.load(pid).map_err(|e| failed("IO", e.to_string()))?;
         let mut refreshed = false;
         let mut attempt = 0u32;
-        let mut truncated: Vec<usize> = Vec::new();
+        let mut skipped: Vec<usize> = Vec::new();
+        // renditions skipped because their segmentation differs (vs truncated copies)
+        let mut segmentation = 0usize;
+        // a network error: retry a few times, then report the network as down
+        // (the segment stays queued, R-3)
+        macro_rules! net_retry {
+            ($l:lifetime, $e:expr) => {{
+                attempt += 1;
+                if attempt > SEGMENT_RETRIES {
+                    return Err($e);
+                }
+                backoff(attempt, cancel).await?;
+                continue $l;
+            }};
+        }
         'outer: loop {
             if cancel.is_cancelled() {
                 return Err(SegErr::Cancelled);
@@ -553,65 +691,70 @@ impl Engine {
                 Ok(s) => s,
                 Err(e) if e.code == "VOD_NOT_FOUND" => return Err(SegErr::VodGone(e.message)),
                 Err(e) if e.code == "AUTH_REQUIRED" || e.code == "FORMAT" => return Err(failed(&e.code, e.message)),
-                // resolving already retried (and failures are remembered for a
-                // while, QA-13): offline fails the segment at once
-                Err(e) if e.code == "NETWORK" => return Err(failed(&e.code, e.message)),
-                Err(e) => {
-                    attempt += 1;
-                    if attempt > SEGMENT_RETRIES {
-                        return Err(failed(&e.code, e.message));
-                    }
-                    backoff(attempt, cancel).await?;
-                    continue;
-                }
+                // resolving retried by itself (and the failure is reused briefly)
+                Err(e) if e.code == "NETWORK" => return Err(SegErr::Offline(e.message)),
+                Err(e) => net_retry!('outer, failed(&e.code, e.message)),
+            };
+            let Some(want) = src.info.variants.iter().position(|x| store::rendition_key(x) == key) else {
+                return Err(failed("FORMAT", format!("rendition {key} is no longer offered for this VOD")));
             };
             // the requested rendition, then lower ones (CDN truncation only)
             let mut order: Vec<usize> = (0..src.info.variants.len()).collect();
             order.sort_by_key(|&k| std::cmp::Reverse(src.info.variants[k].pixels()));
-            let h0 = src.info.variants.get(v).map(|x| x.height).unwrap_or(0);
-            let mut cands = vec![v];
-            cands.extend(order.into_iter().filter(|&k| k != v && src.info.variants[k].height < h0));
-            let cands: Vec<usize> = cands.into_iter().filter(|k| !truncated.contains(k)).collect();
+            let h0 = src.info.variants[want].height;
+            let mut cands = vec![want];
+            cands.extend(order.into_iter().filter(|&k| k != want && src.info.variants[k].height < h0));
+            let cands: Vec<usize> = cands.into_iter().filter(|k| !skipped.contains(k)).collect();
             for vv in cands {
                 let pl = match self.playlist(pid, &src, vv).await {
                     Ok(pl) => pl,
-                    Err(e) => {
-                        attempt += 1;
-                        if attempt > SEGMENT_RETRIES {
-                            return Err(failed(&e.code, e.message));
-                        }
-                        backoff(attempt, cancel).await?;
-                        continue 'outer;
-                    }
+                    Err(e) if e.code == "NETWORK" => net_retry!('outer, SegErr::Offline(e.message)),
+                    Err(e) => net_retry!('outer, failed(&e.code, e.message)),
                 };
                 if pl.segments.len() != src.playlist.segments.len() || i >= pl.segments.len() {
-                    tracing::warn!("{pid}: rendition {vv} segmentation differs; skipping");
-                    truncated.push(vv);
+                    tracing::warn!("{pid}: rendition {} segmentation differs; skipping", store::rendition_key(&src.info.variants[vv]));
+                    skipped.push(vv);
+                    segmentation += 1;
                     continue;
                 }
-                let vdir = store::variant_dir(dir, vv);
+                // the folder of this rendition (assigned once per key)
+                let r = store::Rendition::of(&src.info.variants[vv]);
+                let folder = self
+                    .with_ps(pid, |ps| {
+                        let before = ps.idx.renditions.len();
+                        let f = ps.idx.folder_for(&r);
+                        if ps.idx.renditions.len() != before {
+                            ps.idx_dirty = true;
+                            ps.refresh_heights();
+                        }
+                        f
+                    })
+                    .map_err(|e| failed(&e.code, e.message))?;
+                // the project was deleted meanwhile: don't recreate its folder (R-21)
+                if cancel.is_cancelled() || !dir.join("project.json").is_file() {
+                    return Err(SegErr::Cancelled);
+                }
+                let vdir = store::variant_dir(dir, folder);
                 if let Err(e) = tokio::fs::create_dir_all(&vdir).await {
-                    return Err(failed("IO", e.to_string()));
+                    net_retry!('outer, failed("IO", e.to_string()));
                 }
                 // the init segment: once per rendition (several segment
                 // downloads of a new rendition start together)
-                let init_lock = self.resolve_locks.lk().entry(format!("{pid}#init{vv}")).or_default().clone();
-                let _init_guard = init_lock.lock().await;
-                if container == Container::Fmp4 && !store::init_path(dir, vv).is_file() {
+                let init_lock = self.resolve_locks.lk().entry(format!("{pid}#init{folder}")).or_default().clone();
+                let init_guard = init_lock.lock().await;
+                if container == Container::Fmp4 && !store::init_path(dir, folder).is_file() {
                     let Some(u) = &pl.init_url else { return Err(failed("FORMAT", "rendition has no init segment".into())) };
                     match src.http.get_bytes(u).await {
-                        Ok(b) => write_atomic_async(&store::init_path(dir, vv), &b).await.map_err(|e| failed("IO", e.to_string()))?,
-                        Err(e) => {
-                            attempt += 1;
-                            if attempt > SEGMENT_RETRIES {
-                                return Err(failed(super::net_code(&e), e.to_string()));
+                        Ok(b) => {
+                            if let Err(e) = write_atomic_blocking(store::init_path(dir, folder), b).await {
+                                net_retry!('outer, failed("IO", e.to_string()));
                             }
-                            backoff(attempt, cancel).await?;
-                            continue 'outer;
                         }
+                        Err(e) if is_offline(&e) => net_retry!('outer, SegErr::Offline(e.to_string())),
+                        Err(e) => net_retry!('outer, failed(super::net_code(&e), e.to_string())),
                     }
                 }
-                drop(_init_guard);
+                drop(init_guard);
                 let url = pl.segments[i].clone();
                 let r = tokio::select! {
                     _ = cancel.cancelled() => return Err(SegErr::Cancelled),
@@ -624,21 +767,21 @@ impl Engine {
                             Container::Ts => !bytes.is_empty() && bytes[0] == 0x47 && bytes.len() % 188 == 0,
                         };
                         if !ok && container == Container::Fmp4 {
-                            tracing::warn!("{pid}: segment {i} of rendition {vv} is truncated on the CDN; trying a lower one");
-                            truncated.push(vv);
+                            tracing::warn!("{pid}: segment {i} of rendition {} is truncated on the CDN; trying a lower one", r_key(&src, vv));
+                            skipped.push(vv);
                             continue;
                         }
                         if !ok {
-                            attempt += 1;
-                            if attempt > SEGMENT_RETRIES {
-                                return Err(failed("FORMAT", format!("segment {i} is not MPEG-TS")));
-                            }
-                            backoff(attempt, cancel).await?;
-                            continue 'outer;
+                            net_retry!('outer, failed("FORMAT", format!("segment {i} is not MPEG-TS")));
                         }
-                        let path = store::segment_path(dir, vv, i, container);
-                        write_atomic_async(&path, &bytes).await.map_err(|e| failed("IO", e.to_string()))?;
-                        return Ok((vv, bytes.len() as u64));
+                        if cancel.is_cancelled() || !dir.join("project.json").is_file() {
+                            return Err(SegErr::Cancelled);
+                        }
+                        let n = bytes.len() as u64;
+                        if let Err(e) = write_atomic_blocking(store::segment_path(dir, folder, i, container), bytes).await {
+                            net_retry!('outer, failed("IO", e.to_string()));
+                        }
+                        return Ok((folder, n));
                     }
                     Err(e) => {
                         let status = e.status();
@@ -648,16 +791,19 @@ impl Engine {
                             self.drop_source_cache(pid).await;
                             continue 'outer;
                         }
-                        attempt += 1;
-                        if attempt > SEGMENT_RETRIES {
-                            return Err(failed(super::net_code(&e), e.to_string()));
+                        if is_offline(&e) {
+                            net_retry!('outer, SegErr::Offline(e.to_string()));
                         }
-                        backoff(attempt, cancel).await?;
-                        continue 'outer;
+                        net_retry!('outer, failed(super::net_code(&e), e.to_string()));
                     }
                 }
             }
-            return Err(failed("CDN_TRUNCATED", format!("no rendition could serve segment {i} (truncated on the CDN)")));
+            // R-27: only "truncated" when a CDN copy actually was
+            return Err(if segmentation > 0 && segmentation == skipped.len() {
+                failed("FORMAT", format!("the rendition's segments don't match the VOD's (segment {i})"))
+            } else {
+                failed("CDN_TRUNCATED", format!("no rendition could serve segment {i} (truncated on the CDN)"))
+            });
         }
     }
 
@@ -668,6 +814,29 @@ impl Engine {
             let mut st = self.video.st.lk();
             st.inflight = st.inflight.saturating_sub(1);
             let mut fetched_sec = 0.0;
+            match &r {
+                Ok(_) => {
+                    if st.offline.take().is_some() {
+                        tracing::info!("network back; video downloads continue");
+                        for ps in st.projects.values_mut() {
+                            ps.dirty = true;
+                        }
+                    }
+                }
+                Err(SegErr::Offline(msg)) => {
+                    let step = st.offline.as_ref().map(|o| o.step + 1).unwrap_or(0);
+                    let wait = Duration::from_secs((5u64 << step.min(6)).min(300));
+                    if st.offline.is_none() {
+                        tracing::warn!("network down ({msg}); video downloads wait and retry");
+                    }
+                    let since = st.offline.as_ref().map(|o| o.since.clone()).unwrap_or_else(project::now);
+                    st.offline = Some(Offline { since, until: Instant::now() + wait, step, reason: msg.clone() });
+                    for ps in st.projects.values_mut() {
+                        ps.dirty = true;
+                    }
+                }
+                _ => {}
+            }
             if let Some(ps) = st.projects.get_mut(pid) {
                 ps.fetching.remove(&i);
                 ps.dirty = true;
@@ -679,7 +848,7 @@ impl Engine {
                         }
                         fetched_sec = ps.tl.as_ref().map(|t| t.dur(i)).unwrap_or(0.0);
                     }
-                    Err(SegErr::Cancelled) => {}
+                    Err(SegErr::Cancelled) | Err(SegErr::Offline(_)) => {}
                     Err(SegErr::VodGone(msg)) => {
                         ps.vod_gone = true;
                         for (_, (_, t)) in ps.fetching.iter() {
@@ -726,7 +895,8 @@ impl Engine {
                 failed,
                 code,
             });
-            if r.process && ok {
+            // separate what arrived, even if some segments failed (R-14)
+            if r.process {
                 let mut rs = r.ranges.clone();
                 if let Ok(p) = self.get(pid) {
                     for id in &r.song_ids {
@@ -914,16 +1084,38 @@ impl Engine {
         if is_local(p) {
             return self.local_view(p, t, end);
         }
-        let (tl, piece, dir, container, heights) = self.with_ps(pid, |ps| {
+        // a wanted end beyond one view's length isn't honoured (R-18)
+        let end = end.map(|e| e.min(t + VIEW_MAX_SEC));
+        let (tl, piece, dir, container, heights, reuse) = self.with_ps(pid, |ps| {
             let tl = ps.tl.clone();
             let seg = tl.as_ref().and_then(|tl| tl.seg_at(t));
             let piece = seg.and_then(|s| ps.stretches().into_iter().flat_map(|(_, _, pcs)| pcs).find(|pc| pc.first() <= s && s < pc.last()));
-            (tl, piece, ps.dir.clone(), ps.container, ps.heights.clone())
+            // an existing view that already shows t (and the wanted end) is
+            // kept while the stretch around it grows (R-18)
+            let seg_end = end.and_then(|e| tl.as_ref().and_then(|tl| tl.seg_at(e)));
+            let reuse = match (&piece, seg) {
+                (Some(Piece::Raw { variant, first, last }), Some(s)) => ps
+                    .idx
+                    .views
+                    .iter()
+                    .find(|v| {
+                        v.variant == *variant
+                            && v.first >= *first
+                            && v.last <= *last
+                            && v.first <= s
+                            && s < v.last
+                            && seg_end.is_none_or(|e| e < v.last || v.last == *last)
+                            && ps.dir.join(&v.file).is_file()
+                    })
+                    .cloned(),
+                _ => None,
+            };
+            (tl, piece, ps.dir.clone(), ps.container, ps.heights.clone(), reuse)
         })?;
         let tl = tl.ok_or_else(|| precondition("fetch the audio first"))?;
         let piece = piece.ok_or_else(missing)?;
         match piece {
-            Piece::Legacy { file, variant, first, last, origin } => Ok(VideoView {
+            Piece::Legacy { file, variant, first, last, origin, .. } => Ok(VideoView {
                 file: rel(&dir, &file),
                 path: file,
                 origin,
@@ -933,12 +1125,20 @@ impl Engine {
                 kind: "legacy".into(),
             }),
             Piece::Raw { variant, first, last } => {
-                // whole stretch, or a window around t
+                if let Some(v) = reuse {
+                    let file = v.file.clone();
+                    let path = dir.join(&file);
+                    let out = VideoView { file, path, origin: v.origin, start: tl.start(v.first), end: tl.end(v.last - 1), height: heights.get(variant).copied(), kind: "segments".into() };
+                    self.touch_view(pid, ViewEntry { last_used: project::now(), ..v });
+                    return Ok(out);
+                }
+                // whole stretch, or a window around t on a 10-minute grid so
+                // nearby seeks share it (R-18)
                 let (a, b) = if tl.end(last - 1) - tl.start(first) <= VIEW_MAX_SEC {
                     (first, last)
                 } else {
-                    let want_end = end.unwrap_or(t).max(t + VIEW_MAX_SEC * 2.0 / 3.0);
-                    let s = tl.segments_for(t - VIEW_MAX_SEC / 3.0, want_end, 0.0);
+                    let (wa, wb) = view_window(t, end);
+                    let s = tl.segments_for(wa, wb, 0.0);
                     (s.start.max(first), s.end.min(last))
                 };
                 let key = format!("v{variant}_{a}_{b}");
@@ -962,8 +1162,8 @@ impl Engine {
         let src = p.source.as_ref().unwrap();
         let file = PathBuf::from(&src.url);
         let dur = src.duration.max(p.audio.as_ref().map(|a| a.duration).unwrap_or(0.0));
-        let a = (t - VIEW_MAX_SEC / 3.0).max(0.0);
-        let b = (end.unwrap_or(t).max(t + VIEW_MAX_SEC * 2.0 / 3.0)).min(if dur > 0.0 { dur } else { f64::MAX });
+        let (a, b) = view_window(t, end);
+        let b = b.min(if dur > 0.0 { dur } else { f64::MAX });
         let m = self.align_local(p)?.m;
         // media window [a + m, b + m] of the recording
         let key = format!("local_{}_{}", (a * 1000.0) as u64, (b * 1000.0) as u64);
@@ -1071,23 +1271,24 @@ async fn backoff(attempt: u32, cancel: &tokio_util::sync::CancellationToken) -> 
     }
 }
 
-/// Write via a temp file unique to this call, then rename over `path` (a
-/// concurrent writer of the same file never loses its temp file).
-pub(crate) async fn write_atomic_async(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_extension(format!("{ext}.{}.part", project::new_id("")));
-    tokio::fs::write(&tmp, bytes).await?;
-    if let Err(e) = tokio::fs::rename(&tmp, path).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        // someone else wrote the same complete file first: fine
-        if !path.is_file() {
-            return Err(e);
-        }
-    }
-    Ok(())
-}
 
 /// Missing / total seconds and size of fetching `rs`.
+/// Window of a long view around `t`: starts on a 10-minute grid at least
+/// 10 minutes before t, is [`VIEW_MAX_SEC`] long, and reaches `end` when that
+/// fits (R-18).
+fn view_window(t: f64, end: Option<f64>) -> Range {
+    const GRID: f64 = 600.0;
+    let a = (((t - GRID) / GRID).floor() * GRID).max(0.0);
+    let mut b = a + VIEW_MAX_SEC;
+    if let Some(e) = end.filter(|&e| e > b) {
+        // shift forward along the grid, keeping t inside
+        let a2 = (((e - VIEW_MAX_SEC) / GRID).ceil() * GRID).min(((t / GRID).floor() * GRID).max(0.0));
+        b = a2 + VIEW_MAX_SEC;
+        return (a2, b);
+    }
+    (a, b)
+}
+
 fn plan_of(ps: &PState, p: &Project, rs: &[Range], height: Option<u32>, request_id: Option<String>) -> ApiResult<FetchPlan> {
     let tl = ps.tl.as_ref().ok_or_else(|| precondition("fetch the audio first (it places the video segments)"))?;
     let segs = tl.segments_in(rs, EDGE_EPS);
@@ -1095,15 +1296,18 @@ fn plan_of(ps: &PState, p: &Project, rs: &[Range], height: Option<u32>, request_
     let missing_sec = tl.seconds(missing.iter().copied());
     let variants = p.source.as_ref().map(|s| s.variants.clone()).unwrap_or_default();
     // each missing segment at the rendition it will be fetched in (next to
-    // existing video: that one)
-    let preferred = crate::source::pick_variant(&variants, height);
+    // existing video: that one), one pass per gap (R-12)
+    let pref = variants.get(crate::source::pick_variant(&variants, height));
+    let pref_bw = pref.map(|x| x.bandwidth).unwrap_or(8_000_000);
+    let preferred = pref.and_then(|v| ps.idx.folder_of_key(&store::rendition_key(v))).unwrap_or(usize::MAX);
     let mut queued = ps.queued();
     queued.extend(missing.iter().copied());
+    let chosen = ps.choose_variants(&missing, preferred, &queued);
     let bytes: f64 = missing
         .iter()
         .map(|&i| {
-            let v = ps.choose_variant(i, preferred, &queued);
-            tl.dur(i) * variants.get(v).map(|x| x.bandwidth).unwrap_or(8_000_000) as f64 / 8.0
+            let bw = chosen.get(&i).and_then(|v| ps.idx.renditions.get(v)).map(|r| r.bandwidth).unwrap_or(pref_bw);
+            tl.dur(i) * bw as f64 / 8.0
         })
         .fold(0.0, |a, b| a + b);
     Ok(FetchPlan {
@@ -1184,3 +1388,71 @@ impl ApiError {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_outage_waits_instead_of_failing_segments() {
+        // R-3: "no network" while fetching keeps the segment queued, pauses
+        // every download with a growing wait, and clears on the next success
+        let root = std::env::temp_dir().join(format!("cliper-offline-{}-{}", std::process::id(), project::new_id("")));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = super::super::EngineConfig { projects_root: root.clone(), models_dir: root.join("models"), prefer_cpu: true, keep_awake: Some(false), prefs_path: None };
+        let eng = Engine::new(cfg, tx);
+        let mut p = eng.store.create("o1", "x").unwrap();
+        let frames = vec![375u32; 10];
+        p.audio = Some(project::AudioState {
+            file: "audio.aac".into(),
+            variant: 0,
+            duration: 80.0,
+            index: crate::hls::audio_extract::SegIndex { first_segment: 0, frames, durations: vec![8.0; 10], samples_per_frame: 1024, sample_rate: 48000 },
+            fetched_bytes: 0,
+            full_source_bytes: 0,
+            fallback_segments: 0,
+            elapsed_sec: 0.0,
+            dropped: false,
+            track: None,
+            rendition: None,
+        });
+        eng.store.save(&mut p).unwrap();
+        eng.with_ps("o1", |ps| {
+            ps.idx.requests.push(FetchRequest {
+                id: "r".into(),
+                ranges: vec![(1.0, 7.0)],
+                priority: Priority::User,
+                reason: "test".into(),
+                song_ids: vec![],
+                song_ranges: vec![],
+                height: None,
+                process: false,
+                created_at: String::new(),
+                seq: 1,
+                force: false,
+            });
+            ps.fetching.insert(0, (0, Default::default()));
+        })
+        .unwrap();
+        eng.video.st.lk().inflight = 1;
+        eng.segment_done("o1", 0, Err(SegErr::Offline("connection refused".into())));
+        let st = eng.video_state("o1").unwrap();
+        let off = st.offline.expect("offline state shown");
+        assert!(off.retry_in_sec > 3.0 && off.retry_in_sec <= 5.0, "{}", off.retry_in_sec);
+        assert_eq!(st.failed_sec, 0.0, "nothing failed");
+        assert_eq!(st.requests.len(), 1);
+        assert_eq!(eng.with_ps("o1", |ps| ps.next_segment(false).map(|x| x.2)).unwrap(), Some(0), "still queued");
+        // nothing starts during the wait
+        eng.video_dispatch();
+        assert_eq!(eng.video.st.lk().inflight, 0);
+        // the next outage waits longer
+        eng.segment_done("o1", 0, Err(SegErr::Offline("connection refused".into())));
+        let off = eng.video_state("o1").unwrap().offline.unwrap();
+        assert!(off.retry_in_sec > 5.0 && off.retry_in_sec <= 10.0, "{}", off.retry_in_sec);
+        // a download that works ends it
+        eng.segment_done("o1", 0, Ok((0, 10)));
+        assert!(eng.video_state("o1").unwrap().offline.is_none());
+        drop(eng);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

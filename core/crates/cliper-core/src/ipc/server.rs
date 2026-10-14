@@ -17,12 +17,13 @@ use crate::analysis::detect::Params;
 use crate::engine::{ApiError, Engine, EngineConfig, Event};
 use crate::project::{Mute, Settings, Song};
 
-/// 3: segment-based video (`video.*`, `stems.ensure`, `storage.*`, `media.drop`,
-/// `vod.check`; `Project.clips` is gone, see docs/ipc.md "What changed").
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 4: protocol-2 leftovers removed (`clips.*`, `clip.*`, `project.drop_media`,
+/// `Project.clips`, `Song.clip_id`), split error codes (`DUPLICATE_PROJECT`,
+/// `VIDEO_BUSY`), `separated_songs`; see docs/ipc.md "What changed in protocol 4".
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Oldest client protocol this engine still serves (clients built for an
 /// older protocol should warn).
-pub const MIN_CLIENT_PROTOCOL: u32 = 3;
+pub const MIN_CLIENT_PROTOCOL: u32 = 4;
 
 fn rpc_error(code: i64, message: &str, data: Option<Value>) -> Value {
     let mut e = json!({ "code": code, "message": message });
@@ -130,10 +131,6 @@ struct MuteRemoveArg {
     base_revision: Option<u64>,
 }
 #[derive(Deserialize)]
-struct DropMediaArg {
-    id: String,
-}
-#[derive(Deserialize)]
 struct MediaDropArg {
     id: String,
     level: crate::storage::DropLevel,
@@ -219,11 +216,6 @@ struct DetectArg {
     params: Option<Params>,
     #[serde(default)]
     retag: bool,
-}
-#[derive(Deserialize)]
-struct ClipsArg {
-    id: String,
-    song_ids: Option<Vec<String>>,
 }
 #[derive(Deserialize)]
 struct ExportArg {
@@ -324,12 +316,6 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
             let a: MuteRemoveArg = p(&params)?;
             to_json(eng.remove_mute(&a.id, &a.song_id, &a.mute_id, a.base_revision).await?)
         }
-        "project.drop_media" => {
-            // protocol 2: video + stems
-            let a: DropMediaArg = p(&params)?;
-            let (project, freed) = eng.media_drop(&a.id, crate::storage::DropLevel::Video, false).await?;
-            Ok(json!({ "project": project, "freed_bytes": freed }))
-        }
         "media.drop" => {
             let a: MediaDropArg = p(&params)?;
             let (project, freed) = eng.media_drop(&a.id, a.level, a.force).await?;
@@ -398,10 +384,6 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
             let a: NetArg = if params.is_null() { NetArg::default() } else { p(&params)? };
             to_json(crate::http::net_stats(a.reset))
         }
-        "clip.drop_media" | "clip.extend" => Err(ApiError::new(
-            "INVALID_PARAMS",
-            format!("{method} was removed in protocol 3: video is kept per VOD range (video.fetch, media.drop)"),
-        )),
         "audio.window" => {
             let a: WindowArg = p(&params)?;
             eng.audio_window(&a.id, a.start, a.duration, a.sample_rate, a.channels).await
@@ -414,8 +396,6 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
             let a: MetaArg = p(&params)?;
             eng.export_metadata(&a.id, a.format, a.include_disabled, a.path.as_deref())
         }
-        // protocol 2: nothing to plan any more
-        "clips.plan" => to_json(eng.get(&p::<IdArg>(&params)?.id)?),
         "detect.default_params" => to_json(Params::default()),
         "detect.rerun" => {
             let a: RerunArg = p(&params)?;
@@ -425,10 +405,6 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         "detect.run" => {
             let a: DetectArg = p(&params)?;
             job(eng.job_detect(&a.id, a.params, a.retag))
-        }
-        "clips.fetch" => {
-            let a: ClipsArg = p(&params)?;
-            job(eng.job_fetch_clips(&a.id, a.song_ids))
         }
         "export.run" => {
             let a: ExportArg = p(&params)?;
@@ -454,7 +430,18 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
 pub async fn serve(cfg: EngineConfig) -> anyhow::Result<()> {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Event>();
-    let eng = Engine::new(cfg, ev_tx);
+    let eng = match Engine::try_new(cfg, ev_tx) {
+        Ok(e) => e,
+        Err(e) => {
+            // the UI reads this instead of `engine.ready`, then the process exits
+            let msg = json!({ "jsonrpc": "2.0", "method": "engine.failed",
+                "params": { "protocol": PROTOCOL_VERSION, "code": e.code, "message": e.message, "data": e.data } });
+            let mut out = tokio::io::stdout();
+            let _ = out.write_all(format!("{msg}\n").as_bytes()).await;
+            let _ = out.flush().await;
+            anyhow::bail!("{}: {}", e.code, e.message);
+        }
+    };
 
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();

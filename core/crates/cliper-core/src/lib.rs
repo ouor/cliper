@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod local;
 pub mod ml;
 pub mod platforms;
+pub mod prefs;
 pub mod progress;
 pub mod project;
 pub mod queue;

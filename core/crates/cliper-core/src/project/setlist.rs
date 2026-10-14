@@ -165,12 +165,14 @@ mod tests {
             reviewed: false,
             note: String::new(),
             confidence: None,
-            clip_id: None,
             mutes: vec![],
             mute_enabled: true,
             fade_in: None,
             fade_out: None,
             export: None,
+            video_wanted: false,
+            listened: false,
+            extra: Default::default(),
         }
     }
 

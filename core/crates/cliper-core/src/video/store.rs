@@ -64,6 +64,9 @@ pub struct FetchRequest {
     /// separate + suggest mutes for `song_ids` (or `ranges`) once fetched
     #[serde(default)]
     pub process: bool,
+    /// runs even while downloads are paused (an export waiting for it, R-11)
+    #[serde(default)]
+    pub force: bool,
     pub created_at: String,
     /// order among requests of the same priority, across projects
     /// (microseconds since 1970 when made; 0 = "fetch this first")
@@ -96,7 +99,51 @@ pub struct LegacyPiece {
     /// VOD time of file t = 0 (old `vod_start + offset`)
     pub origin: f64,
     pub resolution: String,
+    /// rendition key (resolved once from the index-era `variant`); `variant`
+    /// is then the rendition folder number of that key
+    #[serde(default)]
+    pub key: Option<String>,
 }
+
+/// What a rendition folder `v<N>` holds (A-1): its key and description.
+/// Folder numbers are assigned once per key and never reused, so a folder
+/// (and its `init.mp4`, alignment, probes) never mixes two renditions even
+/// if the platform reorders, adds or removes renditions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Rendition {
+    pub key: String,
+    pub width: u32,
+    pub height: u32,
+    pub bandwidth: u64,
+    #[serde(default)]
+    pub codecs: Option<String>,
+}
+
+/// Stable identity of a rendition across re-resolves: size, bitrate, codecs.
+pub fn rendition_key(v: &crate::hls::m3u8::Variant) -> String {
+    match &v.codecs {
+        Some(c) => format!("{}x{}@{}/{}", v.width, v.height, v.bandwidth, c),
+        None => format!("{}x{}@{}", v.width, v.height, v.bandwidth),
+    }
+}
+
+impl Rendition {
+    pub fn of(v: &crate::hls::m3u8::Variant) -> Self {
+        Self { key: rendition_key(v), width: v.width, height: v.height, bandwidth: v.bandwidth, codecs: v.codecs.clone() }
+    }
+}
+
+/// Why a sidecar couldn't be used.
+#[derive(Debug, thiserror::Error)]
+pub enum IndexError {
+    #[error("video/index.json was written by a newer engine (version {0}); update Cliper")]
+    Newer(u32),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Version of `video/index.json` this engine writes (2: rendition table).
+pub const INDEX_VERSION: u32 = 2;
 
 /// Video ↔ analysis alignment of one rendition (or of the local recording):
 /// `vod = media − m`, where media time is the rendition's own timestamps
@@ -153,18 +200,79 @@ pub struct VideoIndex {
     /// "v<variant>:<segment>" → probe
     pub probes: BTreeMap<String, Probe>,
     pub views: Vec<ViewEntry>,
+    /// rendition folder number → what it holds (A-1)
+    pub renditions: BTreeMap<usize, Rendition>,
+    /// ranges to separate once fetched (`video.fetch {process}`), kept until done
+    pub pending_process: Vec<Range>,
+    /// problems met while loading (a corrupt file set aside), for `VideoState.warnings`
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 impl VideoIndex {
     pub fn path(project_dir: &Path) -> PathBuf {
         project_dir.join(DIR).join("index.json")
     }
-    pub fn load(project_dir: &Path) -> Self {
-        std::fs::read(Self::path(project_dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| Self { version: 1, ..Default::default() })
+
+    /// Load the index. A missing file is an empty index. A file that doesn't
+    /// parse is never silently replaced (A-3): it is set aside as
+    /// `index.json.corrupt-<time>`, the last good copy (`index.json.bak`) is
+    /// used if there is one, and a warning is recorded. A newer version is refused.
+    pub fn load(project_dir: &Path) -> Result<Self, IndexError> {
+        let path = Self::path(project_dir);
+        let parse = |p: &Path| -> Option<Result<Self, IndexError>> {
+            let b = std::fs::read(p).ok()?;
+            let v: serde_json::Value = serde_json::from_slice(&b).ok()?;
+            let ver = v.get("version").and_then(|x| x.as_u64()).unwrap_or(1) as u32;
+            if ver > INDEX_VERSION {
+                return Some(Err(IndexError::Newer(ver)));
+            }
+            serde_json::from_value::<Self>(v).ok().map(Ok)
+        };
+        if !path.exists() {
+            return Ok(Self { version: INDEX_VERSION, ..Default::default() });
+        }
+        if let Some(r) = parse(&path) {
+            return r;
+        }
+        let bad = path.with_file_name(format!("index.json.corrupt-{}", chrono::Utc::now().format("%Y%m%d%H%M%S")));
+        std::fs::rename(&path, &bad)?;
+        let bak = path.with_file_name("index.json.bak");
+        let (mut idx, how) = match parse(&bak) {
+            Some(Ok(i)) => (i, "the last good copy was used"),
+            Some(Err(e)) => return Err(e),
+            None => (Self { version: INDEX_VERSION, ..Default::default() }, "no good copy: downloads in progress and adopted clips were lost"),
+        };
+        let w = format!("video/index.json could not be read; set aside as {}; {how}", bad.file_name().unwrap().to_string_lossy());
+        tracing::error!("{}: {w}", project_dir.display());
+        idx.warnings.push(w);
+        Ok(idx)
     }
+
+    /// Save (the previous file becomes `index.json.bak`).
     pub fn save(&self, project_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(project_dir.join(DIR))?;
-        crate::project::store::write_atomic(&Self::path(project_dir), &serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?)
+        let path = Self::path(project_dir);
+        if path.is_file() {
+            let _ = std::fs::copy(&path, path.with_file_name("index.json.bak"));
+        }
+        let mut me = self.clone();
+        me.version = INDEX_VERSION;
+        crate::project::store::write_atomic(&path, &serde_json::to_vec_pretty(&me).map_err(std::io::Error::other)?)
+    }
+
+    /// Folder number for a rendition key (a new one if the key is unknown).
+    pub fn folder_for(&mut self, r: &Rendition) -> usize {
+        if let Some((&n, _)) = self.renditions.iter().find(|(_, x)| x.key == r.key) {
+            return n;
+        }
+        let n = self.renditions.keys().next_back().map(|n| n + 1).unwrap_or(0);
+        self.renditions.insert(n, r.clone());
+        n
+    }
+
+    pub fn folder_of_key(&self, key: &str) -> Option<usize> {
+        self.renditions.iter().find(|(_, x)| x.key == key).map(|(&n, _)| n)
     }
 }
 
@@ -213,6 +321,19 @@ impl HaveKind {
 pub struct Have {
     pub kind: HaveKind,
     pub bytes: u64,
+}
+
+/// Rendition folder numbers present on disk (`video/v<N>/`).
+pub fn raw_folders(project_dir: &Path) -> Vec<usize> {
+    let mut out: Vec<usize> = std::fs::read_dir(project_dir.join(DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_string_lossy().strip_prefix('v').and_then(|n| n.parse().ok()))
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// Scan the store: which segments are on disk and in what form. Raw segments
@@ -278,8 +399,8 @@ mod tests {
         std::fs::write(d.join("clips/c1/source.mp4"), vec![0u8; 300]).unwrap();
         let idx = VideoIndex {
             legacy: vec![
-                LegacyPiece { id: "c1".into(), file: "clips/c1/source.mp4".into(), variant: 3, first: 1, last: 4, origin: 0.0, resolution: String::new() },
-                LegacyPiece { id: "gone".into(), file: "clips/gone/source.mp4".into(), variant: 3, first: 20, last: 22, origin: 0.0, resolution: String::new() },
+                LegacyPiece { id: "c1".into(), file: "clips/c1/source.mp4".into(), variant: 3, first: 1, last: 4, origin: 0.0, resolution: String::new(), key: None },
+                LegacyPiece { id: "gone".into(), file: "clips/gone/source.mp4".into(), variant: 3, first: 20, last: 22, origin: 0.0, resolution: String::new(), key: None },
             ],
             ..Default::default()
         };
@@ -289,7 +410,10 @@ mod tests {
         assert_eq!(h[&2].kind, HaveKind::Legacy(0));
         assert_eq!(h[&2].bytes, 100);
         idx.save(&d).unwrap();
-        assert_eq!(VideoIndex::load(&d).legacy.len(), 2);
+        assert_eq!(VideoIndex::load(&d).unwrap().legacy.len(), 2);
+        // A-3: a newer index is refused, not reset
+        std::fs::write(d.join(DIR).join("index.json"), br#"{"version": 99}"#).unwrap();
+        assert!(matches!(VideoIndex::load(&d), Err(IndexError::Newer(99))));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

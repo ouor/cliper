@@ -8,19 +8,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::detect::{Analysis, Candidate, Confidence, Params};
 use crate::hls::audio_extract::{AudioResult, SegIndex};
-use crate::hls::video_fetch::VideoClip;
 use crate::source::SourceInfo;
-use crate::stems::Stems;
 
-/// `@2`: segment-based video (video in `video/`, stems as [`StemSpan`]s);
-/// `@1` projects (clips) are migrated on load, see `project::migrate`.
-pub const SCHEMA: &str = "cliper/project@2";
+/// `@3`: protocol-2 leftovers removed, `uid`; `@2`: segment-based video
+/// (video in `video/`, stems as [`StemSpan`]s). Older projects are migrated on
+/// load (`project::migrate`), newer ones refused.
+pub const SCHEMA: &str = "cliper/project@3";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Project {
     pub schema: String,
     pub id: String,
+    /// random, made once: tells two copies of a folder (same `id`) apart
+    #[serde(default)]
+    pub uid: String,
     /// what the user typed (URL / id)
     pub input: String,
     pub created_at: String,
@@ -34,10 +36,6 @@ pub struct Project {
     pub detection: Option<Detection>,
     pub settings: Settings,
     pub songs: Vec<Song>,
-    /// deprecated (schema @1): always empty since the segment store; kept so
-    /// older clients still parse the project. Video: `video.*` methods.
-    #[serde(default)]
-    pub clips: Vec<Clip>,
     /// separated audio, each a contiguous VOD range (sorted, non-overlapping)
     #[serde(default)]
     pub stems: Vec<StemSpan>,
@@ -57,6 +55,10 @@ pub struct Project {
     /// last failed job of this project (cleared when a job of that kind succeeds)
     #[serde(default)]
     pub last_error: Option<JobError>,
+    /// fields written by a newer engine, kept as they are (A-2)
+    #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +102,14 @@ pub struct StemSpan {
     pub model: String,
     pub device: crate::ml::runtime::Device,
     pub created_at: String,
+    /// 0 = written before the per-rendition placement fix (QA-2): checked
+    /// again by the next `stems.ensure` that touches it; 1 = current
+    #[serde(default)]
+    pub version: u32,
 }
+
+/// Current [`StemSpan::version`].
+pub const STEM_VERSION: u32 = 1;
 
 impl StemSpan {
     pub fn file(&self, name: &str) -> String {
@@ -136,6 +145,9 @@ pub struct AudioState {
     /// local recordings: the audio track copied (None = remote / older projects)
     #[serde(default)]
     pub track: Option<u32>,
+    /// rendition key of `variant` (see `video::store::rendition_key`)
+    #[serde(default)]
+    pub rendition: Option<String>,
 }
 
 impl AudioState {
@@ -151,6 +163,7 @@ impl AudioState {
             elapsed_sec: r.elapsed_sec,
             dropped: false,
             track: None,
+            rendition: None,
         }
     }
 }
@@ -282,7 +295,6 @@ pub struct Song {
     /// detector confidence (auto songs; None for manual songs)
     #[serde(default)]
     pub confidence: Option<Confidence>,
-    pub clip_id: Option<String>,
     #[serde(default)]
     pub mutes: Vec<Mute>,
     /// apply this song's confirmed mutes on export (false = keep the original
@@ -295,6 +307,17 @@ pub struct Song {
     #[serde(default)]
     pub fade_out: Option<f64>,
     pub export: Option<ExportInfo>,
+    /// the user asked for this song's video (set by `video.fetch {song_ids}`
+    /// unless `reason` is "topup"/"auto"; editable with `song.update`)
+    #[serde(default)]
+    pub video_wanted: bool,
+    /// the user listened to this song in review
+    #[serde(default)]
+    pub listened: bool,
+    /// fields written by a newer engine, kept as they are (A-2)
+    #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Song {
@@ -336,67 +359,19 @@ pub struct ExportInfo {
     pub duration: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct Clip {
-    pub id: String,
-    /// requested VOD range (songs ± margins, merged)
-    pub start: f64,
-    pub end: f64,
-    pub video: Option<VideoClip>,
-    /// measured alignment: clip time = VOD time − video.vod_start − offset
-    #[serde(default)]
-    pub offset: f64,
-    pub stems: Option<Stems>,
-    /// talk regions found in the vocal stem (VOD time), mute suggestions
-    #[serde(default)]
-    pub talk: Vec<(f64, f64)>,
-    /// songs assigned to this clip (maintained by clip planning)
-    #[serde(default)]
-    pub song_ids: Vec<String>,
-    /// planned for specific songs (`clips.fetch {exact}`) or being fetched:
-    /// kept by re-planning even before its video exists
-    #[serde(default)]
-    pub pinned: bool,
-    /// how `offset` was obtained (None until the video is fetched)
-    #[serde(default)]
-    pub alignment: Option<Alignment>,
-}
-
-/// Clip ↔ analysis-audio alignment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct Alignment {
-    /// "measured" (cross-correlation confirmed) | "predicted" (from the segment
-    /// index only — the audio didn't match; check this clip's timing)
-    pub method: String,
-    /// normalised correlation of the best window (0..1)
-    pub corr: f32,
-    /// offset predicted from the segment index (s)
-    pub predicted: f64,
-    /// false = could not be confirmed; the UI should flag the clip
-    pub ok: bool,
-}
-
-impl Clip {
-    pub fn dir_name(&self) -> String {
-        format!("clips/{}", self.id)
-    }
-    /// VOD time → time inside the clip's files (None until the video exists).
-    pub fn to_clip_time(&self, vod: f64) -> Option<f64> {
-        self.video.as_ref().map(|v| vod - v.vod_start - self.offset)
-    }
-    pub fn to_vod_time(&self, clip_t: f64) -> Option<f64> {
-        self.video.as_ref().map(|v| clip_t + v.vod_start + self.offset)
-    }
-    /// VOD range actually covered by the downloaded video.
-    pub fn covered(&self) -> Option<(f64, f64)> {
-        self.video.as_ref().map(|v| (v.vod_start + self.offset, v.vod_start + self.offset + v.duration))
-    }
-}
-
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// 128 random bits as hex (std's per-instance random hasher keys).
+pub fn new_uid() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let r = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u128);
+        h.finish()
+    };
+    format!("{:016x}{:016x}", r(), r())
 }
 
 pub fn new_id(prefix: &str) -> String {
@@ -412,6 +387,7 @@ impl Project {
         Self {
             schema: SCHEMA.into(),
             id: id.to_string(),
+            uid: new_uid(),
             input: input.to_string(),
             created_at: now.clone(),
             updated_at: now,
@@ -421,13 +397,13 @@ impl Project {
             detection: None,
             settings: Settings::default(),
             songs: Vec::new(),
-            clips: Vec::new(),
             stems: Vec::new(),
             talk: Vec::new(),
             talk_scanned: Vec::new(),
             pinned: false,
             vod: None,
             last_error: None,
+            extra: Default::default(),
         }
     }
 
@@ -436,12 +412,6 @@ impl Project {
     }
     pub fn song_mut(&mut self, id: &str) -> Option<&mut Song> {
         self.songs.iter_mut().find(|s| s.id == id)
-    }
-    pub fn clip(&self, id: &str) -> Option<&Clip> {
-        self.clips.iter().find(|c| c.id == id)
-    }
-    pub fn clip_mut(&mut self, id: &str) -> Option<&mut Clip> {
-        self.clips.iter_mut().find(|c| c.id == id)
     }
 
     /// Does this song carry user work that detection must not throw away?
@@ -482,12 +452,14 @@ impl Project {
                 reviewed: false,
                 note: String::new(),
                 confidence: a.confidence.get(k).cloned(),
-                clip_id: None,
                 mutes: Vec::new(),
                 mute_enabled: true,
                 fade_in: None,
                 fade_out: None,
                 export: None,
+                video_wanted: false,
+                listened: false,
+                extra: Default::default(),
             });
         }
         songs.sort_by(|a, b| a.start.total_cmp(&b.start));

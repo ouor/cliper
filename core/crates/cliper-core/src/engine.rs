@@ -74,6 +74,14 @@ pub struct EngineConfig {
     pub prefer_cpu: bool,
     /// keep the PC awake while jobs run; None = the saved preference (default on)
     pub keep_awake: Option<bool>,
+    /// app preferences file (`serve --config`); None = `<projects>/engine.json`
+    pub prefs_path: Option<PathBuf>,
+}
+
+impl EngineConfig {
+    pub fn prefs_file(&self) -> PathBuf {
+        self.prefs_path.clone().unwrap_or_else(|| self.projects_root.join("engine.json"))
+    }
 }
 
 /// Machine-readable error for clients.
@@ -81,6 +89,7 @@ pub struct EngineConfig {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ApiError {
     /// INVALID_PARAMS | NOT_FOUND | BUSY | CONFLICT | ADDON | UNRECOGNIZED_INPUT | AUTH_REQUIRED | VOD_NOT_FOUND |
+    /// DUPLICATE_PROJECT | VIDEO_BUSY | ROOT_LOCKED | SCHEMA_NEWER |
     /// NETWORK | CDN_TRUNCATED | FORMAT | FFMPEG_MISSING | FFMPEG_FAILED | MODEL_MISSING |
     /// MODEL | CANCELLED | PRECONDITION | IO | INTERNAL | VIDEO_MISSING | VOD_GONE | NO_SPACE | PINNED
     pub code: String,
@@ -134,6 +143,7 @@ api_from!(ResolveError, |e: ResolveError| {
 });
 api_from!(project::store::StoreError, |e: project::store::StoreError| match e {
     project::store::StoreError::NotFound(_) => ApiError::new("NOT_FOUND", e),
+    project::store::StoreError::Newer(..) => ApiError::new("SCHEMA_NEWER", e),
     _ => ApiError::new("IO", e),
 });
 api_from!(std::io::Error, |e| ApiError::new("IO", e));
@@ -241,6 +251,10 @@ pub struct SystemInfo {
     /// None = no NVIDIA GPU found
     pub gpu: Option<GpuInfo>,
     pub keep_awake: bool,
+    /// app preferences file in use
+    pub prefs_path: PathBuf,
+    /// settings files that could not be read and were set aside (A-3)
+    pub warnings: Vec<String>,
     pub cookies: CookieStatus,
     /// the CUDA runtime add-on (install it when `needed`)
     pub cuda_addon: crate::addon::CudaAddon,
@@ -273,8 +287,8 @@ pub struct ProjectSummary {
     pub unreviewed: usize,
     /// mute suggestions waiting for confirmation (enabled songs)
     pub unconfirmed_mutes: usize,
-    /// enabled songs whose whole range has video and is separated
-    pub clips_ready: usize,
+    /// enabled songs whose whole range is separated (formerly `clips_ready`)
+    pub separated_songs: usize,
     /// kept out of cleanup (always sent by the engine; optional so clients
     /// that build summaries themselves may leave it out)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,6 +325,14 @@ pub struct Engine {
     separator: Mutex<Option<crate::ml::separator::Separator>>,
     cookies: Mutex<CookieJar>,
     keep_awake: AtomicBool,
+    /// app preferences and this folder's location registry (A-6); each
+    /// changes under its own lock so concurrent updates don't lose writes
+    prefs: Mutex<crate::prefs::AppPrefs>,
+    locations: Mutex<crate::prefs::Locations>,
+    /// problems met loading settings (reported in `system.info`)
+    warnings: Mutex<Vec<String>>,
+    /// exclusive use of the projects folder (taken by [`Engine::try_new`])
+    _root_lock: Option<crate::prefs::RootLock>,
     /// ADTS frame byte offsets of a project's analysis audio (audio.window)
     frame_index: Mutex<HashMap<String, FrameIndex>>,
     /// results of finished jobs, for `wait_job` (kept until read)
@@ -323,8 +345,6 @@ pub struct Engine {
     pub(crate) video: VideoMgr,
     /// project → lock serialising changes to its stems (ensure, export, cleanup)
     stems_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// project → ranges to separate once the running stems.ensure finishes
-    pending_process: Mutex<HashMap<String, Vec<Range>>>,
     /// when the last job ended (model release counts idle time from here)
     last_job_end: Mutex<Instant>,
 }
@@ -398,34 +418,6 @@ fn release_models_when_idle(eng: std::sync::Weak<Engine>) {
             }
         })
         .ok();
-}
-
-/// Engine preferences persisted in `<projects>/engine.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct EnginePrefs {
-    keep_awake: bool,
-    /// video downloads paused app-wide (`video.pause`)
-    video_paused: bool,
-    /// other folders holding projects (e.g. the previous projects folder)
-    project_roots: Vec<PathBuf>,
-    /// single project folders opened from elsewhere
-    project_dirs: Vec<PathBuf>,
-}
-
-impl Default for EnginePrefs {
-    fn default() -> Self {
-        Self { keep_awake: true, video_paused: false, project_roots: Vec::new(), project_dirs: Vec::new() }
-    }
-}
-
-impl EnginePrefs {
-    fn load(root: &Path) -> Self {
-        std::fs::read(root.join("engine.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-    }
-    fn save(&self, root: &Path) -> std::io::Result<()> {
-        project::store::write_atomic(&root.join("engine.json"), &serde_json::to_vec_pretty(self).unwrap())
-    }
 }
 
 fn gpu_name() -> Option<(String, u64)> {
@@ -791,14 +783,42 @@ fn precondition(msg: impl std::fmt::Display) -> ApiError {
 }
 
 impl Engine {
+    /// An engine without the projects-folder lock (tests, embedding).
     pub fn new(cfg: EngineConfig, events: UnboundedSender<Event>) -> Arc<Self> {
+        Self::build(cfg, events, None)
+    }
+
+    /// An engine with exclusive use of its projects folder: fails with
+    /// `ROOT_LOCKED` while another engine uses it (A-6).
+    pub fn try_new(cfg: EngineConfig, events: UnboundedSender<Event>) -> ApiResult<Arc<Self>> {
+        let _ = std::fs::create_dir_all(&cfg.projects_root);
+        let lock = crate::prefs::lock_root(&cfg.projects_root)
+            .map_err(|m| ApiError::new("ROOT_LOCKED", m).with_data(json!({ "root": cfg.projects_root })))?;
+        Ok(Self::build(cfg, events, Some(lock)))
+    }
+
+    fn build(cfg: EngineConfig, events: UnboundedSender<Event>, lock: Option<crate::prefs::RootLock>) -> Arc<Self> {
         let store = Store::new(&cfg.projects_root);
         let _ = std::fs::create_dir_all(&cfg.projects_root);
         let cookies = CookieJar::load(&cfg.projects_root);
-        let prefs = EnginePrefs::load(&cfg.projects_root);
+        let mut warnings = Vec::new();
+        let (prefs, w) = crate::prefs::load_prefs(&cfg.prefs_file(), &cfg.projects_root);
+        warnings.extend(w);
+        let (locs, w) = crate::prefs::load_locations(&cfg.projects_root);
+        warnings.extend(w);
+        // the split files are written once so the old engine.json is no longer needed
+        if !crate::prefs::locations_path(&cfg.projects_root).exists()
+            && locs != crate::prefs::Locations::default()
+            && let Err(e) = crate::prefs::save_guarded(&crate::prefs::locations_path(&cfg.projects_root), &locs)
+        {
+            tracing::warn!("locations.json: {e}");
+        }
+        if !cfg.prefs_file().exists() {
+            let _ = crate::prefs::save_guarded(&cfg.prefs_file(), &prefs);
+        }
         let keep_awake = cfg.keep_awake.unwrap_or(prefs.keep_awake);
         let video_paused = prefs.video_paused;
-        for (id, d) in store.set_locations(prefs.project_roots.clone(), prefs.project_dirs.clone()) {
+        for (id, d) in store.set_locations(locs.project_roots.clone(), locs.project_dirs.clone()) {
             tracing::warn!("project {id} at {} is hidden by another project with the same id", d.display());
         }
         let eng = Arc::new(Self {
@@ -814,6 +834,10 @@ impl Engine {
             separator: Mutex::new(None),
             cookies: Mutex::new(cookies),
             keep_awake: AtomicBool::new(keep_awake),
+            prefs: Mutex::new(prefs),
+            locations: Mutex::new(locs),
+            warnings: Mutex::new(warnings),
+            _root_lock: lock,
             frame_index: Mutex::new(HashMap::new()),
             finished: Mutex::new((HashMap::new(), std::collections::VecDeque::new())),
             job_finished: tokio::sync::Notify::new(),
@@ -822,7 +846,6 @@ impl Engine {
             queue_worker: AtomicBool::new(false),
             video: VideoMgr::new(video_paused),
             stems_locks: Mutex::new(HashMap::new()),
-            pending_process: Mutex::new(HashMap::new()),
             last_job_end: Mutex::new(Instant::now()),
         });
         keep_awake_while_busy(Arc::downgrade(&eng));
@@ -890,6 +913,8 @@ impl Engine {
             prefer_cpu: self.cfg.prefer_cpu,
             gpu: self.gpu_info(),
             keep_awake: self.keep_awake.load(Ordering::Relaxed),
+            prefs_path: self.cfg.prefs_file(),
+            warnings: self.warnings.lk().clone(),
             cookies: self.cookies.lk().status(),
             cuda_addon: crate::addon::cuda_status(gpu_name().is_some() && !self.cfg.prefer_cpu, &rt.cuda_dirs),
         }
@@ -996,9 +1021,14 @@ impl Engine {
     /// Keep the PC awake while jobs run (persisted).
     pub fn set_keep_awake(&self, enabled: bool) -> ApiResult<()> {
         self.keep_awake.store(enabled, Ordering::Relaxed);
-        let mut prefs = EnginePrefs::load(&self.cfg.projects_root);
-        prefs.keep_awake = enabled;
-        prefs.save(&self.cfg.projects_root)?;
+        self.update_prefs(|p| p.keep_awake = enabled)
+    }
+
+    /// Change and save the app preferences (one writer at a time).
+    pub(crate) fn update_prefs(&self, f: impl FnOnce(&mut crate::prefs::AppPrefs)) -> ApiResult<()> {
+        let mut p = self.prefs.lk();
+        f(&mut p);
+        crate::prefs::save_guarded(&self.cfg.prefs_file(), &*p)?;
         Ok(())
     }
 
@@ -1182,7 +1212,7 @@ fn summarize(store: &Store, projects: Vec<Project>) -> Vec<ProjectSummary> {
                 thumbnail: p.source.as_ref().and_then(|s| s.catalog.thumbnail.clone()),
                 unreviewed: p.songs.iter().filter(|s| s.enabled && !s.reviewed).count(),
                 unconfirmed_mutes: p.songs.iter().filter(|s| s.enabled).flat_map(|s| &s.mutes).filter(|m| !m.confirmed).count(),
-                clips_ready: {
+                separated_songs: {
                     let sep: Vec<Range> = p.stems.iter().map(|x| (x.start, x.end)).collect();
                     p.songs.iter().filter(|s| s.enabled && ranges::covers(&sep, (s.start, s.end), 0.05)).count()
                 },
@@ -1203,6 +1233,10 @@ impl Engine {
         if self.jobs.lk().values().any(|j| j.info.project_id == id) {
             return Err(ApiError::new("BUSY", "project has running jobs"));
         }
+        // in-flight downloads would recreate the folder (R-21)
+        if self.with_ps(id, |ps| !ps.idx.requests.is_empty() || !ps.fetching.is_empty()).unwrap_or(false) {
+            return Err(ApiError::new("VIDEO_BUSY", "video is being fetched for this project; cancel it first (video.cancel)"));
+        }
         self.forget_ps(id);
         let store = self.store.clone();
         let idc = id.to_string();
@@ -1222,11 +1256,13 @@ impl Engine {
     /// Change the remembered other locations, re-index them, persist.
     /// Returns ids hidden by a project with the same id elsewhere.
     fn apply_locations(&self, f: impl FnOnce(&mut Vec<PathBuf>, &mut Vec<PathBuf>)) -> ApiResult<Vec<(String, PathBuf)>> {
-        let mut prefs = EnginePrefs::load(&self.cfg.projects_root);
-        f(&mut prefs.project_roots, &mut prefs.project_dirs);
+        let mut locs = self.locations.lk();
+        let l = &mut *locs;
+        f(&mut l.project_roots, &mut l.project_dirs);
         let before: Vec<String> = self.store.ids();
-        let skipped = self.store.set_locations(prefs.project_roots.clone(), prefs.project_dirs.clone());
-        prefs.save(&self.cfg.projects_root)?;
+        let skipped = self.store.set_locations(locs.project_roots.clone(), locs.project_dirs.clone());
+        crate::prefs::save_guarded(&crate::prefs::locations_path(&self.cfg.projects_root), &*locs)?;
+        drop(locs);
         let after: Vec<String> = self.store.ids();
         for id in before.iter().filter(|id| !after.contains(id)) {
             self.forget_ps(id);
@@ -1253,7 +1289,7 @@ impl Engine {
             if canonical(&known).as_deref() == Some(dir.as_path()) {
                 return self.get(&id);
             }
-            return Err(ApiError::new("CONFLICT", format!("a project with the same id ({id}) is already open from {}", known.display()))
+            return Err(ApiError::new("DUPLICATE_PROJECT", format!("a project with the same id ({id}) is already open from {}", known.display()))
                 .with_data(json!({ "id": id, "dir": known })));
         }
         let d = dir.clone();
@@ -1276,7 +1312,7 @@ impl Engine {
         }
         // what that folder itself listed from elsewhere comes along (QA-6:
         // projects opened from other places were lost when switching folders)
-        let old = EnginePrefs::load(&dir);
+        let (old, _) = crate::prefs::load_locations(&dir);
         let me = canonical(&self.cfg.projects_root);
         let d = dir.clone();
         let skipped = self.apply_locations(move |roots, dirs| {
@@ -1411,6 +1447,29 @@ impl Engine {
             }
         }
         self.sources.lock().await.insert(p.id.clone(), (src.clone(), Instant::now()));
+        // the platform may reorder, add or drop renditions (A-1): keep the
+        // stored list current; folders stay tied to rendition keys
+        let key = |l: &[crate::hls::m3u8::Variant]| l.iter().map(vstore::rendition_key).collect::<Vec<_>>();
+        if let Some(old) = p.source.as_ref().map(|s| s.variants.clone())
+            && key(&old) != key(&src.info.variants)
+        {
+            tracing::warn!("{}: the rendition list changed: {:?} → {:?}", p.id, key(&old), key(&src.info.variants));
+            let fresh = src.info.variants.clone();
+            let f2 = fresh.clone();
+            let _ = self
+                .mutate(&p.id, move |p| {
+                    if let Some(s) = p.source.as_mut() {
+                        s.variants = f2;
+                    }
+                    Ok(())
+                })
+                .await;
+            let _ = self.with_ps(&p.id, |ps| {
+                ps.variants = fresh;
+                ps.refresh_heights();
+                ps.dirty = true;
+            });
+        }
         Ok(src)
     }
 
@@ -1446,7 +1505,7 @@ impl Engine {
     /// song's mute list).
     pub async fn update_song(&self, id: &str, song_id: &str, patch: Value, base_revision: Option<u64>) -> ApiResult<Project> {
         let Value::Object(patch) = patch else { return Err(invalid("patch must be an object")) };
-        for k in ["id", "clip_id", "export", "confidence"] {
+        for k in ["id", "export", "confidence", "uid"] {
             if patch.contains_key(k) {
                 return Err(invalid(format!("{k} can't be changed")));
             }
@@ -1455,6 +1514,10 @@ impl Engine {
             check_revision(p, base_revision)?;
             let s = p.song_mut(song_id).ok_or_else(|| ApiError::new("NOT_FOUND", format!("song {song_id}")))?;
             let mut v = serde_json::to_value(&*s).map_err(|e| ApiError::new("INTERNAL", e))?;
+            // only fields a song has (unknown ones would land in `extra`)
+            if let Some(k) = patch.keys().find(|k| v.get(k.as_str()).is_none() || s.extra.contains_key(k.as_str())) {
+                return Err(invalid(format!("songs have no field {k}")));
+            }
             for (k, x) in patch {
                 v[k] = x;
             }
@@ -1470,7 +1533,6 @@ impl Engine {
     /// Add one song (id assigned when empty). Returns the project and the song id.
     pub async fn add_song(&self, id: &str, mut song: Song, base_revision: Option<u64>) -> ApiResult<(Project, String)> {
         song.id = String::new();
-        song.clip_id = None;
         song.export = None;
         validate_song(&mut song)?;
         let sid = song.id.clone();
@@ -1590,7 +1652,12 @@ impl Engine {
         let fsize = |rel: &str| std::fs::metadata(dir.join(rel)).map(|m| m.len()).unwrap_or(0);
         let audio = p.audio.as_ref().map(|a| fsize(&a.file)).unwrap_or(0) + fsize("overview.peaks") + fsize("probs.bin");
         let stems: u64 = p.stems.iter().map(|s| ["orig.wav", "vocals.wav", "orig.peaks", "vocals.peaks"].iter().map(|f| fsize(&s.file(f))).sum::<u64>()).sum();
-        let cache = vstore::dir_size(&dir.join("cache")) + vstore::dir_size(&dir.join(vstore::DIR).join("views"));
+        let views = self.with_ps(id, |ps| ps.idx.views.clone())?;
+        let orphans = crate::storage::orphans(&dir, &p, &views, std::time::Duration::ZERO);
+        let orphan: u64 = orphans.iter().map(|o| o.1).sum();
+        // orphaned views are counted once, as orphans
+        let orphan_views: u64 = orphans.iter().filter(|o| o.0.parent().is_some_and(|d| d.ends_with("views"))).map(|o| o.1).sum();
+        let cache = (vstore::dir_size(&dir.join("cache")) + vstore::dir_size(&dir.join(vstore::DIR).join("views"))).saturating_sub(orphan_views);
         let exports = vstore::dir_size(&dir.join("exports"));
         Ok(StorageUsage {
             project_id: id.into(),
@@ -1600,7 +1667,8 @@ impl Engine {
             unused_video,
             cache,
             exports,
-            total: audio + video + stems + cache,
+            orphan,
+            total: audio + video + stems + cache + orphan,
             pinned: p.pinned,
             video_sec,
             updated_at: p.updated_at,
@@ -1630,106 +1698,87 @@ impl Engine {
     /// Refused for pinned projects unless `force`, and while the project's
     /// video is being fetched or a job runs on it. Returns the bytes freed.
     pub async fn media_drop(self: &Arc<Self>, id: &str, level: DropLevel, force: bool) -> ApiResult<(Project, u64)> {
-        let p = self.get(id)?;
-        if p.pinned && !force {
+        if self.get(id)?.pinned && !force {
             return Err(ApiError::new("PINNED", "this project is pinned (kept); unpin it or pass force"));
         }
         if let Some(j) = self.jobs.lk().values().find(|j| j.info.project_id == id) {
             return Err(ApiError::new("BUSY", format!("{} is running for {id}", j.info.kind)));
         }
-        let busy = self.with_ps(id, |ps| !ps.idx.requests.is_empty() || !ps.fetching.is_empty())?;
-        if busy {
-            return Err(ApiError::new("BUSY", "video is being fetched for this project; cancel it first (video.cancel)"));
-        }
         let lock = self.stems_lock(id);
         let _g = lock.lock().await;
+        // A-4: the busy check and the "dropping" mark are one step, so no
+        // download starts between them; the scheduler skips the project and
+        // video.fetch answers VIDEO_BUSY until the drop is over
+        self.with_ps(id, |ps| {
+            if !ps.idx.requests.is_empty() || !ps.fetching.is_empty() {
+                return Err(ApiError::new("VIDEO_BUSY", "video is being fetched for this project; cancel it first (video.cancel)"));
+            }
+            ps.dropping = true;
+            Ok(())
+        })??;
+        struct Undrop<'a>(&'a Engine, &'a str);
+        impl Drop for Undrop<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.with_ps(self.1, |ps| ps.dropping = false);
+            }
+        }
+        let _undrop = Undrop(self, id);
+        let p = self.get(id)?;
         let dir = self.store.dir(id);
         let before = self.storage_usage(id)?;
-        let eng = self.clone();
-        let (idc, pc) = (id.to_string(), p.clone());
-        tokio::task::spawn_blocking(move || -> ApiResult<()> {
-            let id = idc.as_str();
-            let rm = |f: &Path| {
-                let _ = std::fs::remove_file(f);
-            };
-            // the view cache goes with every level
-            eng.drop_views(id);
-            if level == DropLevel::Unused {
-                // audio windows are a cache too (QA-12: the estimate counted them)
-                for e in std::fs::read_dir(dir.join("cache")).into_iter().flatten().flatten() {
-                    if e.file_name().to_string_lossy().starts_with("window_") {
-                        rm(&e.path());
-                    }
+        // 1. decide what goes
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut legacy_gone: Vec<String> = Vec::new();
+        if level == DropLevel::Unused {
+            // audio windows are a cache too (QA-12: the estimate counted them)
+            for e in std::fs::read_dir(dir.join("cache")).into_iter().flatten().flatten() {
+                if e.file_name().to_string_lossy().starts_with("window_") {
+                    files.push(e.path());
                 }
             }
-            if level == DropLevel::Unused && !is_local(&pc) {
-                let used = crate::storage::used_ranges(&pc);
-                let (raw, files, container) = eng.with_ps(id, |ps| {
-                    let tl = ps.tl.clone();
-                    let (r, l) = tl.as_ref().map(|tl| crate::storage::unused_selection(&ps.have, tl, &used)).unwrap_or_default();
-                    let raw: Vec<(usize, usize)> = r
-                        .iter()
-                        .filter_map(|i| match ps.have[i].kind {
-                            vstore::HaveKind::Raw(v) => Some((v, *i)),
-                            _ => None,
-                        })
-                        .collect();
-                    let files: Vec<String> = l.iter().filter_map(|&n| ps.idx.legacy.get(n).map(|x| x.file.clone())).collect();
-                    (raw, files, ps.container)
-                })?;
-                for (v, i) in raw {
-                    rm(&vstore::segment_path(&dir, v, i, container));
-                }
-                for f in &files {
-                    rm(&dir.join(f));
-                }
-                if !files.is_empty() {
-                    eng.with_ps(id, |ps| {
-                        ps.idx.legacy.retain(|l| !files.contains(&l.file));
-                        ps.idx_dirty = true;
-                    })?;
-                    eng.save_index(id);
+        }
+        if level == DropLevel::Unused && !is_local(&p) {
+            let used = crate::storage::used_ranges(&p);
+            let (raw, legacy, container) = self.with_ps(id, |ps| {
+                let tl = ps.tl.clone();
+                let (r, l) = tl.as_ref().map(|tl| crate::storage::unused_selection(&ps.have, tl, &used)).unwrap_or_default();
+                let raw: Vec<(usize, usize)> = r
+                    .iter()
+                    .filter_map(|i| match ps.have[i].kind {
+                        vstore::HaveKind::Raw(v) => Some((v, *i)),
+                        _ => None,
+                    })
+                    .collect();
+                let legacy: Vec<String> = l.iter().filter_map(|&n| ps.idx.legacy.get(n).map(|x| x.file.clone())).collect();
+                (raw, legacy, ps.container)
+            })?;
+            files.extend(raw.into_iter().map(|(v, i)| vstore::segment_path(&dir, v, i, container)));
+            legacy_gone = legacy;
+        }
+        if level >= DropLevel::Stems {
+            dirs.extend(p.stems.iter().filter(|s| s.dir.starts_with("stems/")).map(|s| dir.join(&s.dir)));
+            for s in p.stems.iter().filter(|s| !s.dir.starts_with("stems/")) {
+                files.extend(["orig.wav", "vocals.wav", "orig.peaks", "vocals.peaks"].iter().map(|f| dir.join(s.file(f))));
+            }
+        }
+        if level >= DropLevel::Video {
+            for e in std::fs::read_dir(dir.join(vstore::DIR)).into_iter().flatten().flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.strip_prefix('v').is_some_and(|x| x.parse::<usize>().is_ok()) {
+                    dirs.push(e.path());
                 }
             }
-            if level >= DropLevel::Stems {
-                for s in &pc.stems {
-                    for f in ["orig.wav", "vocals.wav", "orig.peaks", "vocals.peaks"] {
-                        rm(&dir.join(s.file(f)));
-                    }
-                    let _ = std::fs::remove_dir(dir.join(&s.dir));
-                }
-                let _ = std::fs::remove_dir(dir.join("stems"));
+            legacy_gone = self.with_ps(id, |ps| ps.idx.legacy.iter().map(|l| l.file.clone()).collect())?;
+        }
+        if level >= DropLevel::Audio {
+            if let Some(a) = &p.audio {
+                files.push(dir.join(&a.file));
             }
-            if level >= DropLevel::Video {
-                for e in std::fs::read_dir(dir.join(vstore::DIR)).into_iter().flatten().flatten() {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    if n.strip_prefix('v').is_some_and(|x| x.parse::<usize>().is_ok()) {
-                        let _ = std::fs::remove_dir_all(e.path());
-                    }
-                }
-                let files: Vec<String> = eng.with_ps(id, |ps| {
-                    ps.idx.failed.clear();
-                    ps.idx_dirty = true;
-                    ps.idx.legacy.drain(..).map(|l| l.file).collect()
-                })?;
-                eng.save_index(id);
-                for f in files {
-                    rm(&dir.join(&f));
-                    if let Some(d) = Path::new(&f).parent() {
-                        let _ = std::fs::remove_dir(dir.join(d));
-                    }
-                }
-            }
-            if level >= DropLevel::Audio {
-                if let Some(a) = &pc.audio {
-                    rm(&dir.join(&a.file));
-                }
-                let _ = std::fs::remove_dir_all(dir.join("cache"));
-                eng.frame_index.lk().remove(id);
-            }
-            Ok(())
-        })
-        .await??;
+            dirs.push(dir.join("cache"));
+        }
+        // 2. the project and the index stop referring to it (a crash after
+        // this leaves only unreferenced files, swept later)
         let p = self
             .mutate(id, |p| {
                 if level >= DropLevel::Stems {
@@ -1743,6 +1792,40 @@ impl Engine {
                 Ok(())
             })
             .await?;
+        self.with_ps(id, |ps| {
+            ps.idx.legacy.retain(|l| !legacy_gone.contains(&l.file));
+            if level >= DropLevel::Video {
+                ps.idx.failed.clear();
+            }
+            ps.idx_dirty = true;
+        })?;
+        self.save_index(id);
+        // 3. delete
+        self.drop_views(id);
+        files.extend(legacy_gone.iter().map(|f| dir.join(f)));
+        let (eng, idc, pc, dirc) = (self.clone(), id.to_string(), p.clone(), dir.clone());
+        tokio::task::spawn_blocking(move || {
+            for f in &files {
+                let _ = std::fs::remove_file(f);
+            }
+            for d in &dirs {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            // folders the adopted clips / spans lived in, if now empty
+            for f in &legacy_gone {
+                if let Some(d) = Path::new(f).parent() {
+                    let _ = std::fs::remove_dir(dirc.join(d));
+                }
+            }
+            let _ = std::fs::remove_dir(dirc.join("stems"));
+            if level >= DropLevel::Audio {
+                eng.frame_index.lk().remove(&idc);
+            }
+            let views = eng.with_ps(&idc, |ps| ps.idx.views.clone()).unwrap_or_default();
+            crate::storage::sweep_orphans(&dirc, &pc, &views);
+        })
+        .await
+        .map_err(|e| ApiError::new("INTERNAL", e))?;
         self.reload_ps(id)?;
         let after = self.storage_usage(id)?;
         Ok((p, before.total.saturating_sub(after.total)))
@@ -1885,6 +1968,7 @@ impl Engine {
                     elapsed_sec: t0.elapsed().as_secs_f64(),
                     dropped: false,
                     track: Some(track),
+                    rendition: None,
                 };
                 let same = keep_or_drop(refetch.as_ref().is_some_and(|a| a.track == Some(track) && (a.duration - state.duration).abs() < 0.01));
                 let p = eng
@@ -1928,18 +2012,44 @@ impl Engine {
             };
             std::fs::rename(&out, eng.store.path(&p.id, file))?;
             let variant = src.info.audio_variant;
+            let rkey = src.info.variants.get(variant).map(vstore::rendition_key);
             // the same audio: same rendition, same AAC frames in every segment
             let same = keep_or_drop(refetch.as_ref().is_some_and(|a| {
-                a.variant == variant && a.index.first_segment == r.index.first_segment && a.index.frames == r.index.frames && a.index.sample_rate == r.index.sample_rate
+                let same_rendition = match (&a.rendition, &rkey) {
+                    (Some(x), Some(y)) => x == y,
+                    _ => a.variant == variant,
+                };
+                same_rendition && a.index.first_segment == r.index.first_segment && a.index.frames == r.index.frames && a.index.sample_rate == r.index.sample_rate
             }));
             if refetch.is_some() {
                 tracing::info!("{}: re-fetched audio is {}; detection {}", p.id, if same { "unchanged" } else { "different" }, if same { "kept" } else { "dropped" });
             }
+            // R-17: a different audio index moves the segment times; what was
+            // measured against the old one (alignment, views, VOD-placed
+            // stems) no longer fits
+            let moved = p.audio.as_ref().is_some_and(|a| {
+                a.index.first_segment != r.index.first_segment || a.index.frames != r.index.frames || a.index.sample_rate != r.index.sample_rate
+            });
+            if moved {
+                tracing::warn!("{}: the new audio has a different timeline; alignment, views and stems are reset", p.id);
+                eng.drop_views(&p.id);
+                eng.with_ps(&p.id, |ps| {
+                    ps.idx.align.clear();
+                    ps.idx_dirty = true;
+                })?;
+                eng.save_index(&p.id);
+            }
             let p = eng
                 .mutate(&p.id, |p| {
-                    p.audio = Some(project::AudioState::from_result(file, variant, &r));
+                    let mut a = project::AudioState::from_result(file, variant, &r);
+                    a.rendition = rkey.clone();
+                    p.audio = Some(a);
                     if !same {
                         p.detection = None;
+                    }
+                    if moved {
+                        // their files become leftovers, swept later
+                        p.stems.clear();
                     }
                     Ok(())
                 })
@@ -2016,7 +2126,7 @@ impl Engine {
                             Ok(())
                 })
                 .await?;
-            Ok(json!({ "segments": segs, "songs": p.songs.len(), "clips": p.clips.len(), "candidates": a.candidates.len() }))
+            Ok(json!({ "segments": segs, "songs": p.songs.len(), "candidates": a.candidates.len() }))
         })
     }
 
@@ -2078,7 +2188,8 @@ impl Engine {
     /// Queue the video of `rs` and wait until the request ends; returns the
     /// ranges still without video. Cancelling the job cancels the request.
     pub(crate) async fn fetch_and_wait(self: &Arc<Self>, pid: &str, rs: &[Range], priority: vstore::Priority, reason: &str, ctx: &JobCtx) -> ApiResult<Vec<Range>> {
-        let plan = self.video_fetch(pid, FetchArgs { ranges: Some(rs.to_vec()), priority: Some(priority), reason: Some(reason.into()), ..Default::default() })?;
+        // a job waiting for it fetches even while downloads are paused (R-11)
+        let plan = self.video_fetch(pid, FetchArgs { ranges: Some(rs.to_vec()), priority: Some(priority), reason: Some(reason.into()), force: true, ..Default::default() })?;
         if let Some(rid) = plan.request_id {
             self.wait_request(pid, &rid, ctx).await?;
         }
@@ -2094,8 +2205,13 @@ impl Engine {
             }
             let st = self.video_state(pid)?;
             let Some(r) = st.requests.iter().find(|r| r.id == rid) else { return Ok(()) };
+            let note = match (&st.offline, r.force && st.paused) {
+                (Some(o), _) => format!(" (offline, retrying in {:.0} s)", o.retry_in_sec),
+                (None, true) => " (downloading although video is paused)".to_string(),
+                _ => String::new(),
+            };
             (ctx.progress)(Progress {
-                message: Some(format!("video {:.0}/{:.0} s", r.have_sec, r.total_sec)),
+                message: Some(format!("video {:.0}/{:.0} s{note}", r.have_sec, r.total_sec)),
                 ..Progress::new("video.fetch", (r.have_sec * 1000.0) as u64, (r.total_sec * 1000.0) as u64)
             });
             self.video_wait_change(Duration::from_secs(1)).await;
@@ -2149,7 +2265,11 @@ impl Engine {
         }
         if !missing.is_empty() && !opts.fetch {
             return Err(ApiError::new("VIDEO_MISSING", format!("{} song(s) lack video in their range (fetch it, or export with fetch: true)", missing.len()))
-                .with_data(json!({ "songs": missing, "vod_gone": p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone) })));
+                .with_data(json!({
+                    "ranges": ranges::normalize(&missing.iter().flat_map(|m| serde_json::from_value::<Vec<Range>>(m["ranges"].clone()).unwrap_or_default()).collect::<Vec<_>>()),
+                    "songs": missing,
+                    "vod_gone": p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone),
+                })));
         }
         if !missing.is_empty() && p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone) && missing.len() == songs.len() {
             return Err(ApiError::new("VOD_GONE", "the replay is gone and these songs lack video").with_data(json!({ "songs": missing })));
@@ -2163,7 +2283,9 @@ impl Engine {
             // queue the missing video now
             let mut waiting: HashMap<String, String> = HashMap::new();
             for s in order.iter().filter(|s| missing_ids.contains(&s.id)) {
-                match eng.video_fetch(&p.id, FetchArgs { ranges: Some(vec![(s.start, s.end)]), song_ids: None, reason: Some("export".into()), ..Default::default() }) {
+                // an export the user started fetches even while downloads are paused (R-11)
+                let args = FetchArgs { ranges: Some(vec![(s.start, s.end)]), song_ids: None, reason: Some("export".into()), force: true, ..Default::default() };
+                match eng.video_fetch(&p.id, args) {
                     Ok(plan) => {
                         if let Some(r) = plan.request_id {
                             waiting.insert(s.id.clone(), r);
@@ -2235,7 +2357,7 @@ impl Engine {
         if !missing.is_empty() {
             let gone = p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone);
             let msg = if gone { "the replay is gone and part of this song has no video" } else { "part of this song has no video" };
-            return Err(ApiError::new("VIDEO_MISSING", msg).with_data(json!({ "song_id": sid, "ranges": missing, "vod_gone": gone })));
+            return Err(ApiError::new("VIDEO_MISSING", msg).with_data(json!({ "ranges": missing, "songs": [{ "song_id": sid, "ranges": missing }], "vod_gone": gone })));
         }
         let video = format.has_video() && (!opts.stems || opts.also_render);
         let copy = video && opts.video_codec.as_deref().unwrap_or(&p.settings.video_codec) == "copy";
@@ -2408,6 +2530,13 @@ impl Engine {
                 // in time order. Frame times stay exact across the joint
                 // (a concat would restart each part at its first frame).
                 let out = tmp.join("joined.mp4");
+                // origins count from a file's start time (what `-ss` and a
+                // decode see); with -copyts the filters see raw timestamps, so
+                // shift each origin by its file's start time (an adopted clip
+                // starts at e.g. 24 ms: R-1 joins were a frame off)
+                for (f, o, _) in parts.iter_mut() {
+                    *o -= crate::video::media::probe_input(&f.to_string_lossy())?.format_start;
+                }
                 let x1 = parts[0].2.0;
                 let mut c = ffmpeg::command();
                 c.arg("-y").arg("-copyts");
