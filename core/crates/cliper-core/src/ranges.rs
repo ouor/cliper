@@ -75,7 +75,7 @@ pub fn subtract(a: &[Range], b: &[Range]) -> Vec<Range> {
 }
 
 pub fn total(a: &[Range]) -> f64 {
-    normalize(a).iter().map(|(x, y)| y - x).sum()
+    normalize(a).iter().map(|(x, y)| y - x).fold(0.0, |s, d| s + d)
 }
 
 /// Is `r` fully inside the union of `a` (within `eps` at the edges)?

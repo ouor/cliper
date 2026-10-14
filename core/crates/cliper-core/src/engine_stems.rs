@@ -413,7 +413,12 @@ impl Engine {
 
         // 5) talk in parts never searched before → suggestions
         let scan = if p.settings.suggest_mutes { ranges::subtract(&missing, &p.talk_scanned) } else { Vec::new() };
-        let talk_new = if scan.is_empty() { Vec::new() } else { self.find_talk(&p, &dir, &span, &scan, &ctx.cancel)? };
+        let talk_new = if scan.is_empty() {
+            Vec::new()
+        } else {
+            (ctx.progress)(Progress::note("talk", "find_talk", "finding talk in the new part"));
+            self.find_talk(&p, &dir, &span, &scan, &ctx.cancel)?
+        };
 
         let old_ids: Vec<String> = olds.iter().map(|s| s.id.clone()).collect();
         let mut added = 0usize;

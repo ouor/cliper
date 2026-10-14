@@ -10,12 +10,17 @@ Cliper를 직접 빌드하거나 고치려는 분을 위한 문서예요. 사용
 core/                    Rust workspace
   crates/cliper-core/    엔진 라이브러리
     platforms/           치지직·SOOP VOD 정보와 재생 주소
-    hls/                 m3u8, fMP4/TS 파서, 오디오만 받기, 구간 영상 받기
+    hls/                 m3u8, fMP4/TS 파서, 오디오만 받기
+    video/               받은 영상 세그먼트 저장소(store), 세그먼트 ↔ 방송 시각(timeline),
+                         ffmpeg로 이어 읽기·재생 파일 만들기(media), 범위 상태 계산
     ml/                  ONNX Runtime(CUDA → CPU), PANNs 태거, MDX-Net 분리기
     analysis/            노래 구간 검출(song-split-research v6 포팅), 멘트 찾기
     audio/               ffmpeg 디코드, STFT, 정렬, 파형, WAV
-    project/             project.json, 클립 계획, 파일 이름, 세트리스트, 곡 목록 내보내기
-    engine.rs            작업(job), 프로젝트 변경, IPC 메서드
+    project/             project.json, 이전 형식 옮겨 오기(migrate), 파일 이름, 세트리스트, 곡 목록 내보내기
+    engine.rs            작업(job), 프로젝트 변경, 내보내기, 저장 공간 정리
+    engine_video.rs      영상 받기 스케줄러(앱 전체 동시 4), 범위 알림, 재생 파일(view), 정렬, 다시보기 확인
+    engine_stems.rs      범위 단위 나누기(새 부분만 + 겹침 크로스페이드), 멘트 제안 증분
+    storage.rs, ranges.rs  저장 공간 계산·정리 단계, 시간 범위 집합 연산
     ipc/server.rs        `cliper serve`: stdin/stdout NDJSON JSON-RPC 2.0
     addon.rs             CUDA 런타임 애드온 받기·설치
   crates/cliper/         단일 바이너리: `cliper serve` + 헤드리스 `process` + 단계별 디버그 CLI
@@ -32,9 +37,9 @@ runtime/cuda/            (git 밖) CUDA 13 / cuDNN 9 DLL
 
 1. **오디오만 받기**: fMP4 VOD는 오디오 바이트만 Range로, TS VOD는 가장 가벼운 화질에서 오디오만 뽑아요. 4시간 VOD가 1분 안팎이에요.
 2. **노래 구간 찾기**: PANNs(ONNX)로 music/speech/sing 확률을 만들고 v6 분할기로 곡을 나눠요. 4시간에 GPU로 15초쯤 걸려요.
-3. **구간 영상 받기**: 곡 ± 여유(기본 30초) 범위의 세그먼트만 받아요. 화질은 기본 1080p 이하 중 최고예요(치지직은 원본, SOOP 1440p는 용량이 두 배라 제외). 오디오와는 세그먼트 색인으로 예측하고 상호상관으로 확인해서 맞춰요.
-4. **보컬 분리 → 멘트 제안**: UVR MDX-Net Voc_FT로 보컬을 분리하고, 보컬 스템에서 말소리 구간을 찾아 뮤트를 제안해요.
-5. **내보내기**: `원본 − (1 − g)·보컬`로 렌더해서 곡별 mp4/wav/flac/mp3로 내보내요. 뮤트가 없는 곳은 원본과 비트 단위로 같아요.
+3. **범위 영상 받기**: 영상은 곡별 파일이 아니라 방송 시간축 위에 쌓인 HLS 세그먼트예요(`video/v<화질>/<번호>`). 곡 ± 여유, "여기 영상 받기", 내보내기에 모자란 부분이 모두 범위 요청이고, 없는 세그먼트만 받아요. 동시 연결은 앱 전체(오디오 포함)에서 4개, 우선순위는 지금 보는 것 → 사용자 요청 → 자동 채우기 → 일괄 순서예요. 화질은 기본 1080p 이하 중 최고이고, 이어지는 범위는 옆 세그먼트의 화질을 따라가요. 영상과 분석 오디오는 화질마다 한 번 상호상관으로 맞춰요(`방송 시각 = 미디어 시각 − m`).
+4. **보컬 분리 → 멘트 제안**: 영상이 있는 "곡 ± 여유"만 UVR MDX-Net Voc_FT로 나눠요. 늘어난 부분은 새로 받은 부분만 10초 겹침을 두고 나눠 1초 크로스페이드로 이어 붙여요. 멘트 제안은 한 번도 살펴보지 않은 범위에서만 만들어요.
+5. **내보내기**: `원본 − (1 − g)·보컬`로 렌더해서 곡별 mp4/wav/flac/mp3로 내보내요. 영상은 곡을 덮는 세그먼트를 이어 붙여 잘라요(여러 번에 나눠 받았어도 결과가 같아요). 뮤트가 없는 곳은 원본과 비트 단위로 같아요.
 
 IPC 계약은 [docs/ipc.md](ipc.md)에 있어요.
 
@@ -75,7 +80,9 @@ npm run dev
 
 앱 개발에 필요한 환경 변수와 점검 도구는 [app/README.md](../app/README.md)에 있어요.
 
-디버그 CLI(단계별): `resolve`, `fetch-audio`, `detect`, `fetch-video`, `separate`, `talk`, `export`. `cliper --help`로 확인해요.
+디버그 CLI(단계별): `resolve`, `fetch-audio`(`--segments a b`로 일부만, 결과에 세그먼트 색인 포함), `detect`, `fetch-video`, `separate`, `talk`, `export`. `cliper --help`로 확인해요.
+
+세그먼트 영상 모델의 설계·검증 기록은 [docs/product/cycle2-segment-video-core.md](product/cycle2-segment-video-core.md)에 있어요.
 
 헤드리스 일괄 처리: `cliper process <링크·번호·로컬 파일…> [--clips] [--export --format mp4|wav|flac|mp3]`.
 

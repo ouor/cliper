@@ -129,7 +129,7 @@ impl Timeline {
 
     /// Seconds covered by these segments.
     pub fn seconds<I: IntoIterator<Item = usize>>(&self, segs: I) -> f64 {
-        segs.into_iter().filter(|&i| self.contains(i)).map(|i| self.dur(i)).sum()
+        segs.into_iter().filter(|&i| self.contains(i)).map(|i| self.dur(i)).fold(0.0, |a, b| a + b)
     }
 }
 

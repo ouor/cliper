@@ -225,7 +225,7 @@ impl PState {
 
     pub fn state(&self, project_id: &str, paused: bool, rate: Option<f64>) -> VideoState {
         let ranges = self.coverage();
-        let sum = |s: CovState| ranges.iter().filter(|r| r.state == s).map(|r| r.end - r.start).sum::<f64>();
+        let sum = |s: CovState| ranges.iter().filter(|r| r.state == s).map(|r| r.end - r.start).fold(0.0, |a, b| a + b);
         let queued_sec = sum(CovState::Queued);
         let fetching_sec = sum(CovState::Fetching);
         let bytes = self.have.values().filter(|h| matches!(h.kind, HaveKind::Raw(_))).map(|h| h.bytes).sum::<u64>()
