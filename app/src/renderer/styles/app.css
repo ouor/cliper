@@ -1190,6 +1190,31 @@
 .video-loading.err {
   color: #ffb4b2;
 }
+/* playhead outside the bound clip: hide the (stale) frame entirely */
+.video-outside {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--bg-2);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  text-align: center;
+  padding: 12px;
+}
+.video-tag {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  padding: 2px 8px;
+  border-radius: var(--r-full);
+  background: rgba(0, 0, 0, 0.6);
+  color: #e9ecf2;
+  font-size: var(--fs-2xs);
+}
 .detail-panel {
   flex: 1;
   min-width: 340px;

@@ -16,7 +16,7 @@ import { fetchSongs } from "@/lib/pipeline";
 import { addMute, deleteMute, endSongHere, splitMute, updateMute } from "@/lib/edits";
 import { DetailTimeline, selectMute } from "./DetailTimeline";
 import { useMapData } from "./OverviewMap";
-import { Progress } from "@/components/common";
+import { Progress, VideoOutside } from "@/components/common";
 
 const MODE_TIP = [
   "방송 그대로 (기준)",
@@ -298,6 +298,7 @@ export function TalkEditor({ p }: { p: Project }) {
         <div className="talk-video">
           <div className="video-box">
             <video ref={videoRef} src={mediaUrl(p.id, `clips/${clip.id}/source.mp4`)} muted playsInline preload="auto" />
+            <VideoOutside />
             {loadingStems && (
               <div className="video-loading">
                 <span className="spinner" /> 소리 불러오는 중 {Math.floor((stems?.progress ?? 0) * 100)}%

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowDownToLine, Check, Combine, Download, Headphones, Plus, RefreshCw, Scissors, SkipBack, SkipForward, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
+import type { Clip } from "@ipc/generated/Clip";
 import { useWs } from "@/state/ws";
 import { useApp } from "@/state/app";
 import { editSong } from "@/state/projects";
@@ -9,10 +10,11 @@ import { songProgress, useJobs } from "@/state/jobs";
 import { player } from "@/audio/player";
 import { addSong, confirmSong, deleteSong, mergeSongs, setEdge, splitSong, toggleExclude } from "@/lib/edits";
 import { fmtTime, parseTime } from "@/lib/format";
-import { hasUnsafeFileChars, hostClip, reviewStatus, songLabels, songNumbers, videoState } from "@/lib/song";
+import { clipCovered, hasUnsafeFileChars, hostClip, reviewStatus, songLabels, songNumbers, videoState } from "@/lib/song";
 import { mediaUrl } from "@/lib/peaks";
 import { fetchSongs } from "@/lib/pipeline";
 import { EdgeScopes } from "./EdgeScopes";
+import { VideoOutside } from "@/components/common";
 import { useMapData } from "./OverviewMap";
 
 export function TimeField({ value, onCommit, label }: { value: number; onCommit: (v: number) => void; label: string }) {
@@ -102,10 +104,39 @@ export function listenEnd(s: Song) {
   void player.play(Math.max(0, s.end - pre), { stopAt: s.end + 3 });
 }
 
+/**
+ * The downloaded clip to show for the playhead: the selected song's clip while the playhead is
+ * in it, else another downloaded clip that covers the playhead, else the song's clip (the view
+ * then hides its stale frame — `VideoOutside`). Updates only when the answer changes (#1).
+ */
+function useClipAtPlayhead(p: Project, host: Clip | null): Clip | null {
+  const [id, setId] = useState<string | null>(null);
+  const cur = useRef<string | null>(null);
+  useEffect(() => {
+    if (!host?.video) return;
+    const covers = (c: Clip, pos: number) => {
+      const cov = clipCovered(c);
+      return !!cov && pos >= cov[0] && pos <= cov[1];
+    };
+    const pick = (pos: number) => {
+      const next = covers(host, pos) ? host.id : (p.clips.find((c) => c.id !== host.id && covers(c, pos))?.id ?? host.id);
+      if (next !== cur.current) {
+        cur.current = next;
+        setId(next);
+      }
+    };
+    pick(player.now());
+    return player.onFrame(pick);
+  }, [p.clips, host]);
+  if (!host?.video) return host;
+  return p.clips.find((c) => c.id === id && c.video) ?? host;
+}
+
 function VideoPreview({ p, s }: { p: Project; s: Song }) {
-  const clip = hostClip(p, s);
+  const host = hostClip(p, s);
+  const clip = useClipAtPlayhead(p, host);
   const ref = useRef<HTMLVideoElement>(null);
-  const [err, setErr] = useState(false);
+  const [errClip, setErrClip] = useState<string | null>(null);
   useEffect(() => {
     if (!clip?.video) {
       player.attachVideo(null);
@@ -114,10 +145,15 @@ function VideoPreview({ p, s }: { p: Project; s: Song }) {
     player.attachVideo(ref.current, clip.video.vod_start + clip.offset, clip.video.duration);
     return () => player.attachVideo(null);
   }, [clip?.id, clip?.video, clip?.offset]);
-  if (clip?.video && !err) {
+  if (clip?.video && errClip !== clip.id) {
+    const other = clip.id !== host?.id;
+    const nums = other ? songNumbers(p) : null;
+    const n = other ? clip.song_ids.map((id) => nums!.get(id)).find((x) => x !== undefined) : undefined;
     return (
       <div className="video-box">
-        <video ref={ref} src={mediaUrl(p.id, `clips/${clip.id}/source.mp4`)} muted playsInline preload="auto" onError={() => setErr(true)} />
+        <video key={clip.id} ref={ref} src={mediaUrl(p.id, `clips/${clip.id}/source.mp4`)} muted playsInline preload="auto" onError={() => setErrClip(clip.id)} />
+        {other && <div className="video-tag">재생 위치의 영상{n ? ` · 곡 ${String(n).padStart(2, "0")}` : ""}</div>}
+        <VideoOutside />
       </div>
     );
   }

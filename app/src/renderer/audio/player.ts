@@ -25,6 +25,8 @@ export interface PlayerState {
   /** stems window currently loaded (`paged`: a long song held a page at a time) */
   stems: { projectId: string; clipId: string; start: number; end: number; progress: number; paged?: boolean; error?: string } | null;
   streamError?: string;
+  /** a video is bound but the playhead is outside its clip (its frame would be stale) */
+  videoOutside: boolean;
 }
 
 export const usePlayer = create<PlayerState>(() => ({
@@ -38,6 +40,7 @@ export const usePlayer = create<PlayerState>(() => ({
   volume: 0.9,
   source: "none",
   stems: null,
+  videoOutside: false,
 }));
 
 const SR = 48000;
@@ -501,10 +504,13 @@ class Player {
 
   private syncVideo(pos: number, playing: boolean, rate: number) {
     const v = this.video;
+    // playhead outside the bound clip: the last frame would belong to another time, so the
+    // views hide it and say so (#1)
+    const outside = !!v && !(pos - v.origin >= 0 && pos - v.origin <= (v.duration || v.el.duration || Infinity));
+    if (outside !== usePlayer.getState().videoOutside) usePlayer.setState({ videoOutside: outside });
     if (!v || v.el.readyState < 1) return;
     const t = pos - v.origin;
-    const inside = t >= 0 && t <= (v.duration || v.el.duration || Infinity);
-    if (!inside) {
+    if (outside) {
       if (!v.el.paused) v.el.pause();
       return;
     }
