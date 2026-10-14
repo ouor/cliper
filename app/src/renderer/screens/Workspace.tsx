@@ -22,7 +22,7 @@ import { SongDetail, listenEnd, listenStart } from "./workspace/SongDetail";
 import { OverviewMap } from "./workspace/OverviewMap";
 import { Transport } from "./workspace/Transport";
 const TalkEditor = lazy(() => import("./workspace/TalkEditor").then((m) => ({ default: m.TalkEditor })));
-import { selectMuteAndLoop } from "./workspace/DetailTimeline";
+import { muteLoopRange, selectMute } from "./workspace/DetailTimeline";
 const ExportView = lazy(() => import("./workspace/ExportView").then((m) => ({ default: m.ExportView })));
 import { SetlistDialog } from "./workspace/SetlistDialog";
 
@@ -254,7 +254,7 @@ export function Workspace({ projectId }: { projectId: string }) {
   const history = useProjects((s) => s.history[projectId]);
   const engineReady = useApp((s) => s.engine.state === "ready");
   const keymap = useApp((s) => s.settings.keymap);
-  const ws = useWs(useShallow((s) => ({ selected: s.selected, lastEdge: s.lastEdge, setlistOpen: s.setlistOpen })));
+  const ws = useWs(useShallow((s) => ({ selected: s.selected, selectedMute: s.selectedMute, lastEdge: s.lastEdge, setlistOpen: s.setlistOpen })));
   const [err, setErr] = useState<string | null>(null);
 
   // new project: reset the workspace UI; leaving: stop playback
@@ -319,6 +319,16 @@ export function Workspace({ projectId }: { projectId: string }) {
     if (ws.lastEdge === "end") player.setLoop([Math.max(0, s.end - pre), s.end + 3]);
     else player.setLoop([Math.max(0, s.start - pre), s.start + pre]);
   }, [mode, ws.selected, ws.lastEdge, p]);
+
+  // talk loop range = the selected mute ± loopPad (follows edits); none selected → no range.
+  // Only the range moves here — loop on/off is the user's toggle (#3).
+  const talkSel = mode === "talk" ? p?.songs.find((x) => x.id === ws.selected)?.mutes.find((m) => m.id === ws.selectedMute) : undefined;
+  const loopPad = useApp((a) => a.settings.loopPad);
+  useEffect(() => {
+    if (mode !== "talk") return;
+    player.setLoop(talkSel ? muteLoopRange(talkSel) : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, talkSel?.id, talkSel?.start, talkSel?.end, loopPad]);
 
   const keys = useMemo(() => bindings(keymap), [keymap]);
 
@@ -493,14 +503,14 @@ export function Workspace({ projectId }: { projectId: string }) {
           if (!mutes.length) return;
           const i = mutes.findIndex((x) => x.id === st.selectedMute);
           const n = id === "mute.next" ? (i + 1) % mutes.length : (i - 1 + mutes.length) % mutes.length;
-          selectMuteAndLoop(mutes[i < 0 ? 0 : n], true);
+          selectMute(mutes[i < 0 ? 0 : n], true);
           return;
         }
         case "mute.confirm":
           if (s && m) {
             void updateMute(projectId, s.id, m.id, "적용 확정", (x) => void (x.confirmed = true));
             const next = mutes.find((x) => !x.confirmed && x.id !== m.id && x.start > m.start) ?? mutes.find((x) => !x.confirmed && x.id !== m.id);
-            if (next) selectMuteAndLoop(next, usePlayer.getState().playing);
+            if (next) selectMute(next, usePlayer.getState().playing);
           }
           return;
         case "mute.delete":

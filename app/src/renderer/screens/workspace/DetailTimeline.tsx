@@ -412,7 +412,7 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
           m.fade_out = c.fade_out;
         });
       } else {
-        selectMuteAndLoop(d.orig);
+        selectMute(d.orig);
       }
     } else if (d.kind === "pan" && !d.moved) {
       player.seek(d.t);
@@ -466,11 +466,20 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
   );
 }
 
-/** Select a mute: loop "구간 앞 3초 ~ 뒤 3초" and seek there. */
-export function selectMuteAndLoop(m: Mute, play = false) {
+/** The loop range for a mute: "구간 앞 3초 ~ 뒤 3초" (설정 loopPad). */
+export function muteLoopRange(m: Mute): [number, number] {
+  const pad = useApp.getState().settings.loopPad;
+  return [Math.max(0, m.start - pad), m.end + pad];
+}
+
+/**
+ * Select a mute and seek to just before it. The loop *range* follows the selection, but
+ * whether looping is on stays the user's choice (#3).
+ */
+export function selectMute(m: Mute, play = false) {
   const pad = useApp.getState().settings.loopPad;
   useWs.setState({ selectedMute: m.id });
-  player.setLoop([Math.max(0, m.start - pad), m.end + pad], true);
+  player.setLoop(muteLoopRange(m));
   if (play) void player.play(Math.max(0, m.start - pad));
   else if (!usePlayer.getState().playing) player.seek(Math.max(0, m.start - pad));
 }

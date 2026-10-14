@@ -14,7 +14,7 @@ import { loadPeaks, mediaUrl, type Peaks } from "@/lib/peaks";
 import { fmtTime } from "@/lib/format";
 import { fetchSongs } from "@/lib/pipeline";
 import { addMute, deleteMute, endSongHere, splitMute, updateMute } from "@/lib/edits";
-import { DetailTimeline, selectMuteAndLoop } from "./DetailTimeline";
+import { DetailTimeline, selectMute } from "./DetailTimeline";
 import { useMapData } from "./OverviewMap";
 import { Progress } from "@/components/common";
 
@@ -100,7 +100,7 @@ function SongFadeField({ label, value, fallback, onCommit }: { label: string; va
 
 function MuteRow({ p, s, m, selected, warn }: { p: Project; s: Song; m: Mute; selected: boolean; warn: string[] }) {
   return (
-    <button className={`mute-row${selected ? " selected" : ""}${m.confirmed ? " confirmed" : " suggested"}`} onClick={() => selectMuteAndLoop(m, usePlayer.getState().playing)}>
+    <button className={`mute-row${selected ? " selected" : ""}${m.confirmed ? " confirmed" : " suggested"}`} onClick={() => selectMute(m, usePlayer.getState().playing)}>
       <span className={`mute-dot${m.confirmed ? " on" : ""}`} />
       <span className="mr-pos">{mutePosition(m, s)}</span>
       <span className="mono mr-time">
@@ -371,7 +371,8 @@ export function TalkEditor({ p }: { p: Project }) {
             </button>
           ))}
         </div>
-        <button className={`btn sm ${loopOn ? "active" : "ghost"}`} onClick={() => player.toggleLoop()}>
+        <button className={`btn sm ${loopOn ? "active" : "ghost"}`} onClick={() => player.toggleLoop()} aria-pressed={loopOn} data-tip={`선택한 구간 앞 ${settings.loopPad}초 ~ 뒤 ${settings.loopPad}초를 반복해요
+켜고 끄는 건 이 버튼으로만 바뀌어요`} data-tip-pos="top">
           <Repeat size={13} /> 구간 반복 {loopOn ? "켬" : "끔"} <kbd>Ctrl+L</kbd>
         </button>
         <span className="spacer" />
@@ -452,7 +453,7 @@ export function TalkEditor({ p }: { p: Project }) {
           </>
         ) : (
           <div className="mi-row faint">
-            <Wand2 size={14} /> 구간을 고르면 앞 {settings.loopPad}초부터 뒤 {settings.loopPad}초까지 반복해서 들려줘요. <kbd>Tab</kbd>으로 다음 구간, <kbd>B</kbd>로 재생 위치에 새 구간을 시작해요.
+            <Wand2 size={14} /> 구간을 고르면 앞 {settings.loopPad}초부터 들려줘요. 구간 반복을 켜 두면 뒤 {settings.loopPad}초까지 반복해요. <kbd>Tab</kbd>으로 다음 구간, <kbd>B</kbd>로 재생 위치에 새 구간을 시작해요.
           </div>
         )}
         <details className="honest" open={notesOpen} onToggle={(e) => setNotesOpen((e.target as HTMLDetailsElement).open)}>

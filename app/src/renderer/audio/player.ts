@@ -75,6 +75,7 @@ class Player {
   private stemsRange: { key: string; projectId: string; clipId: string; origin: number; f0: number; f1: number; bust: string; capped: boolean } | null = null;
   private stemsKey = "";
   private video: VideoBinding | null = null;
+  private loopTouched = false;
 
   private listeners = new Set<(pos: number) => void>();
   private dbgResolve: ((v: unknown) => void) | null = null;
@@ -112,6 +113,7 @@ class Player {
       const st = usePlayer.getState();
       this.post({ type: "volume", volume: st.volume });
       this.post({ type: "mode", mode: st.mode });
+      this.post({ type: "loop", loop: st.loopOn && st.loop ? st.loop : null });
       this.tick();
     })();
     return this.ready;
@@ -446,15 +448,32 @@ class Player {
     this.post({ type: "muteOn", on: muteOn });
   }
 
-  setLoop(range: [number, number] | null, on?: boolean) {
-    const loopOn = on ?? usePlayer.getState().loopOn;
-    usePlayer.setState({ loop: range, loopOn });
+  /**
+   * Move the loop range. Never changes whether looping is on: that is only the user's
+   * toggle (`toggleLoop`, Ctrl+L), remembered across sessions (#3).
+   */
+  setLoop(range: [number, number] | null) {
+    const loopOn = usePlayer.getState().loopOn;
+    usePlayer.setState({ loop: range });
     this.post({ type: "loop", loop: loopOn && range ? range : null });
   }
 
   toggleLoop() {
+    this.loopTouched = true;
+    this.applyLoopOn(!usePlayer.getState().loopOn);
+    void window.cliper?.setState("loopOn", usePlayer.getState().loopOn);
+  }
+
+  private applyLoopOn(on: boolean) {
     const st = usePlayer.getState();
-    this.setLoop(st.loop, !st.loopOn);
+    usePlayer.setState({ loopOn: on });
+    this.post({ type: "loop", loop: on && st.loop ? st.loop : null });
+  }
+
+  /** Restore the remembered loop on/off (unless the user already toggled it this session). */
+  async restoreLoopPref() {
+    const v = await window.cliper?.getState<boolean>("loopOn").catch(() => null);
+    if (typeof v === "boolean" && !this.loopTouched) this.applyLoopOn(v);
   }
 
   async setSink(id: string) {
@@ -526,3 +545,4 @@ function parseWavHeader(v: DataView): { dataOffset: number; channels: number; bi
 }
 
 export const player = new Player();
+void player.restoreLoopPref();

@@ -56,7 +56,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: "listen.result", scope: "talk", keys: ["W"], label: "결과 듣기" },
   { id: "listen.removed", scope: "talk", keys: ["E"], label: "지운 목소리 듣기" },
   { id: "listen.acc", scope: "talk", keys: ["R"], label: "반주 듣기" },
-  { id: "mute.next", scope: "talk", keys: ["Tab"], label: "다음 멘트 구간 (선택 시 반복 재생)" },
+  { id: "mute.next", scope: "talk", keys: ["Tab"], label: "다음 멘트 구간 (고르면 바로 재생)" },
   { id: "mute.prev", scope: "talk", keys: ["Shift+Tab"], label: "이전 멘트 구간" },
   { id: "mute.confirm", scope: "talk", keys: ["Enter"], label: "선택 구간 적용 확정" },
   { id: "mute.delete", scope: "talk", keys: ["Delete"], label: "선택 구간 삭제" },
