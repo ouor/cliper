@@ -523,6 +523,9 @@ impl Engine {
 
     async fn playlist(&self, pid: &str, src: &crate::source::Source, v: usize) -> Result<Arc<MediaPlaylist>, ApiError> {
         let key = (pid.to_string(), v);
+        // concurrent misses share one download
+        let lock = self.resolve_locks.lk().entry(format!("{pid}#pl{v}")).or_default().clone();
+        let _g = lock.lock().await;
         if let Some((pl, at)) = self.video.st.lk().playlists.get(&key)
             && at.elapsed() < super::SOURCE_TTL
         {

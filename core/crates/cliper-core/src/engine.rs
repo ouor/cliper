@@ -285,6 +285,8 @@ pub struct Engine {
     events: UnboundedSender<Event>,
     jobs: Mutex<HashMap<String, JobEntry>>,
     sources: tokio::sync::Mutex<HashMap<String, (Source, Instant)>>,
+    /// project → lock making concurrent `source()` calls share one resolve
+    resolve_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     tagger: Arc<Mutex<Option<Tagger>>>,
     /// separation session, kept open between clips; holding its lock also
@@ -762,6 +764,7 @@ impl Engine {
             events,
             jobs: Mutex::new(HashMap::new()),
             sources: tokio::sync::Mutex::new(HashMap::new()),
+            resolve_locks: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
             tagger: Arc::new(Mutex::new(None)),
             separator: Mutex::new(None),
@@ -1232,6 +1235,9 @@ impl Engine {
         if is_local(p) {
             return Err(precondition("local recordings have no remote source"));
         }
+        // one resolve at a time per project (segment downloads ask concurrently)
+        let lock = self.resolve_locks.lk().entry(p.id.clone()).or_default().clone();
+        let _g = lock.lock().await;
         {
             let cache = self.sources.lock().await;
             if let Some((s, at)) = cache.get(&p.id)
@@ -2165,8 +2171,11 @@ impl Engine {
     /// Returns (file, VOD time at its t = 0, single-stream = stream-copy safe). Blocking.
     fn export_source(&self, p: &Project, a: f64, b: f64, tmp: &Path, cancel: &CancellationToken) -> ApiResult<(PathBuf, f64, bool)> {
         if is_local(p) {
+            // `-ss` is relative to the file's start time
             let m = self.align_local(p)?.m;
-            return Ok((PathBuf::from(&p.source.as_ref().unwrap().url), -m, true));
+            let f = PathBuf::from(&p.source.as_ref().unwrap().url);
+            let s0 = crate::video::media::probe_input(&f.to_string_lossy())?.format_start;
+            return Ok((f, s0 - m, true));
         }
         let (tl, pieces, dir, container) = self.with_ps(&p.id, |ps| {
             let tl = ps.tl.clone();
@@ -2200,25 +2209,36 @@ impl Engine {
                 Ok((f, o, true))
             }
             _ => {
-                // join: trim each part to its VOD span, scale to the smallest height, concat
+                // join on the VOD clock: keep each part's own timestamps
+                // (-copyts), cut it to its span, shift it by its origin, merge
+                // in time order. Frame times stay exact across the joint
+                // (a concat would restart each part at its first frame).
                 let out = tmp.join("joined.mp4");
+                let x1 = parts[0].2.0;
                 let mut c = ffmpeg::command();
-                c.arg("-y");
-                for (f, o, (x, y)) in &parts {
-                    c.args(["-ss", &format!("{:.6}", (x - o).max(0.0)), "-t", &format!("{:.6}", y - x)]).arg("-i").arg(f);
+                c.arg("-y").arg("-copyts");
+                for (f, o, (x, _)) in &parts {
+                    c.args(["-ss", &format!("{:.6}", (x - o - 3.0).max(0.0))]).arg("-i").arg(f);
                 }
                 let h = self.with_ps(&p.id, |ps| ps.heights.iter().copied().filter(|h| *h > 0).min()).ok().flatten().unwrap_or(720);
                 let mut fc = String::new();
-                for i in 0..parts.len() {
-                    fc.push_str(&format!("[{i}:v:0]scale=-2:{h},setsar=1[v{i}];"));
+                for (i, (_, o, (x, y))) in parts.iter().enumerate() {
+                    fc.push_str(&format!(
+                        "[{i}:v:0]trim=start={:.6}:end={:.6},setpts=PTS+({:.6})/TB,scale=-2:{h},setsar=1,format=yuv420p[v{i}];",
+                        x - o,
+                        y - o,
+                        o - x1
+                    ));
                 }
                 for i in 0..parts.len() {
                     fc.push_str(&format!("[v{i}]"));
                 }
-                fc.push_str(&format!("concat=n={}:v=1:a=0[v]", parts.len()));
-                c.args(["-filter_complex", &fc, "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-an"]).arg(&out);
+                fc.push_str(&format!("interleave=nb_inputs={}[v]", parts.len()));
+                c.args(["-filter_complex", &fc, "-map", "[v]", "-fps_mode", "passthrough", "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-an"]).arg(&out);
                 ffmpeg::run_cancellable(c, cancel)?;
-                Ok((out, parts[0].2.0, false))
+                // ffmpeg seeks relative to a file's start time (its first frame here)
+                let s0 = crate::video::media::probe_input(&out.to_string_lossy())?.format_start;
+                Ok((out, x1 + s0, false))
             }
         }
     }

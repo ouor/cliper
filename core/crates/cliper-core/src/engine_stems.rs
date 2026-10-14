@@ -4,20 +4,20 @@
 //! `stems.ensure` separates the parts of the requested VOD ranges that have
 //! video and aren't separated yet. Existing spans are kept and joined:
 //!
-//! 1. the whole result range `U` (request ∪ the spans it touches) is decoded
-//!    again from the video — decoding is deterministic, so where an old span
-//!    exists the new original audio is bit-identical (checked block by block;
-//!    a block that differs, e.g. a decoder cold start that is now warm, is
-//!    treated as not separated);
+//! 1. the result range `U` (request ∪ the spans it touches) is decoded again
+//!    from the video. An old span is kept if it holds the same audio: most
+//!    samples bit-identical at lag 0 (AAC noise substitution makes some frames
+//!    differ between decodes that started at different places);
 //! 2. only the missing parts are separated, each with [`CTX`] seconds of
 //!    already separated context on both sides;
-//! 3. the new vocals replace the old ones from the middle of that context on,
-//!    with a raised-cosine crossfade of [`XF`] seconds — far from the model's
-//!    chunk edges, where both separations of the same audio agree closely —
-//!    so there is no seam.
+//! 3. the new (original, vocals) pair replaces the old pair from the middle of
+//!    that context on, with one raised-cosine crossfade of [`XF`] seconds —
+//!    far from the model's chunk edges, where both separations of the same
+//!    audio agree closely — so there is no seam, and original and vocals
+//!    always come from the same decode.
 //!
-//! If most of an old span disagrees with the fresh decode (it came from other
-//! bytes), the whole range is separated again (Q-S7's allowed fallback).
+//! An old span that doesn't match (other bytes, e.g. another rendition) is
+//! separated again where video exists (Q-S7's allowed fallback).
 //! Talk is searched only in newly separated parts that were never searched
 //! before (`talk_scanned`), so deleted suggestions never come back.
 
@@ -243,42 +243,66 @@ impl Engine {
         let d = (g0 as f64 / RATE, g1 as f64 / RATE);
         let new_orig = out_dir.join("new_orig.wav");
 
-        // 2) which parts of the old spans are still valid (bit-identical audio)
-        let mut good: Vec<Range> = Vec::new();
-        let mut old_in_d = 0.0;
+        // 2) old spans stay where they hold the same audio. Decoding is
+        //    deterministic except where the AAC stream uses noise substitution
+        //    (PNS: the decoder's random generator depends on where decoding
+        //    started), so "same" = most samples bit-identical at lag 0; an old
+        //    span from other bytes (another rendition) or misplaced has ~none.
+        let mut good: Vec<(i64, i64)> = Vec::new();
+        let mut res = EnsureResult::default();
         for s in &olds {
-            let o = ranges::intersect(&[(s.start, s.end)], &[d]);
-            for &(a, b) in &o {
-                old_in_d += b - a;
-                let (ga, gb) = (grid(a), grid(b));
-                let mut k = ga;
-                while k < gb {
-                    let ke = (k + BLOCK as i64).min(gb);
-                    let old = read_span(&dir, s, "orig.wav", k, ke)?;
-                    let new = wav::read_f32_range(&new_orig, (k - g0) as u64, (ke - k) as u64)?.samples;
-                    let same = old.len() == new.len() && old.iter().zip(&new).all(|(x, y)| (x - y).abs() <= MATCH_TOL);
-                    if same {
-                        good.push((k as f64 / RATE, ke as f64 / RATE));
-                    }
-                    k = ke;
+            let (sa, sb) = (grid(s.start), grid(s.start) + s.frames as i64);
+            let (a, b) = (sa.max(g0), sb.min(g1));
+            let (mut same, mut total) = (0u64, 0u64);
+            // every 5th 0.1 s block, past the old decode's possible cold start
+            let mut k = a + BLOCK as i64 * 2;
+            while k + (BLOCK as i64) <= b {
+                let old = read_span(&dir, s, "orig.wav", k, k + BLOCK as i64)?;
+                let new = wav::read_f32_range(&new_orig, (k - g0) as u64, BLOCK)?.samples;
+                total += old.len() as u64;
+                same += old.iter().zip(&new).filter(|(x, y)| (*x - *y).abs() <= MATCH_TOL).count() as u64;
+                k += BLOCK as i64 * 5;
+            }
+            let ok = total == 0 || same as f64 >= 0.5 * total as f64;
+            tracing::info!("{pid}: old span {} matches the fresh decode in {:.1}% of samples", s.id, 100.0 * same as f64 / total.max(1) as f64);
+            if ok {
+                good.push((sa, sb));
+            } else {
+                tracing::warn!("{pid}: span {} doesn't match the video's audio; separating it again", s.id);
+                (ctx.progress)(Progress::note("separate", "stems_reseparated", "old stems don't match the video; separating them again"));
+                res.reseparated.push(((a as f64) / RATE, (b as f64) / RATE));
+                // what lies outside the video we have can't be redone: keep it
+                if sa < g0 {
+                    good.push((sa, g0));
+                }
+                if sb > g1 {
+                    good.push((g1, sb));
                 }
             }
-            // parts of an old span outside the video we have stay as they are
-            good.extend(ranges::subtract(&[(s.start, s.end)], &[d]));
         }
-        let good = ranges::normalize(&good);
-        let good_in_d = ranges::total(&ranges::intersect(&good, &[d]));
-        let mut res = EnsureResult::default();
-        let missing: Vec<Range> = if !olds.is_empty() && old_in_d > 1.0 && good_in_d < 0.5 * old_in_d {
-            tracing::warn!("{pid}: old stems don't match the video's audio ({good_in_d:.1}/{old_in_d:.1} s); separating {:.1}–{:.1} again", d.0, d.1);
-            (ctx.progress)(Progress::note("separate", "stems_reseparated", "old stems don't match; separating the whole range again"));
-            res.reseparated.push(d);
-            vec![d]
-        } else {
-            // small islands of "good" between missing parts aren't worth keeping
-            let miss = ranges::drop_short(ranges::subtract(&[d], &good), 0.01);
-            ranges::normalize_with(&miss, CTX)
+        let to_sec = |v: &[(i64, i64)]| -> Vec<Range> { v.iter().map(|&(a, b)| (a as f64 / RATE, b as f64 / RATE)).collect() };
+        // missing = D − good, on the grid (no slivers), short gaps of "good" between missing parts closed
+        let missing: Vec<Range> = {
+            let mut cur = vec![(g0, g1)];
+            for &(a, b) in &good {
+                let mut next = Vec::new();
+                for (x, y) in cur {
+                    if b <= x || a >= y {
+                        next.push((x, y));
+                        continue;
+                    }
+                    if a > x {
+                        next.push((x, a));
+                    }
+                    if b < y {
+                        next.push((b, y));
+                    }
+                }
+                cur = next;
+            }
+            ranges::normalize_with(&to_sec(&cur), CTX)
         };
+        let good = to_sec(&good);
 
         // 3) separate the missing parts with context
         let mut news: Vec<(Range, Range, PathBuf)> = Vec::new();
@@ -297,7 +321,10 @@ impl Engine {
             news.push((m, r, sec_out));
         }
 
-        // 4) compose the span over U
+        // 4) compose the span over U: old (orig, vocals) where kept, the new
+        //    decode and its separation in the new parts, and between them one
+        //    crossfade of both together, so orig and vocals always belong to
+        //    the same decode and `orig − (1 − g)·vocals` stays consistent
         let (ug0, ug1) = (grid(u.0).min(g0), grid(u.1).max(g1));
         let fin_frames = (ug1 - ug0) as u64;
         let mut ow = wav::WavWriter::create(&out_dir.join("orig.wav"), STEM_RATE, 2)?;
@@ -305,6 +332,7 @@ impl Engine {
         let mut opk = peaks::PeakBuilder::new(STEM_RATE, 100);
         let mut vpk = peaks::PeakBuilder::new(STEM_RATE, 100);
         let step = 48000i64;
+        let kept: Vec<&StemSpan> = olds.iter().filter(|s| ranges::intersect(&[(s.start, s.end)], &good).iter().any(|(a, b)| b - a > 0.0)).collect();
         let mut k = ug0;
         while k < ug1 {
             if ctx.cancel.is_cancelled() {
@@ -312,10 +340,9 @@ impl Engine {
             }
             let ke = (k + step).min(ug1);
             let n = (ke - k) as usize;
-            // original: the fresh decode inside D, old spans outside
             let mut orig = vec![0f32; n * 2];
             let mut voc = vec![0f32; n * 2];
-            for s in &olds {
+            for s in &kept {
                 let o = read_span(&dir, s, "orig.wav", k, ke)?;
                 let v = read_span(&dir, s, "vocals.wav", k, ke)?;
                 let (sa, sb) = (grid(s.start), grid(s.start) + s.frames as i64);
@@ -329,13 +356,6 @@ impl Engine {
                     }
                 }
             }
-            let (da, db) = (k.max(g0), ke.min(g1));
-            if db > da {
-                let w = wav::read_f32_range(&new_orig, (da - g0) as u64, (db - da) as u64)?.samples;
-                let o = ((da - k) * 2) as usize;
-                orig[o..o + w.len()].copy_from_slice(&w);
-            }
-            // vocals: old where valid, new separations blended in
             for (m, r, f) in &news {
                 let (ra, rb) = (grid(r.0), grid(r.1));
                 let (a, b) = (k.max(ra), ke.min(rb));
@@ -343,13 +363,19 @@ impl Engine {
                     continue;
                 }
                 let nv = wav::read_f32_range(f, (a - ra) as u64, (b - a) as u64)?.samples;
-                // outside m, inside r the old vocals are valid (missing = D − good)
+                let no = wav::read_f32_range(&new_orig, (a - g0) as u64, (b - a) as u64)?.samples;
+                // outside m (inside r) the old pair is valid: missing = D − good
                 for g in a..b {
                     let w = new_weight(g as f64 / RATE, *m, *r) as f32;
+                    if w <= 0.0 {
+                        continue;
+                    }
                     let j = (g - k) as usize;
                     let x = ((g - a) * 2) as usize;
-                    voc[2 * j] = (1.0 - w) * voc[2 * j] + w * nv[x];
-                    voc[2 * j + 1] = (1.0 - w) * voc[2 * j + 1] + w * nv[x + 1];
+                    for ch in 0..2 {
+                        orig[2 * j + ch] = (1.0 - w) * orig[2 * j + ch] + w * no[x + ch];
+                        voc[2 * j + ch] = (1.0 - w) * voc[2 * j + ch] + w * nv[x + ch];
+                    }
                 }
             }
             opk.push_stereo(&orig);

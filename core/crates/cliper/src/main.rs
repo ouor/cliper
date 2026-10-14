@@ -327,6 +327,7 @@ async fn run() -> Result<()> {
                 "fetched_bytes": res.fetched_bytes, "full_source_bytes": res.full_source_bytes,
                 "saving": 1.0 - res.fetched_bytes as f64 / res.full_source_bytes.max(1) as f64,
                 "fallback_segments": res.fallback_segments, "elapsed_sec": res.elapsed_sec,
+                "index": res.index, "audio_variant": src.info.audio_variant,
             }))?);
         }
         Cmd::FetchVideo { video, start, end, out, height, cookies } => {
