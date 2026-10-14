@@ -2371,11 +2371,20 @@
   font-variant-numeric: tabular-nums;
 }
 .map-notices {
-  flex: none;
+  /* over the top (curve) lane so the map keeps its height */
+  position: absolute;
+  top: 34px;
+  left: 56px;
+  right: 8px;
+  z-index: 4;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 0 8px 6px 12px;
+  pointer-events: none;
+}
+.map-notices > * {
+  pointer-events: auto;
+  box-shadow: var(--shadow-1);
 }
 .map-notice {
   display: flex;
@@ -2383,7 +2392,8 @@
   gap: 8px;
   padding: 4px 8px;
   border-radius: var(--r-sm);
-  background: var(--accent-soft);
+  background: var(--bg-3);
+  border: 1px solid var(--accent-line);
   font-size: var(--fs-xs);
 }
 .project-menu {

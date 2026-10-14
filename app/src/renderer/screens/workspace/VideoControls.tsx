@@ -80,7 +80,7 @@ export function ProjectMenu({ p }: { p: Project }) {
   };
   return (
     <div className="popover-anchor">
-      <button className={`btn ghost sm${p.pinned ? " pinned" : ""}`} onClick={() => setOpen(!open)} aria-label="이 작업 메뉴" data-tip="앞뒤 여유 · 저장 공간 · 보관" data-tip-pos="left">
+      <button className={`btn ghost sm${p.pinned ? " pinned" : ""}`} onClick={() => setOpen(!open)} aria-label="이 작업 메뉴" data-tip={open ? undefined : "앞뒤 여유 · 저장 공간 · 보관"} data-tip-pos="left">
         {p.pinned && <Pin size={13} />}
         <MoreHorizontal size={16} />
       </button>
@@ -111,7 +111,7 @@ export function ProjectMenu({ p }: { p: Project }) {
           </div>
           <div className="pm-sec">
             <button className="btn sm subtle" onClick={() => void togglePin()}>
-              {p.pinned ? <PinOff size={13} /> : <Pin size={13} />} {p.pinned ? "보관 풀기" : "📌 보관하기 (정리에서 빼기)"}
+              {p.pinned ? <PinOff size={13} /> : <Pin size={13} />} {p.pinned ? "보관 풀기" : "보관하기 (정리에서 빼기)"}
             </button>
           </div>
         </div>

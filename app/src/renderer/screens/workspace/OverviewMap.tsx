@@ -740,7 +740,7 @@ function MapNotices({ p }: { p: Project }) {
         <div className="map-notice">
           <Download size={13} />
           <span className="grow">
-            곡 {String(nums.get(topupAsk.songId) ?? "").padStart(2, "0")}: 영상 {fmtDurationKo(topupAsk.sec)}(약 {fmtBytes(topupAsk.bytes)})이 더 필요해요.
+            곡 {String(nums.get(topupAsk.songId) ?? "").padStart(2, "0")}: 영상이 {fmtDurationKo(topupAsk.sec)}(약 {fmtBytes(topupAsk.bytes)}) 더 필요해요. 자동으로 받는 양(5분)을 넘어서 물어봐요.
           </span>
           <button
             className="btn xs primary"
