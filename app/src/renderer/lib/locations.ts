@@ -3,7 +3,7 @@
 // anywhere. Nothing here deletes files.
 import { call, EngineError } from "./rpc";
 import { go, toast } from "@/state/app";
-import { refreshList, replaceProject, resetProjectState, useProjects } from "@/state/projects";
+import { hideProjectDir, refreshList, replaceProject, resetProjectState, useProjects } from "@/state/projects";
 
 /** previous projects folders waiting to be listed again — written by main only (U-1) */
 const PENDING_ROOTS = "__main.pendingAddRoots";
@@ -56,10 +56,9 @@ export async function removeLocation(path: string) {
     const before = useProjects.getState().summaries.map((s) => s.id);
     await call("projects.remove_location", { path });
     await refreshList();
-    // projects that left the list: forget their cached state, so another folder with the same id
-    // opened later starts clean (QA-5)
+    // projects that left the list: forget their state and drop late events from that folder (U-13)
     const now = new Set(useProjects.getState().summaries.map((s) => s.id));
-    for (const id of before) if (!now.has(id)) resetProjectState(id);
+    for (const id of before) if (!now.has(id)) hideProjectDir(id);
     toast("목록에서 뺐어요. 폴더와 파일은 그대로예요.", { kind: "ok" });
   } catch (e) {
     toast(`목록에서 빼지 못했어요 · ${(e as Error).message}`, { kind: "error" });

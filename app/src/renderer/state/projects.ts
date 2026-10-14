@@ -150,16 +150,49 @@ function display(pid: string) {
   }));
 }
 
-function setEngine(p: Project) {
+// ── which folder's instance of an id is shown (Project.dir, U-13) ──
+// Copies of a folder keep their uid; uid + dir identify a loaded instance. A project.changed or a
+// response from another folder (e.g. a late one from a location just removed) is dropped.
+const shownDir: Record<string, string> = {};
+/** no folder is shown for this id: everything is dropped until a project is taken (removed location) */
+const NO_DIR = "<no folder>";
+const normDir = (d: string) => d.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+const sameDir = (a: string, b: string) => normDir(a) === normDir(b);
+
+/** Show this folder's instance of the id from now on (the listing, or a project just opened / created). */
+function showDir(id: string, dir: string | undefined) {
+  if (!dir) return;
+  const was = shownDir[id];
+  shownDir[id] = dir;
+  if (was && was !== NO_DIR && !sameDir(was, dir) && engineState[id]) resetProjectState(id);
+}
+
+/** Stop showing any folder for this id (its location was removed): late events from it are dropped. */
+export function hideProjectDir(id: string) {
+  shownDir[id] = NO_DIR;
+  resetProjectState(id);
+  useProjects.setState((s) => {
+    const projects = { ...s.projects };
+    delete projects[id];
+    return { projects };
+  });
+}
+
+function setEngine(p: Project): boolean {
+  if (p.dir) {
+    const want = shownDir[p.id];
+    if (want === undefined) shownDir[p.id] = p.dir;
+    else if (!sameDir(want, p.dir)) return false; // another folder's instance (U-13)
+  }
   const cur = engineState[p.id];
   // notifications and responses can arrive out of order; never go back in time — unless it is
-  // another project with the same id (Project.uid differs): then start over. Copies of a folder
-  // share the uid; opening / dropping a location resets explicitly (replaceProject, QA-5)
-  if (cur && cur.uid !== p.uid) {
+  // another instance (uid or folder differs): then start over
+  if (cur && (cur.uid !== p.uid || (cur.dir && p.dir && !sameDir(cur.dir, p.dir)))) {
     resetProjectState(p.id);
-  } else if (cur && cur.revision > p.revision) return;
+  } else if (cur && cur.revision > p.revision) return true;
   engineState[p.id] = p;
   display(p.id);
+  return true;
 }
 
 /** Forget everything cached about a project id (state, pending edits, undo): its folder changed. */
@@ -182,9 +215,9 @@ export function onProjectReset(cb: (id: string) => void): () => void {
   return () => resetListeners.delete(cb);
 }
 
-/** Take this project as the engine's current state, whatever was cached for its id before. */
+/** Take this project (just opened / created / added) as the instance shown for its id. */
 export function replaceProject(p: Project) {
-  resetProjectState(p.id);
+  showDir(p.id, p.dir);
   setEngine(p);
 }
 
@@ -192,6 +225,8 @@ export async function refreshList() {
   try {
     const summaries = await call("project.list", {});
     summaries.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    // the listing says which folder each id is shown from (U-13)
+    for (const s of summaries) showDir(s.id, s.dir);
     useProjects.setState({ summaries, listLoaded: true });
   } catch {
     useProjects.setState({ listLoaded: true });
@@ -213,7 +248,7 @@ export function putProject(p: Project) {
 
 /** project.changed */
 export function applyChanged(p: Project) {
-  setEngine(p);
+  if (!setEngine(p)) return;
   const s = useProjects.getState();
   const idx = s.summaries.findIndex((x) => x.id === p.id);
   // the folder (Project locations) only comes with project.list: keep it

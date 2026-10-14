@@ -9,7 +9,7 @@ import type { ProjectSummary } from "@ipc/generated/ProjectSummary";
 import type { AudioTrack } from "@ipc/generated/AudioTrack";
 import type { Note } from "@ipc/generated/Note";
 import { ask, go, openSettings, toast, useApp } from "@/state/app";
-import { forgetProject, putProject, refreshList, useProjects } from "@/state/projects";
+import { forgetProject, putProject, refreshList, replaceProject, useProjects } from "@/state/projects";
 import { clearInterrupted, KIND_LABEL, startJob, useJobs } from "@/state/jobs";
 import { call } from "@/lib/rpc";
 import { friendly, type FriendlyError } from "@/lib/errors";
@@ -327,7 +327,7 @@ export function Home() {
     const before = new Set(useProjects.getState().summaries.map((s) => s.id));
     try {
       const project = await call("project.create", { input: input.trim() });
-      putProject(project);
+      replaceProject(project);
       setResolved({ project, existed: before.has(project.id) });
       void refreshList();
     } catch (e) {
