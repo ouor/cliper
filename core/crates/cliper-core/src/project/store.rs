@@ -158,6 +158,7 @@ impl Store {
             _ => e.into(),
         })?;
         let mut p: Project = serde_json::from_slice(&b)?;
+        relink_exports(&mut p, &self.dir(id));
         if p.schema != super::model::SCHEMA {
             // one migration at a time (concurrent loads of the same project)
             static MIGRATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -222,6 +223,26 @@ impl Store {
         }
         std::fs::remove_dir_all(d)?;
         Ok(())
+    }
+}
+
+/// Export records are absolute (exports may go to an output folder): one that
+/// pointed into the project's own `exports/` before the folder moved (or was
+/// copied) is pointed at the same file here (QA-17).
+fn relink_exports(p: &mut Project, dir: &Path) {
+    for s in p.songs.iter_mut() {
+        let Some(e) = s.export.as_mut() else { continue };
+        let old = Path::new(&e.path);
+        if old.is_file() && old.starts_with(dir) {
+            continue;
+        }
+        let in_old_exports = old.parent().and_then(|d| d.file_name()).is_some_and(|n| n == "exports");
+        if let Some(name) = old.file_name().filter(|_| in_old_exports) {
+            let here = dir.join("exports").join(name);
+            if here.is_file() && !old.starts_with(dir) {
+                e.path = here.to_string_lossy().into_owned();
+            }
+        }
     }
 }
 

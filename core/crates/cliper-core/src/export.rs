@@ -61,6 +61,9 @@ pub struct ExportSpec {
     pub out_t: f64,
     /// video file time = stem time + `video_offset`
     pub video_offset: f64,
+    /// keep the source's frame times (a joined source: two renditions'
+    /// frames don't share one frame grid, snapping them shifts one side)
+    pub keep_frame_times: bool,
     /// mutes in stem seconds
     pub mutes: Vec<MuteSpan>,
     /// output file (extension should match `format`)
@@ -310,6 +313,9 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
         }
         c.arg("-i").arg(&tmp_wav);
         c.args(["-t", &format!("{dur:.6}")]);
+        if video && spec.keep_frame_times {
+            c.args(["-fps_mode:v", "passthrough"]);
+        }
         if video {
             c.args(["-map", "0:v:0", "-map", "1:a:0"]);
         } else {

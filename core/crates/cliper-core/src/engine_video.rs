@@ -553,6 +553,9 @@ impl Engine {
                 Ok(s) => s,
                 Err(e) if e.code == "VOD_NOT_FOUND" => return Err(SegErr::VodGone(e.message)),
                 Err(e) if e.code == "AUTH_REQUIRED" || e.code == "FORMAT" => return Err(failed(&e.code, e.message)),
+                // resolving already retried (and failures are remembered for a
+                // while, QA-13): offline fails the segment at once
+                Err(e) if e.code == "NETWORK" => return Err(failed(&e.code, e.message)),
                 Err(e) => {
                     attempt += 1;
                     if attempt > SEGMENT_RETRIES {
@@ -590,6 +593,10 @@ impl Engine {
                 if let Err(e) = tokio::fs::create_dir_all(&vdir).await {
                     return Err(failed("IO", e.to_string()));
                 }
+                // the init segment: once per rendition (several segment
+                // downloads of a new rendition start together)
+                let init_lock = self.resolve_locks.lk().entry(format!("{pid}#init{vv}")).or_default().clone();
+                let _init_guard = init_lock.lock().await;
                 if container == Container::Fmp4 && !store::init_path(dir, vv).is_file() {
                     let Some(u) = &pl.init_url else { return Err(failed("FORMAT", "rendition has no init segment".into())) };
                     match src.http.get_bytes(u).await {
@@ -604,6 +611,7 @@ impl Engine {
                         }
                     }
                 }
+                drop(_init_guard);
                 let url = pl.segments[i].clone();
                 let r = tokio::select! {
                     _ = cancel.cancelled() => return Err(SegErr::Cancelled),
@@ -1063,10 +1071,20 @@ async fn backoff(attempt: u32, cancel: &tokio_util::sync::CancellationToken) -> 
     }
 }
 
-async fn write_atomic_async(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("{}.part", path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()));
+/// Write via a temp file unique to this call, then rename over `path` (a
+/// concurrent writer of the same file never loses its temp file).
+pub(crate) async fn write_atomic_async(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_extension(format!("{ext}.{}.part", project::new_id("")));
     tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, path).await
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        // someone else wrote the same complete file first: fine
+        if !path.is_file() {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 /// Missing / total seconds and size of fetching `rs`.

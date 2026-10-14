@@ -179,6 +179,9 @@ ranges (margins never warn).
   request_id, priority}` moves one (`now` puts it first).
 - **At most 4 HTTP requests are in flight in the whole app** (audio and video,
   all projects and jobs together; `system.net_stats` shows the counters).
+- **Offline**: when resolving the VOD fails for network reasons (resolving
+  retries by itself), the segment fails at once and that failure is reused
+  for 30 s, so a whole request ends within seconds instead of minutes.
 - **Retries**: each segment is tried 4 times (3 retries, 1 / 2 / 4 s apart);
   an expired playback token is re-resolved once; a CDN copy that is truncated
   is fetched from the next lower rendition (that segment only). Then the
@@ -247,9 +250,15 @@ aren't separated yet:
   the new (original, vocals) pair takes over in the middle of that context
   with a 1 s raised-cosine crossfade. Measured against a full re-separation:
   ≈ −55 dB (rms, re vocals) across the crossfade, no step in the signal.
-- A span from other bytes (another rendition) is separated again where video
-  exists (`EnsureResult.reseparated`).
-- Result `EnsureResult {separated, reseparated, spans, suggestions, no_video}`.
+- An old span is checked per 0.5 s block; blocks that don't hold the same
+  audio (other bytes, or misplaced) are separated again on their own
+  (`EnsureResult.reseparated`).
+- Across a rendition change each rendition is decoded on its own and placed
+  by its own clock (exact to the sample on both sides). The two renditions'
+  segments may split the audio differently, so the joint can have a few tens
+  of ms without audio (silence with 5 ms fades); the timing never shifts.
+- Result `EnsureResult {separated, reseparated, spans, suggestions,
+  suggestions_by_song, no_video}` — `suggestions_by_song` maps song id → count.
 - Spans are **immutable folders**: growing one writes `stems/<new id>/` and
   removes the old one after `project.changed` lists the new span. Keep reading
   the old files until you switch.
@@ -265,7 +274,7 @@ audio as if fetched in one piece (video duration within 1 frame of the song,
 audio = the render formula to the 24-bit LSB; checked in the E2E runs).
 
 - Songs whose `[start, end]` lacks video: without `fetch` the call fails at
-  once with `VIDEO_MISSING`, `data: {songs: [{song_id, ranges}]}`; with
+  once with `VIDEO_MISSING`, `data: {songs: [{song_id, ranges}], vod_gone}`; with
   `fetch: true` their video is queued (`reason: "export"`), the other songs are
   exported first, then these as their video arrives. A song whose video can't
   be fetched (replay gone, failures) ends in `result.failed[]`
@@ -274,7 +283,9 @@ audio = the render formula to the 24-bit LSB; checked in the E2E runs).
 - Stems are separated on the fly where missing (same as `stems.ensure`).
 - A song crossing two renditions (or an adopted clip and new segments) is
   joined on the VOD clock and re-encoded (`video_codec: "copy"` can't join two
-  streams; progress note `reencode_joined`).
+  streams; progress note `reencode_joined`). The joint keeps the larger
+  rendition's size, then `export_height` / `video_bitrate_k` apply as usual,
+  and frame times are kept as they are (no snapping to one frame grid).
 - `audio_overrides`: the file's t = 0 is the start of that song's editor
   hand-off files (song start − `handles`, default 3 s).
 
@@ -291,7 +302,7 @@ including the previous ones' effect only where stated:
 
 | level | deletes | keeps |
 |---|---|---|
-| `unused` | video no **enabled** song's `[start − margin, end + margin]` touches (excluded songs don't count; an adopted clip is deleted only if no song touches it) + the view cache | everything else |
+| `unused` | video no **enabled** song's `[start − margin, end + margin]` touches (excluded songs don't count; an adopted clip is deleted only if no song touches it) + the caches (views, audio windows) — i.e. `unused_video + cache` | everything else |
 | `stems` | separated audio (all spans) + view cache | video, audio |
 | `video` | all video (segments, adopted clips) + separated audio + view cache | audio |
 | `audio` | all of the above + the analysis audio (`project.audio.dropped = true`) and audio windows | `overview.peaks`, `probs.bin` |
@@ -312,7 +323,11 @@ folder's `engine.json`:
 
 - `projects.add_root {path}` → `{projects, skipped}`: list every project in
   another folder — call it with the previous folder after the user picks a new
-  projects folder (plan 14.9: old projects keep opening where they are).
+  projects folder (plan 14.9: old projects keep opening where they are). The
+  other locations that folder itself listed (its own `add_root` folders and
+  `project.open` projects) come along, so nothing is lost by switching.
+- Export records (`song.export.path`) that pointed into a project's own
+  `exports/` follow the project when its folder moved or was copied.
 - `project.open {path}` → `Project`: one project folder from elsewhere (moved by
   hand, another drive — [다른 위치의 작업 열기]).
 - `projects.remove_location {path}` → bool (nothing is deleted),

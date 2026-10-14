@@ -61,6 +61,9 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into())
 }
 
+/// How long a failed resolve (network) is reused instead of trying again.
+const RESOLVE_FAIL_TTL: Duration = Duration::from_secs(30);
+
 /// Re-resolve playback URLs older than this (tokens expire after a few hours).
 const SOURCE_TTL: Duration = Duration::from_secs(20 * 60);
 
@@ -299,6 +302,8 @@ pub struct Engine {
     sources: tokio::sync::Mutex<HashMap<String, (Source, Instant)>>,
     /// project → lock making concurrent `source()` calls share one resolve
     resolve_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// project → last resolve that failed for network reasons
+    resolve_fail: Mutex<HashMap<String, (Instant, ApiError)>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     tagger: Arc<Mutex<Option<Tagger>>>,
     /// separation session, kept open between clips; holding its lock also
@@ -320,6 +325,8 @@ pub struct Engine {
     stems_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// project → ranges to separate once the running stems.ensure finishes
     pending_process: Mutex<HashMap<String, Vec<Range>>>,
+    /// when the last job ended (model release counts idle time from here)
+    last_job_end: Mutex<Instant>,
 }
 
 /// Keep Windows from sleeping while jobs run (unattended overnight batches).
@@ -351,6 +358,11 @@ fn keep_awake_while_busy(eng: std::sync::Weak<Engine>) {
 /// commit that mirrors it on Windows). Reopening costs a few seconds.
 const MODEL_IDLE: Duration = Duration::from_secs(60);
 
+/// Idle for [`MODEL_IDLE`] since both the first idle check and the end of the last job?
+fn idle_long_enough(idle_since: Instant, last_job_end: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(idle_since.max(last_job_end)) >= MODEL_IDLE
+}
+
 fn release_models_when_idle(eng: std::sync::Weak<Engine>) {
     std::thread::Builder::new()
         .name("model-idle".into())
@@ -364,7 +376,8 @@ fn release_models_when_idle(eng: std::sync::Weak<Engine>) {
                     continue;
                 }
                 let since = *idle_since.get_or_insert_with(Instant::now);
-                if since.elapsed() < MODEL_IDLE {
+                // a job that started and ended between two checks counts too (QA-14)
+                if !idle_long_enough(since, *e.last_job_end.lk(), Instant::now()) {
                     continue;
                 }
                 // a model in use holds its lock; leave it for the next round
@@ -795,6 +808,7 @@ impl Engine {
             jobs: Mutex::new(HashMap::new()),
             sources: tokio::sync::Mutex::new(HashMap::new()),
             resolve_locks: Mutex::new(HashMap::new()),
+            resolve_fail: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
             tagger: Arc::new(Mutex::new(None)),
             separator: Mutex::new(None),
@@ -809,6 +823,7 @@ impl Engine {
             video: VideoMgr::new(video_paused),
             stems_locks: Mutex::new(HashMap::new()),
             pending_process: Mutex::new(HashMap::new()),
+            last_job_end: Mutex::new(Instant::now()),
         });
         keep_awake_while_busy(Arc::downgrade(&eng));
         release_models_when_idle(Arc::downgrade(&eng));
@@ -1077,6 +1092,7 @@ impl Engine {
                     }
                 }
                 eng.jobs.lk().remove(&jid);
+                *eng.last_job_end.lk() = Instant::now();
             }
             eng.job_finished.notify_waiters();
             eng.record_outcome(&pid, &kind_s, &res).await;
@@ -1258,13 +1274,24 @@ impl Engine {
         if canonical(&self.cfg.projects_root).as_deref() == Some(dir.as_path()) {
             return Err(invalid("that is the projects folder itself"));
         }
+        // what that folder itself listed from elsewhere comes along (QA-6:
+        // projects opened from other places were lost when switching folders)
+        let old = EnginePrefs::load(&dir);
+        let me = canonical(&self.cfg.projects_root);
         let d = dir.clone();
-        let skipped = self.apply_locations(move |roots, _| {
-            if !roots.contains(&d) {
-                roots.push(d);
+        let skipped = self.apply_locations(move |roots, dirs| {
+            for r in std::iter::once(d).chain(old.project_roots) {
+                if !roots.contains(&r) && Some(&r) != me.as_ref() {
+                    roots.push(r);
+                }
+            }
+            for x in old.project_dirs {
+                if !dirs.contains(&x) {
+                    dirs.push(x);
+                }
             }
         })?;
-        let projects: Vec<ProjectSummary> = self.list().into_iter().filter(|s| s.dir.as_ref().is_some_and(|x| x.starts_with(&dir))).collect();
+        let projects: Vec<ProjectSummary> = self.list().into_iter().filter(|s| s.dir.as_ref().is_some_and(|x| !x.starts_with(&self.cfg.projects_root))).collect();
         let skipped: Vec<Value> = skipped.into_iter().map(|(id, d)| json!({ "id": id, "dir": d })).collect();
         Ok(json!({ "projects": projects, "skipped": skipped }))
     }
@@ -1351,6 +1378,13 @@ impl Engine {
         // one resolve at a time per project (segment downloads ask concurrently)
         let lock = self.resolve_locks.lk().entry(p.id.clone()).or_default().clone();
         let _g = lock.lock().await;
+        // a network failure is remembered briefly: offline, every segment
+        // would otherwise wait for its own slow resolve (QA-13)
+        if let Some((at, e)) = self.resolve_fail.lk().get(&p.id)
+            && at.elapsed() < RESOLVE_FAIL_TTL
+        {
+            return Err(e.clone());
+        }
         {
             let cache = self.sources.lock().await;
             if let Some((s, at)) = cache.get(&p.id)
@@ -1358,7 +1392,18 @@ impl Engine {
                     return Ok(s.clone());
                 }
         }
-        let src = self.resolve_fresh(&p.input).await?;
+        let src = match self.resolve_fresh(&p.input).await {
+            Ok(s) => {
+                self.resolve_fail.lk().remove(&p.id);
+                s
+            }
+            Err(e) => {
+                if e.code == "NETWORK" {
+                    self.resolve_fail.lk().insert(p.id.clone(), (Instant::now(), e.clone()));
+                }
+                return Err(e);
+            }
+        };
         if let Some(a) = &p.audio {
             let n = a.index.first_segment + a.index.frames.len();
             if src.playlist.segments.len() < n {
@@ -1609,6 +1654,14 @@ impl Engine {
             };
             // the view cache goes with every level
             eng.drop_views(id);
+            if level == DropLevel::Unused {
+                // audio windows are a cache too (QA-12: the estimate counted them)
+                for e in std::fs::read_dir(dir.join("cache")).into_iter().flatten().flatten() {
+                    if e.file_name().to_string_lossy().starts_with("window_") {
+                        rm(&e.path());
+                    }
+                }
+            }
             if level == DropLevel::Unused && !is_local(&pc) {
                 let used = crate::storage::used_ranges(&pc);
                 let (raw, files, container) = eng.with_ps(id, |ps| {
@@ -2069,7 +2122,7 @@ impl Engine {
         }
         if !missing.is_empty() && !opts.fetch {
             return Err(ApiError::new("VIDEO_MISSING", format!("{} song(s) lack video in their range (fetch it, or export with fetch: true)", missing.len()))
-                .with_data(json!({ "songs": missing })));
+                .with_data(json!({ "songs": missing, "vod_gone": p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone) })));
         }
         if !missing.is_empty() && p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone) && missing.len() == songs.len() {
             return Err(ApiError::new("VOD_GONE", "the replay is gone and these songs lack video").with_data(json!({ "songs": missing })));
@@ -2248,6 +2301,7 @@ impl Engine {
             in_t: s.start - a0,
             out_t: s.end - a0,
             video_offset,
+            keep_frame_times: !copy_ok,
             mutes,
             out: naming::unique_path(out_dir, &name, format.extension()),
             format,
@@ -2333,7 +2387,10 @@ impl Engine {
                 for (f, o, (x, _)) in &parts {
                     c.args(["-ss", &format!("{:.6}", (x - o - 3.0).max(0.0))]).arg("-i").arg(f);
                 }
-                let h = self.with_ps(&p.id, |ps| ps.heights.iter().copied().filter(|h| *h > 0).min()).ok().flatten().unwrap_or(720);
+                // the largest of the parts joined (QA-3: the smallest rendition
+                // anywhere in the project made every joined song small); the
+                // export's own height / bitrate settings apply when encoding
+                let h = parts.iter().filter_map(|(f, _, _)| crate::video::media::video_height(f)).max().unwrap_or(720);
                 let mut fc = String::new();
                 for (i, (_, o, (x, y))) in parts.iter().enumerate() {
                     fc.push_str(&format!(

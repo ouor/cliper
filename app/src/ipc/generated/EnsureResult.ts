@@ -21,6 +21,10 @@ spans: Array<string>,
  */
 suggestions: number, 
 /**
+ * … per song (song id → count)
+ */
+suggestions_by_song: { [key in string]: number }, 
+/**
  * requested ranges without video (not separated)
  */
 no_video: Array<[number, number]>, };

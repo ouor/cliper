@@ -43,8 +43,6 @@ pub const CTX: f64 = 10.0;
 pub const XF: f64 = 1.0;
 /// Old original audio must match the fresh decode to this (max abs, per block).
 const MATCH_TOL: f32 = 1e-4;
-/// Comparison block (frames, 0.1 s).
-const BLOCK: u64 = 4800;
 const RATE: f64 = STEM_RATE as f64;
 
 /// What `stems.ensure` did.
@@ -59,6 +57,8 @@ pub struct EnsureResult {
     pub spans: Vec<String>,
     /// mute suggestions added
     pub suggestions: usize,
+    /// … per song (song id → count)
+    pub suggestions_by_song: std::collections::BTreeMap<String, usize>,
     /// requested ranges without video (not separated)
     pub no_video: Vec<Range>,
 }
@@ -213,6 +213,9 @@ impl Engine {
                 res.reseparated.extend(r.reseparated);
                 res.spans.extend(r.spans);
                 res.suggestions += r.suggestions;
+                for (k, v) in r.suggestions_by_song {
+                    *res.suggestions_by_song.entry(k).or_default() += v;
+                }
             }
         }
         res.separated = ranges::normalize(&res.separated);
@@ -248,38 +251,57 @@ impl Engine {
         //    (PNS: the decoder's random generator depends on where decoding
         //    started), so "same" = most samples bit-identical at lag 0; an old
         //    span from other bytes (another rendition) or misplaced has ~none.
+        // Checked per 0.5 s block, so a misplaced part of a span (QA-2: an
+        // old join of two renditions) is separated again on its own.
         let mut good: Vec<(i64, i64)> = Vec::new();
         let mut res = EnsureResult::default();
+        const CHECK: i64 = 24000;
         for s in &olds {
             let (sa, sb) = (grid(s.start), grid(s.start) + s.frames as i64);
             let (a, b) = (sa.max(g0), sb.min(g1));
-            let (mut same, mut total) = (0u64, 0u64);
-            // every 5th 0.1 s block, past the old decode's possible cold start
-            let mut k = a + BLOCK as i64 * 2;
-            while k + (BLOCK as i64) <= b {
-                let old = read_span(&dir, s, "orig.wav", k, k + BLOCK as i64)?;
-                let new = wav::read_f32_range(&new_orig, (k - g0) as u64, BLOCK)?.samples;
-                total += old.len() as u64;
-                same += old.iter().zip(&new).filter(|(x, y)| (*x - *y).abs() <= MATCH_TOL).count() as u64;
-                k += BLOCK as i64 * 5;
+            // what lies outside the video we have can't be redone: keep it
+            if sa < g0 {
+                good.push((sa, g0.min(sb)));
             }
-            let ok = total == 0 || same as f64 >= 0.5 * total as f64;
-            tracing::info!("{pid}: old span {} matches the fresh decode in {:.1}% of samples", s.id, 100.0 * same as f64 / total.max(1) as f64);
-            if ok {
-                good.push((sa, sb));
-            } else {
-                tracing::warn!("{pid}: span {} doesn't match the video's audio; separating it again", s.id);
+            if sb > g1 {
+                good.push((g1.max(sa), sb));
+            }
+            let mut bad: Vec<(i64, i64)> = Vec::new();
+            let mut k = a;
+            while k < b {
+                let ke = (k + CHECK).min(b);
+                let old = read_span(&dir, s, "orig.wav", k, ke)?;
+                let new = wav::read_f32_range(&new_orig, (k - g0) as u64, (ke - k) as u64)?.samples;
+                let same = old.iter().zip(&new).filter(|(x, y)| (*x - *y).abs() <= MATCH_TOL).count();
+                // a decoder cold start at the old span's first block may differ: allow it
+                let ok = same * 2 >= old.len() || (k == sa && same * 4 >= old.len()) || old.iter().all(|x| x.abs() < 1e-6);
+                if ok {
+                    good.push((k, ke));
+                } else {
+                    bad.push((k, ke));
+                }
+                k = ke;
+            }
+            if !bad.is_empty() {
+                let secs: Vec<Range> = bad.iter().map(|&(x, y)| (x as f64 / RATE, y as f64 / RATE)).collect();
+                let secs = ranges::normalize(&secs);
+                tracing::warn!("{pid}: span {} doesn't match the video's audio in {:.1} s; separating that again", s.id, ranges::total(&secs));
                 (ctx.progress)(Progress::note("separate", "stems_reseparated", "old stems don't match the video; separating them again"));
-                res.reseparated.push(((a as f64) / RATE, (b as f64) / RATE));
-                // what lies outside the video we have can't be redone: keep it
-                if sa < g0 {
-                    good.push((sa, g0));
-                }
-                if sb > g1 {
-                    good.push((g1, sb));
-                }
+                res.reseparated.extend(secs);
             }
         }
+        let good: Vec<(i64, i64)> = {
+            let mut g = good;
+            g.sort();
+            let mut out: Vec<(i64, i64)> = Vec::new();
+            for (x, y) in g {
+                match out.last_mut() {
+                    Some(l) if x <= l.1 => l.1 = l.1.max(y),
+                    _ => out.push((x, y)),
+                }
+            }
+            out
+        };
         let to_sec = |v: &[(i64, i64)]| -> Vec<Range> { v.iter().map(|&(a, b)| (a as f64 / RATE, b as f64 / RATE)).collect() };
         // missing = D − good, on the grid (no slivers), short gaps of "good" between missing parts closed
         let missing: Vec<Range> = {
@@ -421,7 +443,7 @@ impl Engine {
         };
 
         let old_ids: Vec<String> = olds.iter().map(|s| s.id.clone()).collect();
-        let mut added = 0usize;
+        let mut added = std::collections::BTreeMap::new();
         let rt = tokio::runtime::Handle::current();
         let span_c = span.clone();
         rt.block_on(self.mutate(pid, |p| {
@@ -435,7 +457,8 @@ impl Engine {
             }
             Ok(())
         }))?;
-        res.suggestions = added;
+        res.suggestions = added.values().sum();
+        res.suggestions_by_song = added;
         // the old spans' files (folders under stems/ only; adopted clip folders keep their video)
         for s in &olds {
             for f in ["orig.wav", "vocals.wav", "orig.peaks", "vocals.peaks"] {
@@ -453,38 +476,58 @@ impl Engine {
     /// Returns the grid range written (may be shorter than `d` at the edges).
     fn decode_grid(&self, p: &Project, pieces: &[Piece], d: Range, out: &Path, cancel: &CancellationToken) -> ApiResult<(i64, i64)> {
         let sub = self.decode_pieces(p, pieces, d)?;
-        let first = sub.first().ok_or_else(|| precondition("no video for this range"))?;
-        let origin = self.decode_origin(p, first)?;
+        if sub.is_empty() {
+            return Err(precondition("no video for this range"));
+        }
         let container = p.source.as_ref().map(|s| s.container).unwrap_or(crate::source::Container::Fmp4);
         let dir = self.store.dir(&p.id);
-        let mut dec = media::decode(&dir, container, &sub, STEM_RATE, 2)?;
-        let og = grid(origin);
-        let (g0, g1) = (grid(d.0).max(og), grid(d.1));
-        let mut skip = ((g0 - og) * 2) as usize;
-        let mut w = wav::WavWriter::create(out, STEM_RATE, 2)?;
-        let want = ((g1 - g0).max(0) * 2) as usize;
-        let mut got = 0usize;
-        let mut buf = vec![0f32; 1 << 16];
-        while got < want {
-            if cancel.is_cancelled() {
-                return Err(ApiError::new("CANCELLED", "cancelled"));
+        // One decode per rendition, each placed by its own media clock (QA-2:
+        // a rendition change continued by sample count put the second
+        // rendition tens of ms off). Same-rendition pieces (an adopted clip
+        // + new segments) stay one decode: that is bit-exact and warm.
+        let mut groups: Vec<Vec<Piece>> = Vec::new();
+        for pc in sub {
+            match groups.last_mut() {
+                Some(g) if g[0].variant() == pc.variant() => g.push(pc),
+                _ => groups.push(vec![pc]),
             }
-            let n = dec.pcm.read(&mut buf)?;
-            if n == 0 {
+        }
+        let (gs, ge) = (grid(d.0), grid(d.1));
+        let mut w = GridWriter::new(out)?;
+        let mut buf = vec![0f32; 1 << 16];
+        for grp in &groups {
+            if w.pos.is_some_and(|x| x >= ge) {
                 break;
             }
-            let mut x = &buf[..n];
-            if skip > 0 {
-                let s = skip.min(x.len());
-                skip -= s;
-                x = &x[s..];
+            let og = grid(self.decode_origin(p, &grp[0])?);
+            let mut dec = media::decode(&dir, container, grp, STEM_RATE, 2)?;
+            let mut cur = og;
+            let mut first = true;
+            loop {
+                if cancel.is_cancelled() {
+                    return Err(ApiError::new("CANCELLED", "cancelled"));
+                }
+                let n = dec.pcm.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                let frames = (n / 2) as i64;
+                // the part of [cur, cur + frames) to keep: from the write
+                // position (or the range start) to the range end
+                let from = w.pos.unwrap_or(gs.max(og)).max(cur).max(gs);
+                let to = (cur + frames).min(ge);
+                if to > from {
+                    let x = &buf[((from - cur) * 2) as usize..((to - cur) * 2) as usize];
+                    w.put(from, x, first)?;
+                    first = false;
+                }
+                cur += frames;
+                if cur >= ge {
+                    break;
+                }
             }
-            let take = x.len().min(want - got);
-            w.write(&x[..take])?;
-            got += take;
         }
-        w.finish()?;
-        Ok((g0, g0 + (got / 2) as i64))
+        w.finish()
     }
 
     /// The pieces to decode for `d`: from one segment before it (decoder
@@ -598,10 +641,10 @@ impl Engine {
 
 /// Mute suggestions for talk regions in songs (± margins), skipping what
 /// overlaps the user's own or confirmed mutes. Returns how many were added.
-pub(crate) fn add_suggestions(p: &mut Project, talk: &[Range]) -> usize {
+pub(crate) fn add_suggestions(p: &mut Project, talk: &[Range]) -> std::collections::BTreeMap<String, usize> {
     let (fade, gain_db) = (p.settings.mute_fade, p.settings.mute_gain_db);
     let (mb, ma) = (p.settings.margin_before, p.settings.margin_after);
-    let mut n = 0;
+    let mut n = std::collections::BTreeMap::new();
     for s in p.songs.iter_mut().filter(|s| s.enabled) {
         let kept: Vec<Range> = s.mutes.iter().map(|m| (m.start, m.end)).collect();
         let fresh: Vec<Mute> = talk
@@ -621,11 +664,88 @@ pub(crate) fn add_suggestions(p: &mut Project, talk: &[Range]) -> usize {
                 gain_db,
             })
             .collect();
-        n += fresh.len();
+        if !fresh.is_empty() {
+            n.insert(s.id.clone(), fresh.len());
+        }
         s.mutes.extend(fresh);
         s.mutes.sort_by(|a, b| a.start.total_cmp(&b.start));
     }
     n
+}
+
+/// Writes decoded audio onto the sample grid: later pieces start where their
+/// own clock puts them; an overlap keeps what was written first, a gap (the
+/// two renditions' segments split the audio differently) becomes silence
+/// with 5 ms fades on both sides so it doesn't click.
+struct GridWriter {
+    w: wav::WavWriter,
+    /// grid index of the first frame written
+    start: Option<i64>,
+    /// next grid index to write
+    pos: Option<i64>,
+    /// last frames held back so they can be faded before a gap
+    tail: Vec<f32>,
+}
+
+const FADE: usize = 240;
+
+impl GridWriter {
+    fn new(out: &Path) -> std::io::Result<Self> {
+        Ok(Self { w: wav::WavWriter::create(out, STEM_RATE, 2)?, start: None, pos: None, tail: Vec::new() })
+    }
+
+    fn put(&mut self, at: i64, x: &[f32], new_piece: bool) -> std::io::Result<()> {
+        let mut x = x.to_vec();
+        match self.pos {
+            None => self.start = Some(at),
+            Some(p) if at > p => {
+                // gap: fade out what came before, silence, fade in
+                let n = self.tail.len() / 2;
+                for k in 0..n.min(FADE) {
+                    let g = (n.min(FADE) - k) as f32 / (n.min(FADE) as f32 + 1.0);
+                    let j = n - n.min(FADE) + k;
+                    self.tail[2 * j] *= g;
+                    self.tail[2 * j + 1] *= g;
+                }
+                self.flush_tail()?;
+                self.w.write(&vec![0f32; ((at - p) * 2) as usize])?;
+                tracing::info!("stems: {} ms without audio where two renditions join", (at - p) as f64 / 48.0);
+            }
+            _ => {}
+        }
+        if new_piece && self.pos.is_some_and(|p| at > p) {
+            let n = (x.len() / 2).min(FADE);
+            for k in 0..n {
+                let g = (k + 1) as f32 / (n as f32 + 1.0);
+                x[2 * k] *= g;
+                x[2 * k + 1] *= g;
+            }
+        }
+        self.tail.extend_from_slice(&x);
+        let keep = FADE * 2;
+        if self.tail.len() > keep {
+            let n = self.tail.len() - keep;
+            self.w.write(&self.tail[..n])?;
+            self.tail.drain(..n);
+        }
+        self.pos = Some(at + (x.len() / 2) as i64);
+        Ok(())
+    }
+
+    fn flush_tail(&mut self) -> std::io::Result<()> {
+        self.w.write(&self.tail)?;
+        self.tail.clear();
+        Ok(())
+    }
+
+    fn finish(mut self) -> ApiResult<(i64, i64)> {
+        self.flush_tail()?;
+        self.w.finish()?;
+        Ok(match (self.start, self.pos) {
+            (Some(a), Some(b)) => (a, b),
+            _ => (0, 0),
+        })
+    }
 }
 
 /// Removes a half-written span folder unless defused with `mem::forget`.
@@ -687,7 +807,7 @@ mod tests {
         s.mutes.push(Mute { id: "k".into(), start: 20.0, end: 22.0, fade_in: 0.1, fade_out: 0.1, origin: Origin::Manual, confirmed: true, gain_db: None });
         p.songs.push(s);
         let n = add_suggestions(&mut p, &[(6.0, 8.0), (21.0, 23.0), (30.0, 31.0), (80.0, 81.0)]);
-        assert_eq!(n, 2);
+        assert_eq!(n.get("a"), Some(&2));
         assert_eq!(p.songs[0].mutes.len(), 3);
     }
 }

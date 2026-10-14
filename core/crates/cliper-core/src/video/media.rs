@@ -178,6 +178,18 @@ pub fn probe_input(input: &str) -> Result<Probe, FfmpegError> {
     Ok(Probe { format_start, audio_start })
 }
 
+/// Height of a file's first video stream.
+pub fn video_height(file: &Path) -> Option<u32> {
+    let mut c = std::process::Command::new(crate::local::ffprobe_path());
+    c.args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0"]).arg(file);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    String::from_utf8_lossy(&c.output().ok()?.stdout).trim().trim_end_matches(',').parse().ok()
+}
+
 /// Probe raw segment `index` of `variant` (init + that segment).
 pub fn probe_segment(project_dir: &Path, container: Container, variant: usize, index: usize) -> Result<Probe, FfmpegError> {
     probe_input(&raw_url(project_dir, container, variant, index, index + 1))

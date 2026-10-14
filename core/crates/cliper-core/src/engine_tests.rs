@@ -677,3 +677,77 @@ async fn projects_from_other_locations_stay_listed() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_atomic_writes_of_one_file_all_succeed() {
+    // QA-1: four segment downloads of a new rendition wrote init.mp4 through
+    // one shared temp name; all but the first rename failed with "not found"
+    let root = temp_root("atomic");
+    let target = root.join("init.mp4");
+    for round in 0..20 {
+        let tasks: Vec<_> = (0..8u8)
+            .map(|k| {
+                let t = target.clone();
+                tokio::spawn(async move { video_impl::write_atomic_async(&t, &vec![k; 4096 + round]).await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 4096 + round as u64);
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".part")).collect();
+    assert!(leftovers.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn models_stay_loaded_for_a_minute_after_the_last_job() {
+    // QA-14: idle since an old check, but a short job just ended → keep
+    let t0 = Instant::now();
+    let idle_since = t0;
+    let job_end = t0 + Duration::from_secs(50);
+    assert!(!idle_long_enough(idle_since, job_end, t0 + Duration::from_secs(70)));
+    assert!(idle_long_enough(idle_since, job_end, t0 + Duration::from_secs(110)));
+    assert!(idle_long_enough(idle_since, t0, t0 + MODEL_IDLE));
+}
+
+#[tokio::test]
+async fn switching_projects_folder_keeps_projects_opened_from_elsewhere() {
+    // QA-6: folder A remembered a project opened from elsewhere; after the
+    // switch to B, adding A brings that one along
+    let (a, _rx, root_a) = engine("switch-a");
+    let single = temp_root("switch-single");
+    let s = Store::new(&single);
+    let mut x = s.create("away1", "x").unwrap();
+    s.save(&mut x).unwrap();
+    a.open_project_at(&single.join("away1")).await.unwrap();
+    let mut here = a.store.create("in_a", "y").unwrap();
+    a.store.save(&mut here).unwrap();
+    drop(a);
+    let (b, _rx2, root_b) = engine("switch-b");
+    let r = b.add_root(&root_a).unwrap();
+    let mut ids: Vec<String> = r["projects"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["away1", "in_a"]);
+    for d in [root_a, root_b, single] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn export_records_follow_a_moved_project() {
+    // QA-17
+    let root = temp_root("relink");
+    let st = Store::new(&root);
+    let mut p = st.create("m1", "x").unwrap();
+    let mut s = song(1.0, 2.0);
+    s.export = Some(project::ExportInfo { path: "C:/somewhere/old/m1/exports/a_01.mp4".into(), exported_at: String::new(), duration: 1.0 });
+    p.songs.push(s);
+    st.save(&mut p).unwrap();
+    std::fs::create_dir_all(root.join("m1/exports")).unwrap();
+    std::fs::write(root.join("m1/exports/a_01.mp4"), b"x").unwrap();
+    let q = st.load("m1").unwrap();
+    assert_eq!(Path::new(&q.songs[0].export.as_ref().unwrap().path), root.join("m1").join("exports").join("a_01.mp4"));
+    let _ = std::fs::remove_dir_all(root);
+}

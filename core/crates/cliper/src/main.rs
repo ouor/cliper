@@ -404,6 +404,7 @@ async fn run() -> Result<()> {
                 audio_override: None,
                 override_offset: 0.0,
                 video_offset: 0.0,
+                keep_frame_times: false,
                 in_t,
                 out_t,
                 mutes,
