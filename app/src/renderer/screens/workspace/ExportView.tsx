@@ -287,12 +287,12 @@ export function ExportView({ p }: { p: Project }) {
                       <span className="tag doubt" data-tip="다시보기가 사라져서 모자란 영상을 받을 수 없어요" data-tip-pos="left">
                         {sv.label}
                       </span>
-                      <button className="btn xs subtle" onClick={(e) => (e.preventDefault(), void fitToVideo(p, s, vs))} data-tip="곡 경계를 받은 영상 범위 끝으로 옮겨요 (되돌리기 가능)" data-tip-pos="left">
+                      {sv.fraction > 0.01 && <button className="btn xs subtle" onClick={(e) => (e.preventDefault(), void fitToVideo(p, s, vs))} data-tip="곡 경계를 받은 영상 범위 끝으로 옮겨요 (되돌리기 가능)" data-tip-pos="left">
                         받은 범위에 맞추기
-                      </button>
+                      </button>}
                     </>
                   ) : sv.state === "none" ? (
-                    <span className="faint">영상 받기 전 · 받고 내보내요</span>
+                    <span className="faint" data-tip="고르면 영상을 받은 뒤 내보내요" data-tip-pos="left">영상 받기 전</span>
                   ) : sv.missingSec > 0.05 ? (
                     <span className={sv.pending ? "faint" : "tag doubt"}>{sv.label}</span>
                   ) : off ? (

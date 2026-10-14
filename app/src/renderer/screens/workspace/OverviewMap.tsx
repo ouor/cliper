@@ -301,7 +301,7 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
         }
       }
       // exported: ⬆ on the bar (14.10)
-      if (s.export && bw > 14) {
+      if (s.export && bw > 44) {
         ctx.fillStyle = st === "reviewed" ? "rgba(0,0,0,0.78)" : col["text-1"];
         ctx.font = `700 10px ${col.font}`;
         ctx.fillText("⬆", x0 + bw - 12, y + bh / 2 + 0.5);

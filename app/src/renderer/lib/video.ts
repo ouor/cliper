@@ -116,7 +116,7 @@ export function songVideo(p: Project, vs: VideoState | undefined, s: Song): Song
   if (missingSec < 0.05) return { state: "ready", missing: [], missingSec: 0, fraction: 1, pending: false, touched: true, label: "영상 ✓" };
   if (pending) {
     const partial = fraction > 0.01 || missing.length > 1 || (missing.length === 1 && (missing[0][0] > s.start + 0.05 || missing[0][1] < s.end - 0.05));
-    return { state: "fetching", missing, missingSec, fraction, pending, touched, label: partial && fraction > 0.5 ? `${where()} 받는 중` : `영상 받는 중 ${Math.floor(fraction * 100)}%` };
+    return { state: "fetching", missing, missingSec, fraction, pending, touched, label: partial && fraction > 0.5 ? `${where().startsWith("앞") || where().startsWith("뒤") ? where() : `영상 ${where()}`} 받는 중` : `영상 받는 중 ${Math.floor(fraction * 100)}%` };
   }
   if (vodGone(p)) return { state: "gone", missing, missingSec, fraction, pending, touched, label: fraction > 0 ? `${where()} 영상 없음 · 다시보기 없음` : "다시보기 없음" };
   if (failed) return { state: "failed", missing, missingSec, fraction, pending, touched, label: "영상 일부를 받지 못했어요" };
