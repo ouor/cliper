@@ -266,7 +266,7 @@ async fn cleanup_levels_keep_decisions_and_respect_pin() {
     // decisions stay
     assert_eq!(p.songs.len(), 2);
     assert_eq!(p.songs[0].mutes.len(), 1);
-    assert!(eng.list()[0].pinned == p.pinned && !eng.list()[0].has_audio);
+    assert!(eng.list()[0].pinned == Some(p.pinned) && !eng.list()[0].has_audio);
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -272,7 +272,14 @@ pub struct ProjectSummary {
     pub unconfirmed_mutes: usize,
     /// enabled songs whose whole range has video and is separated
     pub clips_ready: usize,
-    pub pinned: bool,
+    /// kept out of cleanup (always sent by the engine; optional so clients
+    /// that build summaries themselves may leave it out)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub pinned: Option<bool>,
+    /// last replay check (absent = never checked)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub vod: Option<project::VodStatus>,
     pub has_audio: bool,
     pub has_detection: bool,
@@ -1142,7 +1149,7 @@ fn summarize(projects: Vec<Project>) -> Vec<ProjectSummary> {
                     let sep: Vec<Range> = p.stems.iter().map(|x| (x.start, x.end)).collect();
                     p.songs.iter().filter(|s| s.enabled && ranges::covers(&sep, (s.start, s.end), 0.05)).count()
                 },
-                pinned: p.pinned,
+                pinned: Some(p.pinned),
                 vod: p.vod.clone(),
                 has_audio: p.audio.as_ref().is_some_and(|a| !a.dropped),
                 has_detection: p.detection.is_some(),

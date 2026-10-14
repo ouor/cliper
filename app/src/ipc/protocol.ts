@@ -7,6 +7,16 @@
 import type { ApiError } from "./generated/ApiError";
 import type { AudioState } from "./generated/AudioState";
 import type { CookieStatus } from "./generated/CookieStatus";
+import type { DropLevel } from "./generated/DropLevel";
+import type { EnsureResult } from "./generated/EnsureResult";
+import type { FetchArgs } from "./generated/FetchArgs";
+import type { FetchPlan } from "./generated/FetchPlan";
+import type { NetStats } from "./generated/NetStats";
+import type { Priority } from "./generated/Priority";
+import type { StorageUsage } from "./generated/StorageUsage";
+import type { VideoState } from "./generated/VideoState";
+import type { VideoView } from "./generated/VideoView";
+import type { VodStatus } from "./generated/VodStatus";
 import type { Mute } from "./generated/Mute";
 import type { Event } from "./generated/Event";
 import type { ExportOptions } from "./generated/ExportOptions";
@@ -24,6 +34,9 @@ import type { Song } from "./generated/Song";
 import type { StemsResult } from "./generated/StemsResult";
 import type { SystemInfo } from "./generated/SystemInfo";
 
+// The engine speaks protocol 3 (segment-based video, docs/ipc.md "What changed
+// in protocol 3"). Bump this to 3 once the UI uses video.* / stems.ensure instead
+// of Project.clips; until then the app shows its version-mismatch notice.
 export const PROTOCOL_VERSION = 2;
 
 /** Returned by every long-running method; follow it via job.* notifications. */
@@ -84,12 +97,47 @@ export interface Methods {
     params: { id: string; text: string; tolerance?: number | null; apply?: boolean; overwrite?: boolean };
     result: SetlistMatch;
   };
+  /** Protocol 2 leftover: no-op, returns the project. */
   "clips.plan": { params: { id: string }; result: Project };
-  /** Change a clip's VOD range; drops its video/stems so clips.fetch re-downloads it. */
+  /** Removed in protocol 3 (INVALID_PARAMS): video is kept per VOD range. */
   "clip.extend": { params: { id: string; clip_id: string; start: number; end: number }; result: Project };
-  /** Delete downloaded video + stems (songs, mutes and edits stay). */
+  /** Removed in protocol 3 (INVALID_PARAMS): use media.drop. */
   "clip.drop_media": { params: { id: string; clip_id: string }; result: { project: Project; freed_bytes: number } };
+  /** Protocol 2 name of media.drop {level: "video"}. */
   "project.drop_media": { params: { id: string }; result: { project: Project; freed_bytes: number } };
+
+  // ── video by VOD range (protocol 3) ──
+  /** Coverage (have / fetching / queued / failed ranges) + requests of a project; without
+   *  id: every loaded project + the app-wide pause. Also pushed as video.changed. */
+  "video.status": { params: { id: string }; result: VideoState };
+  /** Queue the video of VOD ranges and/or songs (± margins); only missing segments are
+   *  fetched. request_id null = nothing was missing. Errors: VOD_GONE, NO_SPACE, PRECONDITION. */
+  "video.fetch": { params: { id: string } & Partial<FetchArgs>; result: FetchPlan };
+  /** Same as video.fetch without queuing: missing seconds and estimated bytes (tooltips). */
+  "video.estimate": { params: { id: string } & Partial<FetchArgs>; result: FetchPlan };
+  /** Cancel one request (or all of the project's); fetched video stays. */
+  "video.cancel": { params: { id: string; request_id?: string | null }; result: { cancelled: number } };
+  /** Move a request: "now" = fetch it first. */
+  "video.prioritize": { params: { id: string; request_id: string; priority: Priority }; result: true };
+  /** Retry failed segments (in ranges, or all). */
+  "video.retry": { params: { id: string; ranges?: [number, number][] | null }; result: FetchPlan | null };
+  /** Pause / resume all video downloads of the app (persisted). */
+  "video.pause": { params: { paused: boolean }; result: true };
+  /** A playable MP4 with the picture at VOD time t (built on demand, a few s for long
+   *  ranges): video.currentTime = vod − origin, valid in [start, end]. VIDEO_MISSING if none. */
+  "video.view": { params: { id: string; t: number; end?: number | null }; result: VideoView };
+  /** Separate (and suggest mutes for) the parts of songs ± margins / ranges that have video
+   *  and aren't separated yet; default every enabled song. */
+  "stems.ensure": { params: { id: string; song_ids?: string[] | null; ranges?: [number, number][] | null }; result: JobHandle };
+  /** Bytes by kind for one project, or { projects, free, root } for all. */
+  "storage.usage": { params: { id: string }; result: StorageUsage };
+  /** Cleanup: unused < stems < video < audio. Decisions always stay. PINNED unless force. */
+  "media.drop": { params: { id: string; level: DropLevel; force?: boolean }; result: { project: Project; freed_bytes: number } };
+  "project.set_pinned": { params: { id: string; pinned: boolean }; result: Project };
+  /** Is the replay still online? (call in the background when a project opens) */
+  "vod.check": { params: { id: string }; result: VodStatus };
+  /** Network counters (the app-wide cap of 4 in-flight requests). */
+  "system.net_stats": { params: { reset?: boolean }; result: NetStats };
   /** Sample-exact float32 WAV of the analysis audio, [start, start+duration) VOD seconds. */
   "audio.window": {
     params: { id: string; start: number; duration: number; sample_rate?: number; channels?: 1 | 2 };
@@ -105,9 +153,8 @@ export interface Methods {
   "audio.fetch": { params: { id: string }; result: JobHandle };
   /** PANNs tagging (+ overview.peaks) then detection. */
   "detect.run": { params: { id: string; params?: Params | null; retag?: boolean }; result: JobHandle };
-  /** Per clip: video → align → stems → talk → mute suggestions. Select by clip_ids or
-   *  song_ids (their clips); neither = every clip missing video or stems.
-   *  `exact` + song_ids: clips covering only those songs (± margins), no neighbours. */
+  /** Protocol 2 pipeline on the segment store: fetch songs ± margins (default every enabled
+   *  song), wait, then stems.ensure. clip_ids / exact are ignored. */
   "clips.fetch": {
     params: { id: string; clip_ids?: string[] | null; song_ids?: string[] | null; exact?: boolean };
     result: JobHandle;
@@ -137,10 +184,13 @@ export type ResultOf<M extends Method> = Methods[M]["result"];
 export interface JobResults {
   "audio.fetch": { audio: AudioState };
   "detect.run": { segments: [number, number][]; songs: number; clips: number; candidates: number };
-  "clips.fetch": { clips: string[] };
+  "clips.fetch": { clips: string[]; video_failed: [number, number][]; stems: EnsureResult };
+  "stems.ensure": EnsureResult;
   "export.run": {
     exports: { song_id: string; result: ExportResult }[];
     stems: { song_id: string; stems: StemsResult }[];
+    /** songs that couldn't be exported (e.g. VIDEO_MISSING) while others were */
+    failed: { song_id: string; error: ApiError }[];
   };
 }
 
@@ -160,6 +210,10 @@ export interface Notifications {
   "project.changed": Variant<"project_changed">;
   /** Full queue after every change. */
   "queue.changed": Variant<"queue_changed">;
+  /** A project's video coverage / requests changed (throttled, at most 4/s). */
+  "video.changed": Variant<"video_changed">;
+  /** A video.fetch request ended: status "done" | "failed" | "cancelled". */
+  "video.request_done": Variant<"video_request_done">;
 }
 
 export type NotificationMethod = keyof Notifications;
@@ -168,5 +222,6 @@ export type NotificationMethod = keyof Notifications;
 export interface RpcError {
   code: number;
   message: string;
-  data?: { code: ApiError["code"] };
+  /** `code` = the engine code; details next to it (e.g. `ranges` for VIDEO_MISSING) */
+  data?: { code: ApiError["code"]; [detail: string]: unknown };
 }

@@ -5,4 +5,9 @@ export type AudioState = {
 /**
  * file name inside the project dir (ADTS)
  */
-file: string, variant: number, duration: number, index: SegIndex, fetched_bytes: number, full_source_bytes: number, fallback_segments: number, elapsed_sec: number, };
+file: string, variant: number, duration: number, index: SegIndex, fetched_bytes: number, full_source_bytes: number, fallback_segments: number, elapsed_sec: number, 
+/**
+ * the audio file was deleted by cleanup (level `audio`); fetch it again to
+ * listen / align. The index is kept (it places the video segments).
+ */
+dropped: boolean, };

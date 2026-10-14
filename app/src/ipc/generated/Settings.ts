@@ -11,7 +11,8 @@ margin_before: number,
  */
 margin_after: number, 
 /**
- * video rendition height (None = highest/original)
+ * video rendition height: the best one at or below it (None = highest).
+ * Default 1080: chzzk's original, and SOOP's 1440p doubles the size.
  */
 video_height: number | null, 
 /**

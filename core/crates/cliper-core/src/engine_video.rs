@@ -383,7 +383,8 @@ impl Engine {
             }
             ps.idx_dirty = true;
             ps.dirty = true;
-            Ok(tl.ranges_of(orphan))
+            // whole segments: keep the edge margin from pulling in neighbours
+            Ok(tl.ranges_of(orphan).into_iter().map(|(a, b)| (a + 2.0 * EDGE_EPS, b - 2.0 * EDGE_EPS)).filter(|(a, b)| b > a).collect())
         })??;
         self.save_index(pid);
         self.video.wake.notify_one();

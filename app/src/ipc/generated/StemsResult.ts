@@ -6,6 +6,6 @@ export type StemsResult = { dir: string,
  */
 files: Array<string>, markers_csv: string, reaper_project: string, reference_video: string | null, 
 /**
- * clip seconds where the files start
+ * VOD time where the files start
  */
 start: number, duration: number, };

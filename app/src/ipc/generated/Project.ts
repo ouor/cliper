@@ -6,6 +6,8 @@ import type { JobError } from "./JobError";
 import type { Settings } from "./Settings";
 import type { Song } from "./Song";
 import type { SourceInfo } from "./SourceInfo";
+import type { StemSpan } from "./StemSpan";
+import type { VodStatus } from "./VodStatus";
 
 export type Project = { schema: string, id: string, 
 /**
@@ -16,7 +18,33 @@ input: string, created_at: string, updated_at: string,
  * bumped on every save; pass it back as `base_revision` to detect
  * concurrent changes (optimistic concurrency)
  */
-revision: number, source: SourceInfo | null, audio: AudioState | null, detection: Detection | null, settings: Settings, songs: Array<Song>, clips: Array<Clip>, 
+revision: number, source: SourceInfo | null, audio: AudioState | null, detection: Detection | null, settings: Settings, songs: Array<Song>, 
+/**
+ * deprecated (schema @1): always empty since the segment store; kept so
+ * older clients still parse the project. Video: `video.*` methods.
+ */
+clips: Array<Clip>, 
+/**
+ * separated audio, each a contiguous VOD range (sorted, non-overlapping)
+ */
+stems: Array<StemSpan>, 
+/**
+ * talk found in the vocal stem (VOD time), the source of mute suggestions
+ */
+talk: Array<[number, number]>, 
+/**
+ * VOD ranges already searched for talk: suggestions are only ever added
+ * for newly separated ranges, so a deleted suggestion never comes back
+ */
+talk_scanned: Array<[number, number]>, 
+/**
+ * 📌 keep: cleanup refuses this project unless forced
+ */
+pinned: boolean, 
+/**
+ * is the VOD (replay) still online? (`vod.check`)
+ */
+vod: VodStatus | null, 
 /**
  * last failed job of this project (cleared when a job of that kind succeeds)
  */

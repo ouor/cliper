@@ -55,6 +55,12 @@ handles: number | null,
  */
 reference_video: boolean, 
 /**
- * song id → audio file (aligned to the clip start) replacing the rendered audio
+ * song id → audio file replacing the rendered audio, aligned to the start
+ * of that song's editor hand-off files (song start − `handles`, default 3 s)
  */
-audio_overrides: { [key in string]: string }, };
+audio_overrides: { [key in string]: string }, 
+/**
+ * songs whose range lacks video: fetch it and export when it arrives
+ * (other songs export meanwhile). false = fail with VIDEO_MISSING.
+ */
+fetch: boolean, };
