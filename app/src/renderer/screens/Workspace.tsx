@@ -6,7 +6,7 @@ import { ask, go, openSettings, setMode, toast, useApp, type WorkspaceMode } fro
 import { loadProject, projectUi, putProject, redo, setProjectUi, undo, updateProjectSettings, useProjects } from "@/state/projects";
 import { call } from "@/lib/rpc";
 import { trackLabel } from "./Home";
-import { runningJobs, useJobs, cancelJob, retryJob, type Job } from "@/state/jobs";
+import { runningJobs, startJob, useJobs, cancelJob, retryJob, type Job } from "@/state/jobs";
 import { resetWs, requestFocus, useWs } from "@/state/ws";
 import { useShallow } from "zustand/react/shallow";
 import { player, usePlayer, type ListenMode } from "@/audio/player";
@@ -141,6 +141,22 @@ function NextBanner({ p }: { p: Project }) {
         <div className="nb-progress">
           <Progress value={detectJob.fraction} />
         </div>
+      </div>
+    );
+  }
+  if (p.audio?.dropped && !audioJob) {
+    const gone = p.vod?.status === "gone";
+    return (
+      <div className="next-banner warn">
+        <AlertTriangle size={15} />
+        <span className="grow">
+          {gone ? "소리를 정리한 작업이에요. 다시보기가 없어 다시 받을 수 없어요. 곡 목록과 경계, 멘트 구간은 그대로예요." : "소리를 정리한 작업이에요. 듣고 고치려면 방송 소리를 다시 받아요 (4시간 방송 약 1분). 곡 목록과 경계, 멘트 구간은 그대로예요."}
+        </span>
+        {!gone && (
+          <button className="btn sm primary" onClick={() => void startJob("audio.fetch", { id: p.id }, { label: "소리 다시 받기" }).catch((e) => toast(friendly(e).title, { kind: "error" }))}>
+            소리 다시 받기
+          </button>
+        )}
       </div>
     );
   }
@@ -327,7 +343,7 @@ export function Workspace({ projectId }: { projectId: string }) {
   }, [ws.selected, projectId]);
 
   // audio source by mode
-  const hasAudio = !!p?.audio;
+  const hasAudio = !!p?.audio && !p.audio.dropped;
   const total = p?.audio?.duration || p?.source?.duration || 0;
   useEffect(() => {
     if (!hasAudio) return;

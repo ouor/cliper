@@ -57,7 +57,7 @@ export function wireVideo() {
     if (p.code === "VOD_GONE") return; // the replay banner says it (project.vod)
     const sec = p.failed.reduce((n, [a, b]) => n + (b - a), 0);
     const pid = p.project_id;
-    toast(`영상 ${sec > 0 ? fmtDurationKo(sec) + " " : "일부"}를 받지 못했어요${p.code === "NETWORK" ? " · 연결이 끊겼어요" : ""}. 받은 부분은 그대로예요.`, {
+    toast(`영상 ${sec > 0 ? fmtDurationKo(sec) : "일부"}를 받지 못했어요${p.code === "NETWORK" ? " · 연결이 끊겼어요" : ""}. 받은 부분은 그대로예요.`, {
       kind: "warn",
       ttl: 8000,
       action: getProject(pid)?.vod?.status === "gone" ? undefined : { label: "다시 시도", run: () => void call("video.retry", { id: pid, ranges: p.failed.length ? p.failed : null }).catch(() => {}) },

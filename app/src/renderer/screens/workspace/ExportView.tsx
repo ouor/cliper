@@ -135,12 +135,23 @@ export function ExportView({ p }: { p: Project }) {
   const quality = fromSettings(p.settings);
   // 화질 applies to rendered mp4 (not to stream copy, audio-only or editor stems without a render)
   const showQuality = hasVideoTrack && (preset === "accurate" || preset === "archive" || (preset === "editor" && alsoRender));
-  // smallest fetched video among the selection (engine never upscales)
-  const sourceHeight = useMemo(() => {
-    const hs = selected.flatMap((s) => (vs?.ranges ?? []).filter((r) => r.state === "have" && r.end > s.start && r.start < s.end).map((r) => r.height ?? 0)).filter((h) => h > 0);
-    return hs.length ? Math.min(...hs) : null;
+  // each song's fetched size (the larger stream where it crosses two; the engine never upscales)
+  const songHeights = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const s of selected) {
+      const hs = (vs?.ranges ?? []).filter((r) => r.state === "have" && r.end > s.start && r.start < s.end).map((r) => r.height ?? 0).filter((h) => h > 0);
+      if (hs.length) out.set(s.id, Math.max(...hs));
+    }
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p, vs, selected.map((s) => s.id).join()]);
+  const small = quality.height ? selected.filter((s) => (songHeights.get(s.id) ?? Infinity) < quality.height!) : [];
+  // every selected song is smaller: the picker says it; only some: a note naming them
+  const sourceHeight = small.length && small.length === selected.length ? Math.max(...small.map((s) => songHeights.get(s.id)!)) : null;
+  const smallNote =
+    small.length && small.length < selected.length
+      ? `받은 영상이 작은 곡은 그 크기 그대로 만들어요 (키우지 않아요): ${small.map((s) => `곡 ${String(nums.get(s.id) ?? "").padStart(2, "0")} · ${songHeights.get(s.id)}p`).join(", ")}`
+      : null;
   // selected songs whose own range lacks video: [받고 내보내기] fetches it first (14.11)
   const lacking = selected.filter((s) => svOf(s).missingSec > 0.05 && hasVideoTrack);
   const lackingKey = lacking.map((s) => `${s.id}:${s.start}:${s.end}`).join(",");
@@ -315,7 +326,12 @@ export function ExportView({ p }: { p: Project }) {
               </label>
             );
           })}
-          {songs.some((s) => svOf(s).missingSec > 0.05) && <div className="hint ex-hint">영상이 모자란 곡도 고를 수 있어요. 모자란 부분을 받은 뒤 이어서 내보내고, 그사이 다른 곡을 먼저 내보내요.</div>}
+          {songs.some((s) => svOf(s).missingSec > 0.05) &&
+            (p.vod?.status === "gone" ? (
+              <div className="hint ex-hint">다시보기를 더 이상 열 수 없어서 영상이 모자란 곡은 내보낼 수 없어요. 받은 영상이 일부 있으면 [받은 범위에 맞추기]로 곡 경계를 옮길 수 있어요.</div>
+            ) : (
+              <div className="hint ex-hint">영상이 모자란 곡도 고를 수 있어요. 모자란 부분을 받은 뒤 이어서 내보내고, 그사이 다른 곡을 먼저 내보내요.</div>
+            ))}
         </div>
       </div>
 
@@ -367,6 +383,7 @@ export function ExportView({ p }: { p: Project }) {
             <div className="row ex-quality">
               <span className="label ex-lab">화질</span>
               <QualityPicker value={quality} onChange={setQuality} quality={p.settings.video_quality} sourceHeight={sourceHeight} />
+              {smallNote && <div className="hint">{smallNote}</div>}
             </div>
           )}
           <details>
@@ -430,7 +447,7 @@ export function ExportView({ p }: { p: Project }) {
             <div key={s.id} className="check-line warn">
               <AlertTriangle size={14} />
               <span className="grow">
-                {String(nums.get(s.id) ?? "").padStart(2, "0")} {songTitle(s)}: {svOf(s).state === "none" ? "영상을 아직 받지 않았어요." : `영상 ${missingWhere(s, svOf(s))}이 아직 없어요.`} 받은 뒤 이어서 내보내요.
+                {String(nums.get(s.id) ?? "").padStart(2, "0")} {songTitle(s)}: {svOf(s).state === "none" ? "영상을 아직 받지 않았어요." : `아직 없는 영상: ${missingWhere(s, svOf(s))}.`} 받은 뒤 이어서 내보내요.
               </span>
             </div>
           ))}
@@ -498,7 +515,7 @@ export function ExportView({ p }: { p: Project }) {
             </div>
             {lacking.length > 0 && (
               <div className="faint">
-                먼저 영상 {lackEst?.key === lackingKey ? `${fmtDurationKo(lackEst.sec)} · 약 ${fmtBytes(lackEst.bytes)}` : `${fmtDurationKo(lacking.reduce((n, x) => n + len(svOf(x).missing), 0))} 분량`}을 받아요 ({lacking.length}곡)
+                먼저 받을 영상: {lackEst?.key === lackingKey ? `${fmtDurationKo(lackEst.sec)} · 약 ${fmtBytes(lackEst.bytes)}` : `${fmtDurationKo(lacking.reduce((n, x) => n + len(svOf(x).missing), 0))} 분량`} ({lacking.length}곡)
               </div>
             )}
             {running && (

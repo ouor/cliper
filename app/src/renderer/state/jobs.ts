@@ -310,14 +310,14 @@ export function wireJobs() {
     void notifyDone(done, true);
     // new mute suggestions from newly separated parts (14.8): a short toast
     if (p.kind === "stems.ensure" || p.kind === "clips.fetch") {
-      const r = (p.kind === "stems.ensure" ? p.result : (p.result as { stems?: unknown } | null)?.stems) as { suggestions?: number } | null | undefined;
-      const n = r?.suggestions ?? 0;
-      if (n > 0) {
+      const r = (p.kind === "stems.ensure" ? p.result : (p.result as { stems?: unknown } | null)?.stems) as { suggestions?: number; suggestions_by_song?: Record<string, number> } | null | undefined;
+      const by = Object.entries(r?.suggestions_by_song ?? {}).filter(([, n]) => n > 0);
+      if (by.length) {
         const proj = getProject(p.project_id);
-        const ids = ((done?.request?.params as { song_ids?: string[] | null } | undefined)?.song_ids ?? []).filter(Boolean);
         const nums = proj ? songNumbers(proj) : new Map<string, number>();
-        const which = ids.length === 1 && nums.get(ids[0]) ? `곡 ${String(nums.get(ids[0])).padStart(2, "0")}: ` : "";
-        toast(`${which}새로 나눈 부분에서 멘트 제안 ${n}개가 생겼어요.`, { kind: "info", ttl: 4000 });
+        const label = (id: string) => (nums.get(id) ? `곡 ${String(nums.get(id)).padStart(2, "0")}` : "곡");
+        const text = by.length === 1 ? `${label(by[0][0])}: 새로 나눈 부분에서 멘트 제안 ${by[0][1]}개가 생겼어요.` : `새로 나눈 부분에서 멘트 제안이 생겼어요 · ${by.map(([id, n]) => `${label(id)} ${n}개`).join(", ")}`;
+        toast(text, { kind: "info", ttl: 5000 });
       }
     }
     const t = thens.get(p.job_id);

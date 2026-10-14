@@ -14,6 +14,7 @@ import { player, usePlayer } from "@/audio/player";
 import { setEdge } from "@/lib/edits";
 import { fmtTime } from "@/lib/format";
 import { DetectPopover } from "./DetectPopover";
+import { fetchSongsVideo } from "./VideoControls";
 import { runningJobs, useJobs } from "@/state/jobs";
 import { useShallow } from "zustand/react/shallow";
 
@@ -746,7 +747,8 @@ function MapNotices({ p }: { p: Project }) {
             className="btn xs primary"
             onClick={() => {
               useWs.setState({ topupAsk: null });
-              void fetchVideo(p.id, { song_ids: [topupAsk.songId], priority: "user", reason: "topup", process: (p.stems ?? []).length > 0 });
+              const s = p.songs.find((x) => x.id === topupAsk.songId);
+              void fetchVideo(p.id, { ranges: topupAsk.ranges, priority: "user", reason: "topup", process: !!s && (p.stems ?? []).some((sp) => sp.end > s.start && sp.start < s.end) });
             }}
           >
             받기
@@ -764,7 +766,7 @@ function MapNotices({ p }: { p: Project }) {
             className="btn xs subtle"
             onClick={() => {
               useWs.setState({ marginAsk: null });
-              void fetchVideo(p.id, { song_ids: marginAsk.songIds, priority: "user", reason: "margin", process: (p.stems ?? []).length > 0 });
+              void fetchSongsVideo(p, marginAsk.songIds, { priority: "user", reason: "margin" });
             }}
           >
             받은 곡에도 적용 · {marginAsk.songIds.length}곡 · 약 {fmtDurationKo(marginAsk.sec)} 분량

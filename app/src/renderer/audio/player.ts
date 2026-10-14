@@ -47,6 +47,9 @@ const STEMS_MAX_SEC = 300;
 /** a new page starts this far before the playhead; paging starts this close to the page end */
 const STEMS_LEAD = 30;
 const STEMS_EDGE = 15;
+/** VideoPane starts the preloaded next file this long before a file boundary (s): a paused
+ *  <video> needs a moment after play(). 35 ms measured to land the switch within ±10 ms (QA-9) */
+export const VIDEO_START_LEAD = 0.035;
 
 interface VideoBinding {
   el: HTMLVideoElement;
@@ -543,8 +546,10 @@ class Player {
     }
     if (playing && rate > 0) {
       if (v.el.playbackRate !== rate) v.el.playbackRate = rate;
+      // (a file switch starts the next element early — VideoPane, QA-9 — because seeking or changing
+      // playbackRate to catch up stalls the picture in Chromium for about as long as it saves)
       if (v.el.paused) void v.el.play().catch(() => {});
-      if (Math.abs(v.el.currentTime - t) > 0.15) v.el.currentTime = t;
+      if (Math.abs(v.el.currentTime - t) > 0.15 && !v.el.seeking) v.el.currentTime = t;
     } else {
       if (!v.el.paused) v.el.pause();
       if (Math.abs(v.el.currentTime - t) > 0.03 && !v.el.seeking) v.el.currentTime = t;

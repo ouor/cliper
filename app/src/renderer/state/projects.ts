@@ -24,6 +24,9 @@ export interface ProjectUi {
   listened: string[];
   lastSongId?: string;
   firstExportHintShown?: boolean;
+  /** songs whose video the user asked for (곡 받기, 영상 맞추기, 내보내기 …): they "have video"
+   *  even before it arrives, so boundary edits top them up (14.4, QA-4) */
+  videoSongs?: string[];
 }
 
 /** One undoable step: the touched songs before and after (null = absent). */
@@ -139,10 +142,27 @@ function display(pid: string) {
 
 function setEngine(p: Project) {
   const cur = engineState[p.id];
-  // notifications and responses can arrive out of order; never go back in time
-  if (cur && cur.revision > p.revision) return;
+  // notifications and responses can arrive out of order; never go back in time — unless it is
+  // another project with the same id (opened from another folder, QA-5): then start over
+  if (cur && cur.created_at !== p.created_at) {
+    resetProjectState(p.id);
+  } else if (cur && cur.revision > p.revision) return;
   engineState[p.id] = p;
   display(p.id);
+}
+
+/** Forget everything cached about a project id (state, pending edits, undo): its folder changed. */
+export function resetProjectState(id: string) {
+  delete engineState[id];
+  pendingOps[id] = [];
+  aliases[id]?.clear();
+  useProjects.setState((s) => ({ history: { ...s.history, [id]: { undo: [], redo: [] } } }));
+}
+
+/** Take this project as the engine's current state, whatever was cached for its id before. */
+export function replaceProject(p: Project) {
+  resetProjectState(p.id);
+  setEngine(p);
 }
 
 export async function refreshList() {
@@ -428,7 +448,7 @@ const EMPTY_UI: ProjectUi = { listened: [] };
 async function loadUi(id: string) {
   if (useProjects.getState().ui[id]) return;
   const v = (await window.cliper.getState<ProjectUi>(`project:${id}`)) ?? EMPTY_UI;
-  useProjects.setState((s) => ({ ui: { ...s.ui, [id]: { ...EMPTY_UI, listened: v.listened ?? [], lastSongId: v.lastSongId, firstExportHintShown: v.firstExportHintShown } } }));
+  useProjects.setState((s) => ({ ui: { ...s.ui, [id]: { ...EMPTY_UI, listened: v.listened ?? [], lastSongId: v.lastSongId, firstExportHintShown: v.firstExportHintShown, videoSongs: v.videoSongs ?? [] } } }));
 }
 
 export function projectUi(id: string): ProjectUi {

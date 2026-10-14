@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Ban, Download, Loader2, Pause, RefreshCw, VideoOff, Zap } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { VideoView } from "@ipc/generated/VideoView";
-import { player } from "@/audio/player";
+import { player, usePlayer, VIDEO_START_LEAD } from "@/audio/player";
 import { call } from "@/lib/rpc";
 import { mediaUrl } from "@/lib/peaks";
 import { covAt, prioritizeAt, requestsAt, vodGone, fetchHere, type Cov } from "@/lib/video";
@@ -95,6 +95,17 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
       const v = st.view;
       if (inside(v, pos)) {
         show({ kind: "video" });
+        // just before the boundary: start the preloaded next file so it is already running when
+        // we switch (a paused <video> needs ~0.1 s after play(), QA-9)
+        const n = st.next;
+        const ps = usePlayer.getState();
+        if (n && ps.playing && ps.rate > 0 && n.start > pos && n.start - pos <= VIDEO_START_LEAD * ps.rate) {
+          const el = els.current.get(n.file);
+          if (el && el.paused && el.readyState >= 2) {
+            el.playbackRate = ps.rate;
+            void el.play().catch(() => {});
+          }
+        }
         // near the end of this file while video continues after it: load the next file now
         if (v && v.end - pos < 6 && covAt(st.vs, v.end + 0.2, st.gone).state === "have" && !(st.next && st.next.start <= v.end + 0.3 && st.next.end > v.end + 0.3)) askNext(v.end + 0.2);
         return;

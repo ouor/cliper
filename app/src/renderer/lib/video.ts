@@ -12,6 +12,7 @@ import type { StorageAll } from "@ipc/protocol";
 import { call, EngineError } from "./rpc";
 import { fmtBytes, fmtDurationKo } from "./format";
 import { openSettings, toast } from "@/state/app";
+import { projectUi, setProjectUi } from "@/state/projects";
 
 export type Range = [number, number];
 /** a point / stretch of the VOD: the engine states plus none (no video) and gone (can't fetch) */
@@ -77,6 +78,28 @@ export function hasVideoNear(vs: VideoState | undefined, a: number, b: number): 
   return (vs?.ranges ?? []).some((r) => r.end > a && r.start < b && r.state !== "failed");
 }
 
+/**
+ * Does this song "have video" (QA-4, 14.4)? Only its own range counts — never a neighbour's
+ * margin, a [여기 영상 받기] or a range fetch that merely touches it: at least half of
+ * [start, end] is on disk or coming, or the user explicitly asked for this song's video.
+ * Songs that don't are never fetched by boundary edits, [영상 맞추기] or the export defaults.
+ */
+export function songHasVideo(p: Project, vs: VideoState | undefined, s: { id: string; start: number; end: number }): boolean {
+  if (vs?.local) return true;
+  if ((projectUi(p.id).videoSongs ?? []).includes(s.id)) return true;
+  if ((vs?.requests ?? []).some((r) => r.song_ids.includes(s.id))) return true;
+  const len0 = Math.max(0.01, s.end - s.start);
+  const covered = len(partsIn(vs, s.start, s.end, ["have", "fetching", "queued"]));
+  return covered >= len0 * 0.5;
+}
+
+/** Remember songs whose video the user asked for (see songHasVideo). */
+export function markVideoSongs(pid: string, ids: string[]) {
+  const cur = projectUi(pid).videoSongs ?? [];
+  const add = ids.filter((id) => !cur.includes(id));
+  if (add.length) setProjectUi(pid, { videoSongs: [...cur, ...add].slice(-2000) });
+}
+
 export type SongVideoState = "none" | "fetching" | "partial" | "ready" | "gone" | "failed";
 
 export interface SongVideo {
@@ -103,8 +126,7 @@ export function songVideo(p: Project, vs: VideoState | undefined, s: Song): Song
   const fraction = Math.max(0, Math.min(1, 1 - missingSec / len0));
   const pending = pieces.some((x) => x.state === "fetching" || x.state === "queued");
   const failed = pieces.some((x) => x.state === "failed");
-  const m = marginOf(p);
-  const touched = hasVideoNear(vs, s.start - m, s.end + m);
+  const touched = songHasVideo(p, vs, s);
   const where = (): string => {
     if (missing.length === 1) {
       const [a, b] = missing[0];
@@ -213,6 +235,8 @@ export async function fetchVideo(pid: string, o: FetchOpts): Promise<FetchPlan |
       reason: o.reason ?? "user",
       process: !!o.process,
     });
+    // an explicit request for these songs (not an automatic top-up): they have video from now on
+    if (o.song_ids?.length && o.reason !== "topup") markVideoSongs(pid, o.song_ids);
     if (!o.quiet) {
       if (plan.request_id === null) toast("이 범위의 영상은 이미 있어요.", { kind: "info", ttl: 2500 });
       else toast(`영상 ${fmtDurationKo(plan.missing_sec)} 분량을 받아요 · 약 ${fmtBytes(plan.estimated_bytes)}`, { kind: "info", ttl: 3000 });

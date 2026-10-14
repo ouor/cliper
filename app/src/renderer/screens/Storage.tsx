@@ -17,7 +17,7 @@ export const LEVELS: { id: DropLevel; label: string; deletes: string; keeps: str
   { id: "unused", label: "곡에 안 쓰는 영상", deletes: "어떤 곡의 앞뒤 여유에도 들지 않는 영상 (제외한 곡, 직접 받아 본 범위)", keeps: "나머지 전부", again: "필요하면 다시 받아요." },
   { id: "stems", label: "나눈 소리", deletes: "목소리·반주로 나눈 소리", keeps: "영상, 소리, 모든 결정", again: "멘트 다듬기에 들어가면 다시 나눠요 (GPU 곡당 약 8초)." },
   { id: "video", label: "영상과 나눈 소리 (추천)", deletes: "받은 영상 전부 + 나눈 소리", keeps: "방송 전체 소리, 지도, 모든 결정", again: "다시보기가 있으면 같은 경계 그대로 영상을 다시 받을 수 있어요." },
-  { id: "audio", label: "소리까지", deletes: "위 + 방송 전체 소리", keeps: "모든 결정 (곡 목록, 경계, 멘트 구간, 설정, 내보내기 기록)", again: "소리를 다시 받으면(약 1분) 지도가 돌아와요." },
+  { id: "audio", label: "소리까지", deletes: "위 + 방송 전체 소리", keeps: "모든 결정 (곡 목록, 경계, 멘트 구간, 설정, 내보내기 기록)", again: "작업을 열면 [소리 다시 받기]로 다시 받을 수 있어요(약 1분, 다시보기가 있을 때). 지도와 곡 목록은 그대로예요." },
 ];
 
 /** the end of a long path (the part that tells folders apart): …\scratchpad\qa2\projects */
