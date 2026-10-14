@@ -171,7 +171,10 @@ export function ReplayBanner({ p }: { p: Project }) {
           {!local && <b> ⚠ 비공개로 바뀐 방송일 수 있어요. 올리기 전에 확인해 주세요.</b>}
         </span>
         {!p.pinned && (
-          <button className="btn sm subtle" onClick={() => void call("project.set_pinned", { id: p.id, pinned: true }).then(putProject).then(() => toast("보관했어요. 정리에서 빠져요.", { kind: "ok" }))}>
+          <button className="btn sm subtle" onClick={() => void call("project.set_pinned", { id: p.id, pinned: true })
+              .then(putProject)
+              .then(() => toast("보관했어요. 정리에서 빠져요.", { kind: "ok" }))
+              .catch(() => toast("보관하지 못했어요. 잠시 뒤 다시 해 주세요.", { kind: "error" }))}>
             <Pin size={13} /> 보관하기
           </button>
         )}

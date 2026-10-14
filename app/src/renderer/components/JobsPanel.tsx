@@ -227,14 +227,26 @@ function VideoRow({ pid }: { pid: string }) {
           </button>
         )}
         {remaining > 0 && (
-          <button className="btn xs ghost" onClick={() => void call("video.cancel", { id: pid }).catch(() => {})} data-tip="아직 받지 않은 부분만 취소해요. 받은 영상은 남아요" data-tip-pos="left">
+          <button
+            className="btn xs ghost"
+            onClick={() => {
+              // export fetches stay: cancelling them would fail a running [받고 내보내기] (U-22)
+              for (const r of reqs) if (r.reason !== "export" && r.remaining_sec > 0.05) void call("video.cancel", { id: pid, request_id: r.id }).catch(() => {});
+            }}
+            data-tip={"아직 받지 않은 부분만 취소해요. 받은 영상은 남아요\n내보내기에 필요한 받기는 그대로 둬요"}
+            data-tip-pos="left"
+          >
             취소
           </button>
         )}
       </div>
       {remaining > 0 && <Progress value={total > 0 ? have / total : null} />}
       <div className="job-sub">
-        {remaining > 0 ? `남은 분량 ${fmtDurationKo(remaining)}${vs.paused ? " · 일시정지됨" : vs.eta_sec ? ` · ${fmtEta(vs.eta_sec)}` : " · 계산 중…"}` : ""}
+        {remaining > 0
+          ? vs.offline
+            ? `인터넷 연결을 기다리는 중 · ${Math.max(1, Math.round(vs.offline.retry_in_sec))}초 뒤 다시 · 남은 분량 ${fmtDurationKo(remaining)}`
+            : `남은 분량 ${fmtDurationKo(remaining)}${vs.paused ? (reqs.some((r) => r.force) ? " · 내보내기용은 일시정지 중에도 받는 중" : " · 일시정지됨") : vs.eta_sec ? ` · ${fmtEta(vs.eta_sec)}` : " · 계산 중…"}`
+          : ""}
       </div>
       {vs.failed_sec > 0.05 && (
         <div className="job-fail">
@@ -254,6 +266,7 @@ function VideoRow({ pid }: { pid: string }) {
             <div key={r.id} className="video-req">
               <span className="grow ellipsis">
                 {REASON_LABEL[r.reason] ?? r.reason}
+                {r.force && <span className="tag outline"> 일시정지 중에도 받는 중</span>}
                 {r.song_ids.length ? ` · 곡 ${songsText(r.song_ids)}` : ""}
                 <span className="faint"> · {r.remaining_sec > 0.05 ? `남은 ${fmtDurationKo(r.remaining_sec)}` : "받지 못한 부분 있음"}</span>
               </span>

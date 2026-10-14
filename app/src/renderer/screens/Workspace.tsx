@@ -78,6 +78,12 @@ function OriginalBadge() {
   );
 }
 
+/** Rough audio download time: about 100 s per 4 h of broadcast (measured, QA-20), at least 20 s. */
+export function audioFetchSec(p: Project): number {
+  const d = p.audio?.duration || p.source?.duration || 0;
+  return Math.max(20, Math.round((d / 14400) * 100));
+}
+
 function lastFailed(jobs: ReturnType<typeof useJobs.getState>, pid: string, kinds: string[]): Job | undefined {
   for (const id of jobs.order) {
     const j = jobs.jobs[id];
@@ -149,7 +155,7 @@ function NextBanner({ p }: { p: Project }) {
       <div className="next-banner warn">
         <AlertTriangle size={15} />
         <span className="grow">
-          {gone ? "소리를 정리한 작업이에요. 다시보기가 없어 다시 받을 수 없어요. 곡 목록과 경계, 멘트 구간은 그대로예요." : "소리를 정리한 작업이에요. 듣고 고치려면 방송 소리를 다시 받아요 (4시간 방송 약 1분). 곡 목록과 경계, 멘트 구간은 그대로예요."}
+          {gone ? "소리를 정리한 작업이에요. 다시보기가 없어 다시 받을 수 없어요. 곡 목록과 경계, 멘트 구간은 그대로예요." : `소리를 정리한 작업이에요. 듣고 고치려면 방송 소리를 다시 받아요 (약 ${fmtDurationKo(audioFetchSec(p))}). 곡 목록과 경계, 멘트 구간은 그대로예요.`}
         </span>
         {!gone && (
           <button className="btn sm primary" onClick={() => void startJob("audio.fetch", { id: p.id }, { label: "소리 다시 받기" }).catch((e) => toast(friendly(e).title, { kind: "error" }))}>
@@ -163,7 +169,7 @@ function NextBanner({ p }: { p: Project }) {
     return (
       <div className="next-banner">
         <Sparkles size={15} />
-        <span className="grow">아직 소리를 받지 않았어요. 소리만 받아서 노래를 찾아요 (4시간 방송 약 1분).</span>
+        <span className="grow">아직 소리를 받지 않았어요. 소리만 받아서 노래를 찾아요 (약 {fmtDurationKo(audioFetchSec(p))}).</span>
         <button className="btn sm primary" onClick={() => void startAnalysis(p.id, true).catch((e) => toast(friendly(e).title, { kind: "error" }))}>
           소리 받고 곡 찾기
         </button>
@@ -344,7 +350,11 @@ export function Workspace({ projectId }: { projectId: string }) {
   const hasAudio = !!p?.audio && !p.audio.dropped;
   const total = p?.audio?.duration || p?.source?.duration || 0;
   useEffect(() => {
-    if (!hasAudio) return;
+    if (!hasAudio) {
+      // no analysis audio (cleaned "소리까지"): don't leave a stream source pointing at it (QA-20)
+      if (p?.audio?.dropped) void player.clearSource();
+      return;
+    }
     if (mode === "review") void player.useStream(projectId, total);
     if (mode !== "talk") player.setMode(0 as ListenMode);
     else player.setMode(1 as ListenMode);

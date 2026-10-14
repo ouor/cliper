@@ -167,8 +167,13 @@ function refreshProjectDirs(): Promise<void> {
     });
   return dirsLoading;
 }
+/** ids that were unknown after a fresh project.list: not asked again for a few seconds (U-18) */
+const missUntil = new Map<string, number>();
 async function projectDir(id: string): Promise<string | null> {
-  if (!projectDirs.has(id) && engine.status.state === "ready") await refreshProjectDirs();
+  if (!projectDirs.has(id) && engine.status.state === "ready" && (missUntil.get(id) ?? 0) < Date.now()) {
+    await refreshProjectDirs();
+    if (!projectDirs.has(id)) missUntil.set(id, Date.now() + 5000);
+  }
   return projectDirs.get(id) ?? null;
 }
 engine.on("status", (s) => {
@@ -176,7 +181,11 @@ engine.on("status", (s) => {
   send("engine:status", s);
 });
 engine.on("notify", (method: string, params: unknown) => {
-  if (method === "project.changed") noteProject((params as { project?: unknown })?.project);
+  if (method === "project.changed") {
+    noteProject((params as { project?: unknown })?.project);
+    const id = (params as { project?: { id?: unknown } })?.project?.id;
+    if (typeof id === "string") missUntil.delete(id);
+  }
   send("engine:notify", method, params);
 });
 engine.on("result", (_method: string, result: unknown) => {
@@ -380,6 +389,7 @@ function registerIpc() {
         if ((r.ok || r.error.engineCode === "NOT_FOUND" || r.error.engineCode === "INVALID_PARAMS") && typeof prm.path === "string") setPendingRoots(pendingRoots().filter((x) => resolve(x) !== resolve(prm.path as string)));
       });
     if (method === "projects.remove_location") void res.then(() => locationDirs.clear());
+    if (method === "project.open" || method === "projects.add_root" || method === "projects.remove_location") missUntil.clear();
     if (method === "project.open" || method === "projects.add_root" || method === "projects.remove_location" || method === "project.create" || method === "project.delete") void res.then(() => refreshProjectDirs());
     return res;
   });

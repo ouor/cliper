@@ -399,6 +399,7 @@ export const OverviewMap = memo(function OverviewMap({ p }: { p: Project }) {
         return `받는 중${tot ? ` ${Math.floor((hv / tot) * 100)}%` : ""}${vs?.eta_sec ? ` · 약 ${fmtDurationKo(vs.eta_sec)}` : ""}`;
       }
       case "queued":
+        if (vs?.offline) return `인터넷 연결을 기다리는 중 · ${Math.max(1, Math.round(vs.offline.retry_in_sec))}초 뒤 다시`;
         return vs?.paused ? "대기 중 · 영상 받기가 일시정지됐어요" : "대기 중 · 앞 작업이 끝나면 받아요";
       case "failed":
         return `받지 못했어요${r?.code === "NETWORK" ? " · 연결이 끊겼어요" : ""} · 작업 현황에서 다시 시도할 수 있어요`;

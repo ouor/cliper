@@ -109,6 +109,16 @@ function VideoPreview({ p }: { p: Project }) {
   // no video anywhere yet: the review works by sound (the box says so instead of a cover)
   if (vs && (vs.local || vs.have_sec > 0 || vs.requests.length > 0 || vs.failed_sec > 0 || vodGone(p))) return <VideoPane p={p} />;
   const thumb = p.source?.catalog.thumbnail;
+  if (p.audio?.dropped) {
+    return (
+      <div className="video-box empty">
+        {thumb && <img src={thumb} alt="" draggable={false} />}
+        <div className="video-note">
+          <Headphones size={16} /> 소리를 정리한 작업이에요 · 위의 [소리 다시 받기]로 다시 들을 수 있어요
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="video-box empty">
       {thumb && <img src={thumb} alt="" draggable={false} />}

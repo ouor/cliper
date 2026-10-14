@@ -22,6 +22,8 @@ export interface FetchOpts {
   process?: boolean;
   /** no toast on success */
   quiet?: boolean;
+  /** internal: VIDEO_BUSY retries so far */
+  busyTries?: number;
 }
 
 /** Toast for the errors a fetch can hit (NO_SPACE, VOD_GONE, PRECONDITION). */
@@ -62,6 +64,12 @@ export async function fetchVideo(pid: string, o: FetchOpts): Promise<FetchPlan |
     }
     return plan;
   } catch (e) {
+    if (e instanceof EngineError && e.engineCode === "VIDEO_BUSY" && (o.busyTries ?? 0) < 40) {
+      // the project's video is being cleaned up: try again when it is done (protocol 4)
+      if (!o.busyTries) toast("정리하는 중이에요. 끝나면 영상을 받을게요.", { kind: "info", ttl: 4000 });
+      await new Promise((r) => setTimeout(r, 3000));
+      return fetchVideo(pid, { ...o, busyTries: (o.busyTries ?? 0) + 1, quiet: true });
+    }
     fetchErrorToast(e);
     return null;
   }

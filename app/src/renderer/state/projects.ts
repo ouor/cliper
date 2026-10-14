@@ -38,6 +38,8 @@ interface LegacyUi {
 /** One undoable step: the touched songs before and after (null = absent). */
 interface HistoryEntry {
   label: string;
+  /** sync as one songs.set (bulk edits: all or nothing, one undo, U-10) */
+  atomic?: boolean;
   before: Map<string, Song | null>;
   after: Map<string, Song | null>;
 }
@@ -71,6 +73,8 @@ interface PendingOp {
   apply: (songs: Song[]) => Song[];
   /** the undo entry this op created (dropped if the op fails) */
   history?: HistoryEntry;
+  /** one songs.set even when only one song changed (U-10) */
+  atomic?: boolean;
 }
 
 const engineState: Record<string, Project> = {};
@@ -239,7 +243,7 @@ function muteEq(a: Mute, b: Mute): boolean {
  * Every call carries the revision this op expects (its first snapshot, then the revision our
  * own previous call produced), so any change made by someone else in between → CONFLICT.
  */
-async function syncSongs(pid: string, target: Song[]) {
+async function syncSongs(pid: string, target: Song[], atomic = false) {
   const start = engineState[pid];
   let expected = start.revision;
   const take = (p: Project) => {
@@ -254,7 +258,7 @@ async function syncSongs(pid: string, target: Song[]) {
   const changed = target.filter((t) => byId.has(t.id) && JSON.stringify(editable(t)) !== JSON.stringify(editable(byId.get(t.id)!)));
   if (removed.length + added.length + changed.length === 0) return;
   syncStats.calls++;
-  if (removed.length + added.length + changed.length > 1) {
+  if (atomic || removed.length + added.length + changed.length > 1) {
     // atomic: the engine keeps our (client) ids for new songs and mutes
     take(await call("songs.set", { id: pid, songs: target, base_revision: expected }));
     return;
@@ -299,7 +303,7 @@ async function runOp(pid: string, op: PendingOp) {
     for (let attempt = 0; ; attempt++) {
       try {
         const target = op.apply(clone(engineState[pid].songs));
-        await syncSongs(pid, target);
+        await syncSongs(pid, target, op.atomic);
         return;
       } catch (e) {
         if (e instanceof EngineError && e.engineCode === "CONFLICT" && attempt < 3) {
@@ -399,19 +403,19 @@ function restore(pid: string, to: Map<string, Song | null>, from: Map<string, So
  * Edit the song list optimistically. `fn` receives a deep copy of the current songs and returns
  * the new list; it may run again on a fresher state (CONFLICT), so it must be a pure edit.
  */
-export function editSongs(id: string, label: string, fn: (songs: Song[]) => Song[]): Promise<void> {
+export function editSongs(id: string, label: string, fn: (songs: Song[]) => Song[], opts: { atomic?: boolean } = {}): Promise<void> {
   const p = getProject(id);
   if (!p) return Promise.resolve();
   const before = p.songs;
   const after = fn(clone(before));
   const [hb, ha] = touched(before, after);
   if (hb.size === 0) return Promise.resolve();
-  const entry: HistoryEntry = { label, before: hb, after: ha };
+  const entry: HistoryEntry = { label, before: hb, after: ha, atomic: opts.atomic };
   useProjects.setState((s) => {
     const h = s.history[id] ?? { undo: [], redo: [] };
     return { history: { ...s.history, [id]: { undo: [...h.undo.slice(-99), entry], redo: [] } } };
   });
-  return enqueue(id, { label, apply: fn, history: entry });
+  return enqueue(id, { label, apply: fn, history: entry, atomic: opts.atomic });
 }
 
 /** Mutate a single song (ids are resolved at sync time). */
@@ -429,7 +433,7 @@ export function undo(id: string): string | null {
   if (!h || h.undo.length === 0) return null;
   const last = h.undo[h.undo.length - 1];
   useProjects.setState((s) => ({ history: { ...s.history, [id]: { undo: h.undo.slice(0, -1), redo: [...h.redo, last] } } }));
-  void enqueue(id, { label: `되돌리기: ${last.label}`, apply: (songs) => restore(id, last.before, last.after, songs) });
+  void enqueue(id, { label: `되돌리기: ${last.label}`, apply: (songs) => restore(id, last.before, last.after, songs), atomic: last.atomic });
   return last.label;
 }
 
@@ -438,7 +442,7 @@ export function redo(id: string): string | null {
   if (!h || h.redo.length === 0) return null;
   const next = h.redo[h.redo.length - 1];
   useProjects.setState((s) => ({ history: { ...s.history, [id]: { undo: [...h.undo, next], redo: h.redo.slice(0, -1) } } }));
-  void enqueue(id, { label: `다시 하기: ${next.label}`, apply: (songs) => restore(id, next.after, next.before, songs) });
+  void enqueue(id, { label: `다시 하기: ${next.label}`, apply: (songs) => restore(id, next.after, next.before, songs), atomic: next.atomic });
   return next.label;
 }
 

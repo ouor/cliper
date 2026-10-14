@@ -7,6 +7,7 @@ import { getProject, updateProjectSettings } from "@/state/projects";
 import { toast, useApp } from "@/state/app";
 import type { ExportOptions } from "@ipc/generated/ExportOptions";
 import { fetchVideo } from "./video";
+import { fmtBytes, fmtDurationKo } from "./format";
 
 /** App defaults (설정) → a new project's engine settings. */
 export async function applyDefaultSettings(id: string, extra: Partial<Settings> = {}) {
@@ -54,7 +55,13 @@ export async function startAnalysis(id: string, fetchAudio: boolean) {
  */
 export async function fetchSongs(id: string, songIds: string[], _label?: string) {
   if (songIds.length === 0) return;
-  await fetchVideo(id, { song_ids: songIds, priority: songIds.length === 1 ? "now" : "user", reason: "song", process: true });
+  const plan = await fetchVideo(id, { song_ids: songIds, priority: songIds.length === 1 ? "now" : "user", reason: "song", process: true, quiet: true });
+  if (!plan) return;
+  if (plan.request_id === null) {
+    // all the video is already there (someone else's fetch, or stems were cleaned): separate now (U-16)
+    void startJob("stems.ensure", { id, song_ids: songIds }, { label: "목소리 나누기" });
+    toast("영상은 이미 있어요. 목소리와 반주를 나눠요.", { kind: "info", ttl: 3000 });
+  } else toast(`영상 ${fmtDurationKo(plan.missing_sec)} 분량을 받고 나눠요 · 약 ${fmtBytes(plan.estimated_bytes)}`, { kind: "info", ttl: 3000 });
 }
 
 /** "밤새 전부 처리하기": songs → video + stems at batch priority (+ export that waits for its video). */

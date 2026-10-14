@@ -63,6 +63,8 @@ export function wireVideo() {
   onNotification("video.request_done", (p) => {
     for (const l of doneListeners) l(p);
     if (p.status !== "failed") return;
+    const req = useVideo.getState().byProject[p.project_id]?.requests.find((r) => r.id === p.request_id);
+    if (req?.reason === "topup") return;
     if (p.code === "VOD_GONE") return; // the replay banner says it (project.vod)
     const sec = p.failed.reduce((n, [a, b]) => n + (b - a), 0);
     const pid = p.project_id;

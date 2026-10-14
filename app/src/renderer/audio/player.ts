@@ -81,6 +81,10 @@ class Player {
   private stemsKey = "";
   private video: VideoBinding | null = null;
   private loopTouched = false;
+  /** analysis-audio chunks that failed: when and how often (backoff, U-5) */
+  private chunkFail = new Map<number, { at: number; n: number }>();
+  /** last time the picture was stepped in scrub mode (fast playback, U-7) */
+  private lastScrub = 0;
   /** stems mode: project / duration whose analysis audio fills what the span doesn't cover */
   private fallbackProject: string | null = null;
   private fallbackDuration = 0;
@@ -169,7 +173,7 @@ class Player {
     for (const l of this.listeners) l(pos);
     if (st.source === "stream" && (st.playing || st.buffering)) this.prefetch(pos, st.rate);
     if (st.source === "stems" && st.playing) this.pageStems(pos, st.rate);
-    if (st.source === "stems") this.prefetchOutsideStems(pos, st.playing ? st.rate : 0);
+    if (st.source === "stems" && st.playing) this.prefetchOutsideStems(pos, st.rate);
     this.syncVideo(pos, st.playing && !st.buffering, st.rate);
     requestAnimationFrame(this.tick);
   };
@@ -229,6 +233,9 @@ class Player {
     for (const i of want) {
       if (i < 0 || i * CHUNK >= this.streamDuration) continue;
       if (this.sent.has(i) || this.inflight.has(i)) continue;
+      // a chunk that failed waits 1, 2, 4 … 30 s before the next try (U-5)
+      const f = this.chunkFail.get(i);
+      if (f && performance.now() - f.at < Math.min(30000, 1000 * 2 ** f.n)) continue;
       this.fetchChunk(i);
     }
     // keep the worklet's cache bounded
@@ -260,12 +267,16 @@ class Player {
         const data = new Float32Array(buf.slice(dataOffset, dataOffset + frames * 8));
         this.post({ type: "stream:chunk", index: i, data }, [data.buffer]);
         this.sent.add(i);
+        this.chunkFail.delete(i);
         if (usePlayer.getState().streamError) usePlayer.setState({ streamError: undefined });
       })
       .catch((e) => {
         if ((e as Error).name === "AbortError") return;
         const busy = (e as { engineCode?: string }).engineCode === "BUSY";
-        usePlayer.setState({ streamError: busy ? "소리를 받는 중이라 아직 미리듣기를 할 수 없어요" : String((e as Error).message ?? e) });
+        const f = this.chunkFail.get(i);
+        this.chunkFail.set(i, { at: performance.now(), n: (f?.n ?? 0) + 1 });
+        const msg = busy ? "소리를 받는 중이라 아직 미리듣기를 할 수 없어요" : String((e as Error).message ?? e);
+        if (usePlayer.getState().streamError !== msg) usePlayer.setState({ streamError: msg });
       })
       .finally(() => this.inflight.delete(i));
   }
@@ -287,6 +298,12 @@ class Player {
     this.fallbackProject = fallbackDuration > 0 ? projectId : null;
     this.fallbackDuration = fallbackDuration;
     this.post({ type: "fallback", on: fallbackDuration > 0, chunkSec: CHUNK, duration: fallbackDuration });
+    if (this.stemsKey && this.streamProject !== this.fallbackProject) {
+      // the same stems window stays, only the fallback changed (e.g. audio re-fetched, U-4)
+      this.streamProject = this.fallbackProject;
+      this.streamDuration = this.fallbackDuration;
+      this.sent.clear();
+    }
     const rf0 = Math.max(0, Math.floor((start - origin) * SR));
     const rf1 = Math.min(clipFrames, Math.ceil((end - origin) * SR));
     const rangeKey = `${projectId}/${dir}/${rf0}/${rf1}/${bust}`;
@@ -544,7 +561,18 @@ class Player {
       if (!v.el.paused) v.el.pause();
       return;
     }
-    if (playing && rate > 0) {
+    if (playing && Math.abs(rate) >= 1.5) {
+      // fast playback: a 1440p60 decoder can't keep up and drifts (QA-19, U-7). Show
+      // keyframe-near stills on the audio clock instead: no drift, no seek storm.
+      if (!v.el.paused) v.el.pause();
+      const now = performance.now();
+      if (now - this.lastScrub > 120 && !v.el.seeking) {
+        this.lastScrub = now;
+        const el = v.el as HTMLVideoElement & { fastSeek?: (t: number) => void };
+        if (el.fastSeek) el.fastSeek(t);
+        else el.currentTime = t;
+      }
+    } else if (playing && rate > 0) {
       if (v.el.playbackRate !== rate) v.el.playbackRate = rate;
       // (a file switch starts the next element early — VideoPane, QA-9 — because seeking or changing
       // playbackRate to catch up stalls the picture in Chromium for about as long as it saves)

@@ -9,6 +9,17 @@ import { markEngineLost, reconcileJobs, takeInterrupted, useJobs, wireJobs } fro
 import { loadAllVideo, wireVideo } from "./state/video";
 import { wireAutoTopUp } from "./state/topup";
 import { addPendingRoot } from "./lib/locations";
+
+/** Settings files the engine could not read and set aside (protocol 4): say so once per file. */
+async function showSystemWarnings(sys: SystemInfo | null) {
+  const list = sys?.warnings ?? [];
+  if (!list.length) return;
+  const seen = (await window.cliper.getState<string[]>("shownSystemWarnings")) ?? [];
+  const fresh = list.filter((w) => !seen.includes(w));
+  if (!fresh.length) return;
+  await window.cliper.setState("shownSystemWarnings", [...seen, ...fresh].slice(-50));
+  toast(`설정 파일 일부를 읽지 못해 따로 옮겨 두고 기본값으로 시작했어요. 작업 파일은 그대로예요.\n${fresh.join("\n")}`, { kind: "warn", ttl: 15000 });
+}
 import { onNotification } from "./lib/rpc";
 import { comboFromEvent, keysFor } from "./lib/keys";
 import { DialogHost, isTyping, Toasts } from "./components/common";
@@ -53,6 +64,7 @@ async function boot() {
       void loadAllVideo();
       void onEngineReady();
       void addPendingRoot();
+      void showSystemWarnings(s.system as SystemInfo | null);
     } else if (wasReady) {
       // any way out of "ready" (crash, user restart, root/device change) ends the running jobs
       markEngineLost();

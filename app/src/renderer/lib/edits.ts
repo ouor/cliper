@@ -278,15 +278,27 @@ export async function deleteSuggestions(pid: string, songIds: string[], label = 
   const gone = p.songs.filter((s) => want.has(s.id)).flatMap((s) => s.mutes.filter(isSuggestion));
   if (!gone.length) return;
   const songsHit = p.songs.filter((s) => want.has(s.id) && s.mutes.some(isSuggestion)).length;
-  const synced = editSongs(pid, label, (songs) => {
-    for (const s of songs) if (want.has(s.id)) s.mutes = s.mutes.filter((m) => !isSuggestion(m));
-    return songs;
-  });
+  // exactly the suggestions shown now: ones a job adds meanwhile stay (U-11); one songs.set so it
+  // is all or nothing with one undo, also for a single song (U-10)
+  const ids = new Set(gone.flatMap((m) => [m.id, rid(pid, m.id)]));
   const sel = useWs.getState().selectedMute;
   if (sel && gone.some((m) => m.id === sel)) useWs.setState({ selectedMute: null });
+  try {
+    await editSongs(
+      pid,
+      label,
+      (songs) => {
+        for (const s of songs) if (want.has(s.id)) s.mutes = s.mutes.filter((m) => !ids.has(m.id));
+        return songs;
+      },
+      { atomic: true },
+    );
+  } catch {
+    return; // the edit's own error toast says why; nothing was deleted
+  }
+  if (getProject(pid)?.songs.some((s) => s.mutes.some((m) => ids.has(m.id)))) return; // failed and rolled back
   toast(`확인 전 제안 ${gone.length}개를 지웠어요${songsHit > 1 ? ` (${songsHit}곡)` : ""}. 확인한 구간과 직접 만든 구간은 그대로예요.`, {
     kind: "ok",
     action: { label: "되돌리기 Ctrl+Z", run: () => void undo(pid) },
   });
-  await synced;
 }

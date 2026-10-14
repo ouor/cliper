@@ -30,11 +30,11 @@ function tail(p: string, n = 3): string {
 export function freedBy(u: StorageUsage, level: DropLevel): number {
   switch (level) {
     case "unused":
-      return u.unused_video + u.cache;
+      return u.unused_video + u.cache + (u.orphan ?? 0);
     case "stems":
-      return u.stems + u.cache;
+      return u.stems + u.cache + (u.orphan ?? 0);
     case "video":
-      return u.video + u.stems + u.cache;
+      return u.video + u.stems + u.cache + (u.orphan ?? 0);
     case "audio":
       return u.total;
   }
@@ -126,7 +126,7 @@ export function StorageTab() {
         }
       } catch (e) {
         const code = e instanceof EngineError ? e.engineCode : "";
-        skipped.push(`${row.s?.title || row.u.project_id}${code === "BUSY" ? " (작업 중)" : code === "PINNED" ? " (보관함)" : ""}`);
+        skipped.push(`${row.s?.title || row.u.project_id}${code === "BUSY" ? " (작업 중)" : code === "VIDEO_BUSY" ? " (영상 받는 중 — 받기를 멈춘 뒤 다시)" : code === "PINNED" ? " (보관함)" : ""}`);
       }
     }
     setBusy(false);
@@ -198,6 +198,7 @@ export function StorageTab() {
                   {gone && <span className="tag doubt st-tag">다시보기 없음</span>}
                 </span>
                 {u.unused_video > 1e6 && <span className="faint st-unused">곡에 안 쓰는 영상 {fmtBytes(u.unused_video)}</span>}
+                {(u.orphan ?? 0) > 1e6 && <span className="faint st-unused" data-tip="중간에 멈춘 받기·나누기가 남긴 파일이에요. 어떤 정리 단계에서도 지워져요." data-tip-pos="right">남은 임시 파일 {fmtBytes(u.orphan)}</span>}
                 {outside(s?.dir) && (
                   <span className="faint st-unused mono ellipsis" title={s?.dir}>
                     위치: {tail(s?.dir ?? "")}
