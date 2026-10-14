@@ -281,7 +281,7 @@ impl Engine {
                     ps.idx_dirty = true;
                 }
             }
-            ps.idx.next_seq += 1;
+            ps.idx.next_seq = next_seq();
             ps.idx.requests.push(FetchRequest {
                 id: request_id.clone(),
                 ranges: rs.clone(),
@@ -338,7 +338,7 @@ impl Engine {
 
     pub fn video_prioritize(&self, pid: &str, request_id: &str, priority: Priority) -> ApiResult<()> {
         let found = self.with_ps(pid, |ps| {
-            let next = ps.idx.next_seq + 1;
+            let next = next_seq();
             match ps.idx.requests.iter_mut().find(|r| r.id == request_id) {
                 Some(r) => {
                     r.priority = priority;
@@ -1037,6 +1037,22 @@ impl Engine {
         self.with_ps(pid, |ps| ps.have_ranges())
     }
 
+}
+
+/// Request order across all projects (and restarts): microseconds since 1970.
+fn next_seq() -> u64 {
+    use std::sync::atomic::AtomicU64;
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = chrono::Utc::now().timestamp_micros().max(1) as u64;
+    // strictly increasing even within one microsecond
+    let mut prev = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(prev + 1);
+        match LAST.compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(p) => prev = p,
+        }
+    }
 }
 
 fn rel(dir: &Path, f: &Path) -> String {

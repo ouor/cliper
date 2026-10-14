@@ -62,7 +62,8 @@ pub struct FetchRequest {
     #[serde(default)]
     pub process: bool,
     pub created_at: String,
-    /// order among requests of the same priority
+    /// order among requests of the same priority, across projects
+    /// (microseconds since 1970 when made; 0 = "fetch this first")
     pub seq: u64,
 }
 
