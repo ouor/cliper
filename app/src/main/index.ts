@@ -110,7 +110,12 @@ function saveStateSoon() {
 }
 
 // ── engine ──
-const engine = new Engine({ exe: ENGINE_EXE, models: MODELS_DIR, logDir: LOG_DIR, preferCpu: settings.device === "cpu", lowPriority: settings.lowPriority, env: ENGINE_ENV });
+const engine = new Engine({ exe: ENGINE_EXE, models: MODELS_DIR, logDir: LOG_DIR, preferCpu: settings.device === "cpu", lowPriority: settings.lowPriority,
+  // a separate profile (CLIPER_USER_DATA: dev / QA) keeps its own engine preferences, so it never
+  // pauses or changes the real app's (QA-23); the normal profile keeps the engine's default file
+  config: env("CLIPER_USER_DATA") ? join(userData, "engine.json") : undefined,
+  env: ENGINE_ENV,
+});
 let win: BrowserWindow | null = null;
 let busy = false;
 let quitting = false;

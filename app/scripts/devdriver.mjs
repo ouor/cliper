@@ -3,6 +3,7 @@
 //
 //   node scripts/devdriver.mjs [--port 7788] [--width 1600 --height 960]
 //   env: CLIPER_PROJECTS, CLIPER_USER_DATA, CLIPER_SKIP_FIRST_RUN=1 (dev builds);
+//        build with CLIPER_QA=1 (npm run build) for window.__cliper.qa;
 //        DEVDRIVER_EXE + DEVDRIVER_ARGS for a packaged QA build
 //
 //   POST /eval   {"js": "<expression>"}          → {"value": …}  (renderer context)

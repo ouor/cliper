@@ -51,6 +51,8 @@ export default defineConfig({
     root: resolve(__dirname, "src/renderer"),
     resolve: { alias: { "@ipc": resolve(__dirname, "src/ipc"), "@": resolve(__dirname, "src/renderer") } },
     plugins: [react(), csp()],
+    // QA-only renderer hooks (window.__cliper.qa): dev server, or a build made with CLIPER_QA=1 (QA-22)
+    define: { __CLIPER_QA__: JSON.stringify(process.env.CLIPER_QA === "1") },
     // electron-vite leaves output unminified by default; the renderer is the one bundle where it matters
     build: { minify: true, rollupOptions: { input: { index: resolve(__dirname, "src/renderer/index.html") } } },
     server: { port: 5733, strictPort: true },

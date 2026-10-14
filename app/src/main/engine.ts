@@ -19,6 +19,8 @@ export interface EngineOptions {
   logDir: string;
   preferCpu: boolean;
   lowPriority: boolean;
+  /** engine preferences file (serve --config); unset = the engine's default (%LOCALAPPDATA%Cliperengine.json) */
+  config?: string;
   /** extra environment for the engine (e.g. CLIPER_FFMPEG in packaged builds) */
   env?: Record<string, string>;
 }
@@ -133,6 +135,7 @@ export class Engine extends EventEmitter {
     }
     mkdirSync(projectsRoot, { recursive: true });
     const args = ["serve", "--projects", projectsRoot, "--models", this.opts.models];
+    if (this.opts.config) args.push("--config", this.opts.config);
     if (this.opts.preferCpu) args.push("--cpu");
     this.log(`\n=== ${new Date().toISOString()} spawn ${this.opts.exe} ${args.join(" ")}`);
     this.setStatus({ state: this.status.restarts > 0 ? "restarting" : "starting", projectsRoot, system: null, reason: undefined });

@@ -1174,6 +1174,18 @@
   max-width: 90%;
   text-align: center;
 }
+.video-fast {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 2;
+  padding: 3px 8px;
+  border-radius: var(--r-full);
+  background: rgba(0, 0, 0, 0.55);
+  color: #e9ecf2;
+  font-size: var(--fs-xs, 11px);
+  pointer-events: none;
+}
 .video-loading {
   position: absolute;
   left: 8px;

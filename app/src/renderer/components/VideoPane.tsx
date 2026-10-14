@@ -56,6 +56,8 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
    *  switch at a file boundary (adopted clip ↔ new segments, C2-1) is seamless */
   const [next, setNext] = useState<VideoView | null>(null);
   const [shown, setShown] = useState<Shown>({ kind: "opening" });
+  // 2x and faster: the picture is stepped, not played; a 1440p60 decoder lags up to ~2 s (QA-19)
+  const fast = usePlayer((s) => s.playing && Math.abs(s.rate) >= 1.5);
   const state = useRef({
     vs,
     gone,
@@ -280,6 +282,11 @@ export function VideoPane({ p, children }: { p: Project; children?: ReactNode })
 
   return (
     <div className="video-box">
+      {fast && !cover && (
+        <div className="video-fast" role="status">
+          빠른 재생 중 · 화면은 띄엄띄엄 따라와요
+        </div>
+      )}
       {[view, next].map(
         (v) =>
           v && (

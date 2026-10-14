@@ -14,7 +14,9 @@ import { useAddon } from "./state/addon";
 import { useVideo } from "./state/video";
 
 // QA handle (the renderer's own state; nothing privileged)
-Object.assign(window, { __cliper: { player, usePlayer, useWs, useProjects, useJobs, useApp, useVideo, workletUrl: WORKLET_URL, syncStats, useAddon, qa: { applyChanged, editSongs, refreshList, replaceProject, removeLocation } } });
+Object.assign(window, { __cliper: { player, usePlayer, useWs, useProjects, useJobs, useApp, useVideo, workletUrl: WORKLET_URL, syncStats, useAddon } });
+// state-changing hooks only in dev / QA builds, never in a release bundle (QA-22)
+if (import.meta.env.DEV || __CLIPER_QA__) Object.assign((window as unknown as { __cliper: object }).__cliper, { qa: { applyChanged, editSongs, refreshList, replaceProject, removeLocation } });
 
 // A file dropped anywhere except a real drop zone must not make Chromium navigate to it.
 for (const type of ["dragover", "drop"] as const) document.addEventListener(type, (e) => e.preventDefault());
