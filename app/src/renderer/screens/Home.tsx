@@ -169,7 +169,7 @@ function ContinueCard({ s }: { s: ProjectSummary }) {
   })();
   const parts = [
     s.unreviewed ? `확인 전 곡 ${s.unreviewed}개` : null,
-    s.clips_ready ? `영상 ${s.clips_ready}곡 받음` : null,
+    s.separated_songs ? `영상 ${s.separated_songs}곡 받음` : null,
     s.unconfirmed_mutes ? `멘트 확인 대기 ${s.unconfirmed_mutes}개` : null,
     s.exported ? `${s.exported}곡 내보냄` : null,
     s.last_error ? `실패: ${KIND_LABEL[s.last_error.kind] ?? s.last_error.kind}` : null,

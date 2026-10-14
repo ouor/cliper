@@ -147,7 +147,7 @@ export function TalkEditor({ p }: { p: Project }) {
   const sv = s ? songVideo(p, vs, s) : null;
   const unsep = s ? unseparated(p, vs, lo, hi) : [];
   const unsepKey = unsep.map(([a, b]) => `${a.toFixed(1)}-${b.toFixed(1)}`).join(",");
-  const separating = runningJobs(jobs, p.id).some((j) => j.kind === "stems.ensure" || j.kind === "clips.fetch") || jobs.waiting.some((w) => w.projectId === p.id && (w.method === "stems.ensure" || w.method === "clips.fetch"));
+  const separating = runningJobs(jobs, p.id).some((j) => j.kind === "stems.ensure" || j.kind === "clips.fetch") || jobs.waiting.some((w) => w.projectId === p.id && w.method === "stems.ensure");
   const muteOn = s ? s.mute_enabled : true;
   const [peaks, setPeaks] = useState<{ orig: Peaks | null; voc: Peaks | null }>({ orig: null, voc: null });
   const [notesOpen, setNotesOpen] = useState(false);

@@ -29,7 +29,13 @@ cache: number,
  */
 exports: number, 
 /**
- * audio + video + stems + cache
+ * leftovers nothing refers to (A-4): unreferenced stem folders and
+ * views, interrupted `.part`/`.tmp` writes; swept on project load and
+ * by `media.drop`
+ */
+orphan: number, 
+/**
+ * audio + video + stems + cache + orphan
  */
 total: number, pinned: boolean, 
 /**

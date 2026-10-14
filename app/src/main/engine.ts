@@ -34,7 +34,6 @@ const TIMEOUTS: Record<string, number> = {
   "project.create": 180_000,
   "system.probe_gpu": 180_000,
   "system.check_cookies": 60_000,
-  "project.drop_media": 120_000,
   "media.drop": 300_000,
   "storage.usage": 120_000,
   "video.view": 300_000,

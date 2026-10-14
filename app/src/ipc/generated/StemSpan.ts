@@ -16,4 +16,9 @@ start: number, end: number, frames: number, sample_rate: number,
 /**
  * project-relative folder: `orig.wav`, `vocals.wav`, `orig.peaks`, `vocals.peaks`
  */
-dir: string, model: string, device: Device, created_at: string, };
+dir: string, model: string, device: Device, created_at: string, 
+/**
+ * 0 = written before the per-rendition placement fix (QA-2): checked
+ * again by the next `stems.ensure` that touches it; 1 = current
+ */
+version: number, };

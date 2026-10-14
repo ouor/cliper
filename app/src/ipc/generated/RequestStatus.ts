@@ -4,6 +4,10 @@ import type { SongProgress } from "./SongProgress";
 
 export type RequestStatus = { id: string, priority: Priority, reason: string, song_ids: Array<string>, ranges: Array<[number, number]>, process: boolean, 
 /**
+ * runs even while video downloads are paused (an export or a job waits for it)
+ */
+force: boolean, 
+/**
  * seconds of video this request needs in total (whole segments)
  */
 total_sec: number, have_sec: number, fetching_sec: number, failed_sec: number, 

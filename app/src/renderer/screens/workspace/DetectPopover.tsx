@@ -14,7 +14,7 @@ export function DetectPopover({ p }: { p: Project }) {
   const [minSec, setMinSec] = useState(p.detection?.params.min_song_sec ?? settings.minSongSec);
   const [busy, setBusy] = useState(false);
   // the engine's "touched" rule (docs/ipc.md): these survive a rerun
-  const kept = p.songs.filter((s) => s.origin === "manual" || s.reviewed || !s.enabled || s.title || s.artist || s.note || s.mutes.length || !s.mute_enabled || s.fade_in !== null || s.fade_out !== null || s.export || (s.clip_id && p.clips.find((c) => c.id === s.clip_id)?.video)).length;
+  const kept = p.songs.filter((s) => s.origin === "manual" || s.reviewed || !s.enabled || s.title || s.artist || s.note || s.mutes.length || !s.mute_enabled || s.fade_in !== null || s.fade_out !== null || s.export).length;
 
   const run = async () => {
     setBusy(true);

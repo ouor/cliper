@@ -12,9 +12,9 @@ unreviewed: number,
  */
 unconfirmed_mutes: number, 
 /**
- * enabled songs whose whole range has video and is separated
+ * enabled songs whose whole range is separated (formerly `clips_ready`)
  */
-clips_ready: number, 
+separated_songs: number, 
 /**
  * kept out of cleanup (always sent by the engine; optional so clients
  * that build summaries themselves may leave it out)

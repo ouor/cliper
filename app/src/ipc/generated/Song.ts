@@ -24,7 +24,7 @@ note: string,
 /**
  * detector confidence (auto songs; None for manual songs)
  */
-confidence: Confidence | null, clip_id: string | null, mutes: Array<Mute>, 
+confidence: Confidence | null, mutes: Array<Mute>, 
 /**
  * apply this song's confirmed mutes on export (false = keep the original
  * audio, mutes are kept for later)
@@ -33,4 +33,13 @@ mute_enabled: boolean,
 /**
  * fade at the song's start / end on export (None = settings.song_fade_in/out)
  */
-fade_in: number | null, fade_out: number | null, export: ExportInfo | null, };
+fade_in: number | null, fade_out: number | null, export: ExportInfo | null, 
+/**
+ * the user asked for this song's video (set by `video.fetch {song_ids}`
+ * unless `reason` is "topup"/"auto"; editable with `song.update`)
+ */
+video_wanted: boolean, 
+/**
+ * the user listened to this song in review
+ */
+listened: boolean, };

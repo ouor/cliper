@@ -34,9 +34,9 @@ import type { Song } from "./generated/Song";
 import type { StemsResult } from "./generated/StemsResult";
 import type { SystemInfo } from "./generated/SystemInfo";
 
-// Protocol 3: segment-based video (docs/ipc.md "What changed in protocol 3"). The UI uses
-// video.* / stems.ensure / project.stems; Project.clips is always [].
-export const PROTOCOL_VERSION = 3;
+// Protocol 4: protocol-2 leftovers removed, split error codes (docs/ipc.md "What changed in
+// protocol 4"). Video by VOD range: video.* / stems.ensure / project.stems.
+export const PROTOCOL_VERSION = 4;
 
 /** `storage.usage {}`: every project + free bytes on the projects drive. */
 export interface StorageAll {
@@ -84,7 +84,7 @@ export interface Methods {
    *  Validated; manual mutes become confirmed; clips are re-planned.
    *  `base_revision` = project.revision the edit was based on (CONFLICT if stale). */
   "songs.set": { params: { id: string; songs: Song[]; base_revision?: number | null }; result: Project };
-  /** Change some fields of one song (not id / clip_id / export / confidence). */
+  /** Change some fields of one song (not id / export / confidence; unknown fields: INVALID_PARAMS). */
   "song.update": {
     params: { id: string; song_id: string; patch: Partial<Song>; base_revision?: number | null };
     result: Project;
@@ -103,21 +103,14 @@ export interface Methods {
     params: { id: string; text: string; tolerance?: number | null; apply?: boolean; overwrite?: boolean };
     result: SetlistMatch;
   };
-  /** Protocol 2 leftover: no-op, returns the project. */
-  "clips.plan": { params: { id: string }; result: Project };
-  /** Removed in protocol 3 (INVALID_PARAMS): video is kept per VOD range. */
-  "clip.extend": { params: { id: string; clip_id: string; start: number; end: number }; result: Project };
-  /** Removed in protocol 3 (INVALID_PARAMS): use media.drop. */
-  "clip.drop_media": { params: { id: string; clip_id: string }; result: { project: Project; freed_bytes: number } };
-  /** Protocol 2 name of media.drop {level: "video"}. */
-  "project.drop_media": { params: { id: string }; result: { project: Project; freed_bytes: number } };
 
   // ── video by VOD range (protocol 3) ──
   /** Coverage (have / fetching / queued / failed ranges) + requests of a project; without
    *  id: every loaded project + the app-wide pause. Also pushed as video.changed. */
   "video.status": { params: { id: string }; result: VideoState };
   /** Queue the video of VOD ranges and/or songs (± margins); only missing segments are
-   *  fetched. request_id null = nothing was missing. Errors: VOD_GONE, NO_SPACE, PRECONDITION. */
+   *  fetched. request_id null = nothing was missing. Errors: VOD_GONE, NO_SPACE, PRECONDITION,
+   *  VIDEO_BUSY (a cleanup of this project is running). */
   "video.fetch": { params: { id: string } & Partial<FetchArgs>; result: FetchPlan };
   /** Same as video.fetch without queuing: missing seconds and estimated bytes (tooltips). */
   "video.estimate": { params: { id: string } & Partial<FetchArgs>; result: FetchPlan };
@@ -136,11 +129,13 @@ export interface Methods {
    *  and aren't separated yet; default every enabled song. */
   "stems.ensure": { params: { id: string; song_ids?: string[] | null; ranges?: [number, number][] | null }; result: JobHandle };
   /** Bytes by kind for one project, or { projects, free, root } for all. */
-  "storage.usage": { params: { id: string }; result: StorageUsage };  /** Cleanup: unused < stems < video < audio. Decisions always stay. PINNED unless force. */
+  "storage.usage": { params: { id: string }; result: StorageUsage };
+  /** Cleanup: unused < stems < video < audio. Decisions always stay. PINNED unless force;
+   *  BUSY (a job runs) / VIDEO_BUSY (video downloading: video.cancel first). */
   "media.drop": { params: { id: string; level: DropLevel; force?: boolean }; result: { project: Project; freed_bytes: number } };
   "project.set_pinned": { params: { id: string; pinned: boolean }; result: Project };
   /** Open a project folder that lives elsewhere; it joins project.list and is remembered.
-   *  CONFLICT (data.dir) if a project with the same id is already listed from another place. */
+   *  DUPLICATE_PROJECT (data.dir) if a project with the same id is already listed from another place. */
   "project.open": { params: { path: string }; result: Project };
   /** Also list every project in another folder (e.g. the previous projects folder). */
   "projects.add_root": { params: { path: string }; result: { projects: ProjectSummary[]; skipped: { id: string; dir: string }[] } };
@@ -166,12 +161,6 @@ export interface Methods {
   "audio.fetch": { params: { id: string }; result: JobHandle };
   /** PANNs tagging (+ overview.peaks) then detection. */
   "detect.run": { params: { id: string; params?: Params | null; retag?: boolean }; result: JobHandle };
-  /** Protocol 2 pipeline on the segment store: fetch songs ± margins (default every enabled
-   *  song), wait, then stems.ensure. clip_ids / exact are ignored. */
-  "clips.fetch": {
-    params: { id: string; clip_ids?: string[] | null; song_ids?: string[] | null; exact?: boolean };
-    result: JobHandle;
-  };
   /** Render + encode enabled songs (default: all), or write editor/DAW stems. */
   "export.run": { params: { id: string } & Partial<ExportOptions>; result: JobHandle };
   "job.list": { params: NoParams; result: JobInfo[] };
@@ -196,8 +185,9 @@ export type ResultOf<M extends Method> = Methods[M]["result"];
 /** Job results by kind (the `result` of job.done). */
 export interface JobResults {
   "audio.fetch": { audio: AudioState };
-  "detect.run": { segments: [number, number][]; songs: number; clips: number; candidates: number };
-  "clips.fetch": { clips: string[]; video_failed: [number, number][]; stems: EnsureResult };
+  "detect.run": { segments: [number, number][]; songs: number; candidates: number };
+  /** batch-queue step only (queue.add through "clips"): fetch songs ± margins, then separate */
+  "clips.fetch": { video_failed: [number, number][]; stems: EnsureResult };
   "stems.ensure": EnsureResult;
   "export.run": {
     exports: { song_id: string; result: ExportResult }[];
@@ -213,6 +203,9 @@ type Variant<E extends Event["event"]> = Omit<Extract<Event, { event: E }>, "eve
 export interface Notifications {
   /** Compatible when min_client_protocol <= PROTOCOL_VERSION <= protocol. */
   "engine.ready": { protocol: number; min_client_protocol: number; system: SystemInfo };
+  /** Sent instead of engine.ready when the engine can't start, then it exits.
+   *  code ROOT_LOCKED: another Cliper engine uses this projects folder (data.root). */
+  "engine.failed": { protocol: number; code: string; message: string; data?: unknown };
   "job.started": Variant<"job_started">;
   /** `progress.item` = clip id (clips.fetch) or song id (export.run); `item_index`/`items_total`
    *  place it in job.started's `items`. Show `note` (code + args), not `message`. */

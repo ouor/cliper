@@ -7,7 +7,15 @@ export type SystemInfo = { version: string, projects_root: string, models_dir: s
 /**
  * None = no NVIDIA GPU found
  */
-gpu: GpuInfo | null, keep_awake: boolean, cookies: CookieStatus, 
+gpu: GpuInfo | null, keep_awake: boolean, 
+/**
+ * app preferences file in use
+ */
+prefs_path: string, 
+/**
+ * settings files that could not be read and were set aside (A-3)
+ */
+warnings: Array<string>, cookies: CookieStatus, 
 /**
  * the CUDA runtime add-on (install it when `needed`)
  */

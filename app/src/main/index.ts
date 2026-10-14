@@ -278,11 +278,11 @@ function on(channel: string, fn: (e: IpcMainEvent, ...args: any[]) => void) {
 
 const ENGINE_METHODS = new Set([
   "system.info", "system.probe_gpu", "system.set_cookies", "system.cookies_status", "system.check_cookies", "system.set_keep_awake",
-  "project.list", "project.create", "project.get", "project.delete", "project.update_settings", "project.export_metadata", "project.drop_media", "project.set_pinned",
+  "project.list", "project.create", "project.get", "project.delete", "project.update_settings", "project.export_metadata", "project.set_pinned",
   "project.open", "projects.add_root", "projects.remove_location", "projects.locations",
   "songs.set", "song.update", "song.add", "song.remove", "mute.upsert", "mute.remove", "songs.match_setlist",
   "audio.window", "detect.default_params", "detect.rerun",
-  "audio.fetch", "detect.run", "clips.fetch", "export.run", "stems.ensure",
+  "audio.fetch", "detect.run", "export.run", "stems.ensure",
   // protocol 3: video by VOD range, storage, replay check
   "video.status", "video.fetch", "video.estimate", "video.cancel", "video.prioritize", "video.retry", "video.pause", "video.view",
   "storage.usage", "media.drop", "vod.check", "system.net_stats",

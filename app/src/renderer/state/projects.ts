@@ -113,7 +113,7 @@ function summarize(p: Project): ProjectSummary {
     updated_at: p.updated_at,
     unreviewed: enabled.filter((s) => !s.reviewed).length,
     unconfirmed_mutes: enabled.reduce((n, s) => n + s.mutes.filter((m) => !m.confirmed).length, 0),
-    clips_ready: enabled.filter((s) => len(separatedIn(p, s.start, s.end)) >= s.end - s.start - 0.5).length,
+    separated_songs: enabled.filter((s) => len(separatedIn(p, s.start, s.end)) >= s.end - s.start - 0.5).length,
     pinned: p.pinned,
     vod: p.vod ?? undefined,
     has_audio: !!p.audio && !p.audio.dropped,

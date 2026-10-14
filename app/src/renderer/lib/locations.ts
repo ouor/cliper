@@ -39,7 +39,7 @@ export async function openOtherProject() {
     toast("다른 위치의 작업을 열었어요. 앞으로 목록에 계속 보여요(파일은 그 자리에 그대로).", { kind: "ok" });
     go({ name: "workspace", projectId: p.id, mode: "review" });
   } catch (e) {
-    if (e instanceof EngineError && e.engineCode === "CONFLICT") {
+    if (e instanceof EngineError && e.engineCode === "DUPLICATE_PROJECT") {
       const dir = typeof e.data?.dir === "string" ? e.data.dir : "";
       toast(`같은 방송의 작업이 이미 목록에 있어요${dir ? ` (${dir})` : ""}. 그 작업을 쓰거나, 설정 > 저장 공간에서 그 위치를 목록에서 뺀 뒤 다시 열어 주세요.`, { kind: "warn", ttl: 10000 });
     } else if (e instanceof EngineError && (e.engineCode === "NOT_FOUND" || e.engineCode === "INVALID_PARAMS")) {

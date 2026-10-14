@@ -24,12 +24,13 @@ export function makeSong(start: number, end: number, title = ""): Song {
     reviewed: false,
     note: "",
     confidence: null,
-    clip_id: null,
     mutes: [],
     mute_enabled: true,
     fade_in: null,
     fade_out: null,
     export: null,
+    video_wanted: false,
+    listened: false,
   };
 }
 

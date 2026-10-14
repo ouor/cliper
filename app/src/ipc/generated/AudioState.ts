@@ -14,4 +14,8 @@ dropped: boolean,
 /**
  * local recordings: the audio track copied (None = remote / older projects)
  */
-track: number | null, };
+track: number | null, 
+/**
+ * rendition key of `variant` (see `video::store::rendition_key`)
+ */
+rendition: string | null, };

@@ -30,7 +30,11 @@ height: number | null,
 /**
  * separate + suggest mutes for `song_ids` (or `ranges`) once fetched
  */
-process: boolean, created_at: string, 
+process: boolean, 
+/**
+ * runs even while downloads are paused (an export waiting for it, R-11)
+ */
+force: boolean, created_at: string, 
 /**
  * order among requests of the same priority, across projects
  * (microseconds since 1970 when made; 0 = "fetch this first")

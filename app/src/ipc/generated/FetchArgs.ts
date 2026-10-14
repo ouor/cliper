@@ -28,4 +28,8 @@ process: boolean,
 /**
  * rendition height for new ranges (default settings.video_height)
  */
-height: number | null, };
+height: number | null, 
+/**
+ * download even while video downloads are paused (an export waiting for it)
+ */
+force: boolean, };
