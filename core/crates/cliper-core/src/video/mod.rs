@@ -112,6 +112,8 @@ pub struct PState {
     pub container: Container,
     /// rendition index → height
     pub heights: Vec<u32>,
+    /// the renditions (for picking one by height without a network call)
+    pub variants: Vec<crate::hls::m3u8::Variant>,
     pub local: bool,
     pub vod_gone: bool,
     /// emit `video.changed`
@@ -323,6 +325,7 @@ mod tests {
             tl: Some(Timeline::from_durations(0, &[4.0; 10])),
             container: Container::Ts,
             heights: vec![1080, 720, 144],
+            variants: Vec::new(),
             local: false,
             vod_gone: false,
             dirty: false,

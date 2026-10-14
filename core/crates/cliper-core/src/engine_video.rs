@@ -148,6 +148,7 @@ impl Engine {
             tl,
             container: src.map(|s| s.container).unwrap_or(Container::Fmp4),
             heights: src.map(|s| s.variants.iter().map(|v| v.height).collect()).unwrap_or_default(),
+            variants: src.map(|s| s.variants.clone()).unwrap_or_default(),
             local,
             vod_gone: p.vod.as_ref().is_some_and(|v| v.status == VodState::Gone),
             dirty: true,
@@ -173,6 +174,8 @@ impl Engine {
     /// Re-read a project's store from disk (after cleanup, audio re-fetch, …),
     /// keeping in-flight downloads.
     pub(crate) fn reload_ps(&self, pid: &str) -> ApiResult<()> {
+        // what is only in memory (new requests) must survive the reload
+        self.save_index(pid);
         let p = self.store.load(pid)?;
         let mut fresh = self.new_pstate(&p)?;
         let mut st = self.video.st.lk();
@@ -501,7 +504,7 @@ impl Engine {
             let Some((_, seq, pid, i)) = best else { break };
             let ps = st.projects.get_mut(&pid).unwrap();
             let height = ps.idx.requests.iter().find(|r| r.seq == seq).and_then(|r| r.height);
-            let preferred = crate::source::pick_variant(&self.variants_of(&pid), height);
+            let preferred = crate::source::pick_variant(&ps.variants, height);
             let v = ps.choose_variant(i, preferred);
             let token = tokio_util::sync::CancellationToken::new();
             ps.fetching.insert(i, (v, token.clone()));
@@ -515,11 +518,6 @@ impl Engine {
                 eng.segment_done(&pid, i, r);
             });
         }
-    }
-
-    /// Renditions of a project (from the stored source info, no network).
-    fn variants_of(&self, pid: &str) -> Vec<crate::hls::m3u8::Variant> {
-        self.store.load(pid).ok().and_then(|p| p.source.map(|s| s.variants)).unwrap_or_default()
     }
 
     async fn playlist(&self, pid: &str, src: &crate::source::Source, v: usize) -> Result<Arc<MediaPlaylist>, ApiError> {

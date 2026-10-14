@@ -1057,15 +1057,12 @@ impl Engine {
             }
             eng.job_finished.notify_waiters();
             eng.record_outcome(&pid, &kind_s, &res).await;
-            let stems_job = kind_s == "stems.ensure";
             match res {
                 Ok(result) => eng.emit(Event::JobDone { job_id: jid, kind: kind_s, project_id: pid.clone(), result }),
                 Err(error) => eng.emit(Event::JobFailed { job_id: jid, kind: kind_s, project_id: pid.clone(), error }),
             }
-            if stems_job {
-                // separation queued by fetches that finished meanwhile
-                eng.after_stems_job(&pid);
-            }
+            // separation queued by fetches that finished while a job blocked it
+            eng.after_stems_job(&pid);
         });
         Ok(job_id)
     }
