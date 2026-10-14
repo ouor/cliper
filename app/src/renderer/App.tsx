@@ -7,6 +7,7 @@ import { applyTheme, ask, go, openSettings, toast, useApp } from "./state/app";
 import { applyChanged, loadProject, refreshList } from "./state/projects";
 import { markEngineLost, reconcileJobs, takeInterrupted, useJobs, wireJobs } from "./state/jobs";
 import { loadAllVideo, wireVideo } from "./state/video";
+import { wireAutoTopUp } from "./state/topup";
 import { addPendingRoot } from "./lib/locations";
 import { onNotification } from "./lib/rpc";
 import { comboFromEvent, keysFor } from "./lib/keys";
@@ -35,6 +36,7 @@ async function boot() {
   await takeInterrupted(); // once per app start (M3)
   wireJobs();
   wireVideo();
+  wireAutoTopUp();
   wireAddon();
   onNotification("project.changed", (p) => applyChanged(p.project));
 

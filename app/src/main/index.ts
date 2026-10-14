@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, promises as fsp, readFileSync, renameSync, write
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Engine } from "./engine";
-import { createMediaHandler, isInside, isProjectId } from "./media";
+import { createMediaHandler, isInside } from "./media";
 import { APP_ORIGIN, createAppHandler } from "./app-protocol";
 import { DEFAULT_SETTINGS, type AppSettings } from "../shared/settings";
 import type { CloseAction, DriveInfo, FolderCheck } from "../shared/bridge";
@@ -249,27 +249,6 @@ function folderCheck(path: string): FolderCheck {
   }
 }
 
-async function dirSize(dir: string): Promise<number> {
-  let total = 0;
-  let entries: import("node:fs").Dirent[];
-  try {
-    entries = await fsp.readdir(dir, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  for (const e of entries) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) total += await dirSize(p);
-    else {
-      try {
-        total += (await fsp.stat(p)).size;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return total;
-}
 
 // ── IPC: only from our own page, only what the UI needs ──
 
@@ -496,13 +475,6 @@ function registerIpc() {
     return out;
   });
   handle("fs:check", (_e, path: string) => folderCheck(path));
-  handle("fs:projectSize", async (_e, projectId: unknown) => {
-    const root = settings.projectsRoot;
-    if (!root || typeof projectId !== "string" || !isProjectId(projectId)) return { total: 0, clips: 0 };
-    const dir = join(root, projectId);
-    if (!isInside(root, dir)) return { total: 0, clips: 0 };
-    return { total: await dirSize(dir), clips: await dirSize(join(dir, "clips")) };
-  });
   handle("app:logDir", () => LOG_DIR);
 
   handle("app:notify", (_e, title: unknown, body: unknown) => {

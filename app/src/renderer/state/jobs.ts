@@ -13,14 +13,13 @@ import { getProject } from "./projects";
 import { toast, useApp } from "./app";
 import { projectTitle, songNumbers } from "@/lib/song";
 
-export type JobKind = "audio.fetch" | "detect.run" | "clips.fetch" | "stems.ensure" | "export.run";
+export type JobKind = "audio.fetch" | "detect.run" | "stems.ensure" | "export.run";
 type JobMethod = Extract<Method, JobKind>;
 
 export const KIND_LABEL: Record<string, string> = {
   "addon.install_cuda": "GPU 가속 구성요소 설치",
   "audio.fetch": "소리 받기",
   "detect.run": "곡 찾기",
-  "clips.fetch": "영상 받기 · 목소리 나누기",
   "stems.ensure": "목소리 나누기 · 멘트 찾기",
   "export.run": "내보내기",
 };
@@ -34,7 +33,6 @@ export const STAGE_LABEL: Record<string, string> = {
   "video.remux": "영상 정리 중",
   separate: "목소리와 반주 나누는 중",
   talk: "멘트 찾는 중",
-  "clips.fetch": "준비 중",
   "export.run": "내보내기 준비 중",
   "export.render": "소리 만드는 중",
   "export.encode": "영상 만드는 중",
@@ -83,13 +81,11 @@ export function noteKo(note?: Note | null): string | undefined {
   }
 }
 
-const CLIP_STAGE_WEIGHT: Record<string, [number, number]> = {
-  // [offset, weight] inside one clip
-  "clips.fetch": [0, 0.02],
-  "video.fetch": [0.02, 0.45],
-  "video.remux": [0.47, 0.05],
-  separate: [0.52, 0.4],
-  talk: [0.92, 0.08],
+const STEMS_STAGE_WEIGHT: Record<string, [number, number]> = {
+  // [offset, weight] inside one song (stems.ensure: separate, then find talk)
+  "video.fetch": [0, 0.3],
+  separate: [0.3, 0.6],
+  talk: [0.9, 0.1],
 };
 const EXPORT_STAGE_WEIGHT: Record<string, [number, number]> = {
   "export.run": [0, 0.02],
@@ -187,7 +183,7 @@ function upsert(id: string, patch: Partial<Job> & { kind?: string; projectId?: s
 function computeFraction(j: Job, pr: Progress): number | null {
   const stageFrac = pr.total > 0 ? Math.min(1, pr.done / pr.total) : null;
   if (j.kind === "audio.fetch" || j.kind === "detect.run") return stageFrac;
-  const table = j.kind === "clips.fetch" || j.kind === "stems.ensure" ? CLIP_STAGE_WEIGHT : j.kind === "export.run" ? EXPORT_STAGE_WEIGHT : null;
+  const table = j.kind === "stems.ensure" ? STEMS_STAGE_WEIGHT : j.kind === "export.run" ? EXPORT_STAGE_WEIGHT : null;
   const n = Math.max(1, pr.items_total ?? j.items.length);
   if (!table) return stageFrac;
   const [off, w] = table[pr.stage] ?? [0, 0];
@@ -242,7 +238,7 @@ function applyProgress(jobId: string, kind: string, projectId: string, pr: Progr
   const samples = fraction !== null ? [...j.samples.filter(([t]) => now - t < 20000), [now, fraction] as [number, number]] : j.samples;
   let eta: number | null = j.eta;
   const singleStage = kind === "audio.fetch" || kind === "detect.run" || (pr.items_total ?? items.length) <= 1;
-  if (singleStage && typeof pr.eta_sec === "number" && kind !== "clips.fetch" && kind !== "stems.ensure" && kind !== "export.run") {
+  if (singleStage && typeof pr.eta_sec === "number" && kind !== "stems.ensure" && kind !== "export.run") {
     // the engine's estimate covers the current stage = the whole job here
     eta = pr.eta_sec;
   } else if (fraction !== null && now - j.startedAt > 5000 && samples.length > 2) {
@@ -278,10 +274,6 @@ async function notifyDone(j: Job, ok: boolean) {
   const title = projectTitle(p) || "Cliper";
   const label = KIND_LABEL[j.kind] ?? j.kind;
   let body = ok ? `${label} 완료` : `${label} 실패 · ${j.error?.title ?? ""}`;
-  if (ok && j.kind === "clips.fetch" && p) {
-    const pending = p.songs.reduce((n, s) => n + s.mutes.filter((m) => !m.confirmed).length, 0);
-    body = `영상 ${j.items.length}곡 받기 완료${pending ? ` · 멘트 확인 ${pending}개 대기` : ""}`;
-  }
   if (ok && j.kind === "detect.run" && p) body = `곡 ${p.songs.filter((s) => s.enabled).length}개를 찾았어요`;
   if (ok && j.kind === "export.run") body = `${j.items.length}곡 내보내기 완료`;
   void window.cliper.notify(title.length > 60 ? title.slice(0, 58) + "…" : title, body);
@@ -309,8 +301,8 @@ export function wireJobs() {
     void forgetActive(p.job_id);
     void notifyDone(done, true);
     // new mute suggestions from newly separated parts (14.8): a short toast
-    if (p.kind === "stems.ensure" || p.kind === "clips.fetch") {
-      const r = (p.kind === "stems.ensure" ? p.result : (p.result as { stems?: unknown } | null)?.stems) as { suggestions?: number; suggestions_by_song?: Record<string, number> } | null | undefined;
+    if (p.kind === "stems.ensure") {
+      const r = p.result as { suggestions?: number; suggestions_by_song?: Record<string, number> } | null | undefined;
       const by = Object.entries(r?.suggestions_by_song ?? {}).filter(([, n]) => n > 0);
       if (by.length) {
         const proj = getProject(p.project_id);
@@ -381,7 +373,7 @@ function waitKey(projectId: string, kind: string) {
 
 /**
  * Start waiting requests of a project whose kind is not running any more. The engine also
- * blocks some kinds against each other (e.g. detect.run / clips.fetch while audio.fetch runs),
+ * blocks some kinds against each other (e.g. detect.run / stems.ensure while audio.fetch runs),
  * so this runs whenever any job of the project ends; a request that is still blocked simply
  * comes back BUSY and waits again.
  */
@@ -425,7 +417,7 @@ async function forgetActive(jobId: string) {
 }
 /** Jobs that were running when the app last closed. Called once in boot(); Home reads the store. */
 export async function takeInterrupted(): Promise<void> {
-  const left = ((await window.cliper.getState<ActiveRecord[]>("activeJobs")) ?? []).filter((r) => r && r.method);
+  const left = ((await window.cliper.getState<ActiveRecord[]>("activeJobs")) ?? []).filter((r) => r && r.method && (r.method as string) !== "clips.fetch");
   active = [];
   await window.cliper.setState("activeJobs", []);
   useJobs.setState({ interrupted: left });
@@ -507,8 +499,8 @@ export function songProgress(s: JobsStore, projectId: string): Map<string, { lab
   const p = getProject(projectId);
   if (!p) return out;
   for (const j of runningJobs(s, projectId)) {
-    if (j.kind === "clips.fetch" || j.kind === "stems.ensure") {
-      // items = song ids (clips.fetch); stems.ensure: the songs it was asked for
+    if (j.kind === "stems.ensure") {
+      // the songs it was asked for
       const ids = j.items.length ? j.items : ((j.request?.params as { song_ids?: string[] | null } | undefined)?.song_ids ?? []);
       const stageFrac = j.total > 0 ? j.done / j.total : null;
       for (const id of ids) {

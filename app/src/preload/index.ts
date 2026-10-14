@@ -32,7 +32,6 @@ const bridge: CliperBridge = {
 
   drives: () => ipcRenderer.invoke("fs:drives"),
   checkFolder: (path) => ipcRenderer.invoke("fs:check", path),
-  dirSize: (projectId) => ipcRenderer.invoke("fs:projectSize", projectId),
   logDir: () => ipcRenderer.invoke("app:logDir"),
 
   notify: (title, body) => ipcRenderer.invoke("app:notify", title, body),

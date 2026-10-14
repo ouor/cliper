@@ -29,7 +29,7 @@ export function jobProgressText(j: Job): string {
 }
 
 function itemsText(j: Job): string {
-  if (j.items.length <= 1 || (j.kind !== "clips.fetch" && j.kind !== "export.run")) return "";
+  if (j.items.length <= 1 || j.kind !== "export.run") return "";
   const done = Math.min(j.items.length, j.itemsDone.length);
   return `${done}/${j.items.length}곡`;
 }

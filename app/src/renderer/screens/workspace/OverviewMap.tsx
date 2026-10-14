@@ -701,7 +701,7 @@ function MapNotices({ p }: { p: Project }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, p.id]);
   const gone = vodGone(p);
-  if (!videoRange && !topupAsk && !marginAsk) return null;
+  if (!videoRange && !topupAsk.length && !marginAsk) return null;
   const fetchRange = async () => {
     if (!videoRange) return;
     const missing = est?.key === key ? est.sec : len(partsIn(vs, videoRange[0], videoRange[1]));
@@ -737,27 +737,27 @@ function MapNotices({ p }: { p: Project }) {
           </button>
         </div>
       )}
-      {topupAsk && (
-        <div className="map-notice">
+      {topupAsk.map((ask) => (
+        <div key={ask.songId} className="map-notice">
           <Download size={13} />
           <span className="grow">
-            곡 {String(nums.get(topupAsk.songId) ?? "").padStart(2, "0")}: 영상이 {fmtDurationKo(topupAsk.sec)}(약 {fmtBytes(topupAsk.bytes)}) 더 필요해요. 자동으로 받는 양(5분)을 넘어서 물어봐요.
+            곡 {String(nums.get(ask.songId) ?? "").padStart(2, "0")}: 영상이 {fmtDurationKo(ask.sec)}(약 {fmtBytes(ask.bytes)}) 더 필요해요. 자동으로 받는 양(5분)을 넘어서 물어봐요.
           </span>
           <button
             className="btn xs primary"
             onClick={() => {
-              useWs.setState({ topupAsk: null });
-              const s = p.songs.find((x) => x.id === topupAsk.songId);
-              void fetchVideo(p.id, { ranges: topupAsk.ranges, priority: "user", reason: "topup", process: !!s && (p.stems ?? []).some((sp) => sp.end > s.start && sp.start < s.end) });
+              useWs.setState((st) => ({ topupAsk: st.topupAsk.filter((x) => x.songId !== ask.songId) }));
+              const s = p.songs.find((x) => x.id === ask.songId);
+              void fetchVideo(p.id, { ranges: ask.ranges, priority: "user", reason: "topup", process: !!s && (p.stems ?? []).some((sp) => sp.end > s.start && sp.start < s.end) });
             }}
           >
             받기
           </button>
-          <button className="btn xs ghost" onClick={() => useWs.setState({ topupAsk: null })}>
+          <button className="btn xs ghost" onClick={() => useWs.setState((st) => ({ topupAsk: st.topupAsk.filter((x) => x.songId !== ask.songId) }))}>
             나중에
           </button>
         </div>
-      )}
+      ))}
       {marginAsk && (
         <div className="map-notice">
           <Download size={13} />

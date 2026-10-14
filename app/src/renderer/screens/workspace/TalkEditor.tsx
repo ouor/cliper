@@ -6,7 +6,7 @@ import type { Song } from "@ipc/generated/Song";
 import type { Mute } from "@ipc/generated/Mute";
 import { useWs } from "@/state/ws";
 import { ask, useApp } from "@/state/app";
-import { projectUi, setProjectUi, editSong } from "@/state/projects";
+import { editSong, markListened, onProjectReset } from "@/state/projects";
 import { runningJobs, songProgress, startJob, useJobs } from "@/state/jobs";
 import { useVideo } from "@/state/video";
 import { player, usePlayer, LISTEN_KEY, LISTEN_LABEL, type ListenMode } from "@/audio/player";
@@ -23,6 +23,10 @@ import { VideoPane } from "@/components/VideoPane";
 
 /** stems.ensure asked once per song and unseparated state (no loop when it can't separate) */
 const askedEnsure = new Set<string>();
+// another folder took this project id over (QA-5 / U-12): forget its keys
+onProjectReset((id) => {
+  for (const k of [...askedEnsure]) if (k.startsWith(id + "|")) askedEnsure.delete(k);
+});
 
 const MODE_TIP = [
   "방송 그대로 (기준)",
@@ -147,21 +151,31 @@ export function TalkEditor({ p }: { p: Project }) {
   const sv = s ? songVideo(p, vs, s) : null;
   const unsep = s ? unseparated(p, vs, lo, hi) : [];
   const unsepKey = unsep.map(([a, b]) => `${a.toFixed(1)}-${b.toFixed(1)}`).join(",");
-  const separating = runningJobs(jobs, p.id).some((j) => j.kind === "stems.ensure" || j.kind === "clips.fetch") || jobs.waiting.some((w) => w.projectId === p.id && w.method === "stems.ensure");
+  const separating = runningJobs(jobs, p.id).some((j) => j.kind === "stems.ensure") || jobs.waiting.some((w) => w.projectId === p.id && w.method === "stems.ensure");
   const muteOn = s ? s.mute_enabled : true;
   const [peaks, setPeaks] = useState<{ orig: Peaks | null; voc: Peaks | null }>({ orig: null, voc: null });
   const [notesOpen, setNotesOpen] = useState(false);
 
   // video arrived but isn't separated (new song, widened boundary, cleaned stems): separate it
-  // now — only the new parts (stems.ensure, 14.8); once per state so a failure doesn't loop
+  // now — only the new parts (stems.ensure, 14.8). Once per (unseparated parts, stem spans) so a
+  // cleanup always asks again (U-2); a failure is shown with [다시 나누기] instead of looping.
+  const spansKey = (p.stems ?? []).map((x) => x.id).join(",");
+  const ensureKey = s ? `${p.id}|${s.id}|${unsepKey}|${spansKey}` : "";
+  const lastEnsure = s
+    ? jobs.order.map((id) => jobs.jobs[id]).find((j) => j && j.projectId === p.id && j.kind === "stems.ensure" && ((j.request?.params as { song_ids?: string[] } | undefined)?.song_ids ?? []).includes(s.id))
+    : undefined;
+  const ensureFailed = lastEnsure?.status === "failed" ? lastEnsure : undefined;
+  const runEnsure = () => {
+    if (!s) return;
+    askedEnsure.add(ensureKey);
+    void startJob("stems.ensure", { id: p.id, song_ids: [s.id] }, { label: "목소리 나누기" });
+  };
   useEffect(() => {
     if (!s || !s.enabled || !unsep.length || separating) return;
-    const key = `${p.id}|${s.id}|${unsepKey}`;
-    if (askedEnsure.has(key)) return;
-    askedEnsure.add(key);
-    void startJob("stems.ensure", { id: p.id, song_ids: [s.id] }, { label: "목소리 나누기" });
+    if (askedEnsure.has(ensureKey)) return;
+    runEnsure();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p.id, s?.id, unsepKey, separating]);
+  }, [ensureKey, separating]);
 
   // pick a song with video when entering with nothing useful selected
   useEffect(() => {
@@ -215,7 +229,7 @@ export function TalkEditor({ p }: { p: Project }) {
     if (!s || !playing || mode !== 1) return;
     const t = setInterval(() => {
       listenAcc.current += 1;
-      if (listenAcc.current >= 3 && !projectUi(p.id).listened.includes(s.id)) setProjectUi(p.id, { listened: [...projectUi(p.id).listened, s.id] });
+      if (listenAcc.current >= 3 && !s.listened) markListened(p.id, s.id);
     }, 1000);
     return () => clearInterval(t);
   }, [s?.id, playing, mode, p.id, s]);
@@ -288,12 +302,25 @@ export function TalkEditor({ p }: { p: Project }) {
             <Progress value={sv?.fraction ?? null} />
             <div className="faint">영상을 받으면 목소리와 반주를 나누고 멘트를 찾아요. 다른 곡을 먼저 확인해도 돼요.</div>
           </div>
+        ) : unsep.length > 0 && ensureFailed ? (
+          <div className="te-progress">
+            <div className="row err">
+              <AlertTriangle size={15} /> 목소리와 반주를 나누지 못했어요 · {ensureFailed.error?.title ?? "알 수 없는 문제"}
+            </div>
+            {ensureFailed.error?.hint && <div className="faint">{ensureFailed.error.hint}</div>}
+            <button className="btn sm primary" onClick={runEnsure}>
+              다시 나누기
+            </button>
+          </div>
         ) : unsep.length > 0 ? (
           <div className="te-progress">
             <div className="row">
               <Download size={15} /> 목소리와 반주를 나눌 준비 중이에요
             </div>
             <Progress value={null} />
+            <button className="btn sm ghost" onClick={runEnsure} data-tip="오래 그대로면 눌러 주세요" data-tip-pos="top">
+              지금 나누기
+            </button>
           </div>
         ) : !s.enabled ? (
           <p className="muted">제외한 곡이에요. 곡 검수 화면에서 복원할 수 있어요.</p>

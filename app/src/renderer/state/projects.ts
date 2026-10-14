@@ -18,15 +18,21 @@ import { useWs } from "./ws";
 import { len, separatedIn } from "@/lib/video";
 import { loadVideo } from "./video";
 
-/** App-only per-project state (not part of the engine's project.json). */
+/** App-only per-project state, kept in userData by `Project.uid` (protocol 4). "Listened" and
+ *  "video wanted" live in the project itself now (`Song.listened`, `Song.video_wanted`). */
 export interface ProjectUi {
-  /** songs whose result was listened to in 멘트 다듬기 (export pre-check) */
-  listened: string[];
+  /** the project this belongs to (Project.uid) */
+  uid?: string;
   lastSongId?: string;
   firstExportHintShown?: boolean;
-  /** songs whose video the user asked for (곡 받기, 영상 맞추기, 내보내기 …): they "have video"
-   *  even before it arrives, so boundary edits top them up (14.4, QA-4) */
+}
+
+/** what older versions stored under `project:<id>` (imported once into the project) */
+interface LegacyUi {
+  listened?: string[];
   videoSongs?: string[];
+  lastSongId?: string;
+  firstExportHintShown?: boolean;
 }
 
 /** One undoable step: the touched songs before and after (null = absent). */
@@ -143,8 +149,9 @@ function display(pid: string) {
 function setEngine(p: Project) {
   const cur = engineState[p.id];
   // notifications and responses can arrive out of order; never go back in time — unless it is
-  // another project with the same id (opened from another folder, QA-5): then start over
-  if (cur && cur.created_at !== p.created_at) {
+  // another project with the same id (Project.uid differs): then start over. Copies of a folder
+  // share the uid; opening / dropping a location resets explicitly (replaceProject, QA-5)
+  if (cur && cur.uid !== p.uid) {
     resetProjectState(p.id);
   } else if (cur && cur.revision > p.revision) return;
   engineState[p.id] = p;
@@ -156,7 +163,19 @@ export function resetProjectState(id: string) {
   delete engineState[id];
   pendingOps[id] = [];
   aliases[id]?.clear();
-  useProjects.setState((s) => ({ history: { ...s.history, [id]: { undo: [], redo: [] } } }));
+  // everything else keyed by this id (U-12): UI state, video state, top-up watch, ensure keys
+  useProjects.setState((s) => {
+    const ui = { ...s.ui };
+    delete ui[id];
+    return { history: { ...s.history, [id]: { undo: [], redo: [] } }, ui };
+  });
+  for (const l of resetListeners) l(id);
+}
+const resetListeners = new Set<(id: string) => void>();
+/** Other stores keyed by project id forget it here (video state, top-ups, talk editor). */
+export function onProjectReset(cb: (id: string) => void): () => void {
+  resetListeners.add(cb);
+  return () => resetListeners.delete(cb);
 }
 
 /** Take this project as the engine's current state, whatever was cached for its id before. */
@@ -179,7 +198,7 @@ export async function loadProject(id: string): Promise<Project> {
   const p = await call("project.get", { id });
   setEngine(p);
   void loadVideo(id);
-  await loadUi(id);
+  await loadUi(useProjects.getState().projects[id] ?? p);
   return useProjects.getState().projects[id] ?? p;
 }
 
@@ -443,12 +462,40 @@ export async function updateProjectSettings(id: string, patch: Partial<Settings>
 }
 
 // ── app-side per-project state (persisted in userData/state.json) ──
-const EMPTY_UI: ProjectUi = { listened: [] };
+const EMPTY_UI: ProjectUi = {};
 
-async function loadUi(id: string) {
-  if (useProjects.getState().ui[id]) return;
-  const v = (await window.cliper.getState<ProjectUi>(`project:${id}`)) ?? EMPTY_UI;
-  useProjects.setState((s) => ({ ui: { ...s.ui, [id]: { ...EMPTY_UI, listened: v.listened ?? [], lastSongId: v.lastSongId, firstExportHintShown: v.firstExportHintShown, videoSongs: v.videoSongs ?? [] } } }));
+async function loadUi(p: Project) {
+  const id = p.id;
+  if (useProjects.getState().ui[id]?.uid === p.uid) return;
+  let v = await window.cliper.getState<ProjectUi>(`projectui:${p.uid}`);
+  if (!v) {
+    // one-time import of what older versions kept by id: lastSongId / hints stay app-side,
+    // listened / videoSongs move into the project (Song.listened / Song.video_wanted)
+    const old = await window.cliper.getState<LegacyUi>(`project:${id}`);
+    v = { uid: p.uid, lastSongId: old?.lastSongId, firstExportHintShown: old?.firstExportHintShown };
+    if (old) {
+      await window.cliper.setState(`projectui:${p.uid}`, v);
+      await window.cliper.setState(`project:${id}`, null);
+      void importLegacy(p, old);
+    }
+  }
+  useProjects.setState((s) => ({ ui: { ...s.ui, [id]: { ...EMPTY_UI, ...v, uid: p.uid } } }));
+}
+
+async function importLegacy(p: Project, old: LegacyUi) {
+  for (const s of p.songs) {
+    const patch: Partial<Song> = {};
+    if (old.listened?.includes(s.id) && !s.listened) patch.listened = true;
+    if (old.videoSongs?.includes(s.id) && !s.video_wanted) patch.video_wanted = true;
+    if (Object.keys(patch).length) await call("song.update", { id: p.id, song_id: s.id, patch }).catch(() => {});
+  }
+}
+
+/** "Listened in 결과" (export pre-check), written into the project (protocol 4). */
+export function markListened(pid: string, songId: string) {
+  const s = getProject(pid)?.songs.find((x) => x.id === songId);
+  if (!s || s.listened) return;
+  void call("song.update", { id: pid, song_id: songId, patch: { listened: true } }).then(setEngine).catch(() => {});
 }
 
 export function projectUi(id: string): ProjectUi {
@@ -458,7 +505,7 @@ export function projectUi(id: string): ProjectUi {
 export function setProjectUi(id: string, patch: Partial<ProjectUi>) {
   const next = { ...projectUi(id), ...patch };
   useProjects.setState((s) => ({ ui: { ...s.ui, [id]: next } }));
-  void window.cliper.setState(`project:${id}`, next);
+  if (next.uid) void window.cliper.setState(`projectui:${next.uid}`, next);
 }
 
 export function forgetProject(id: string) {

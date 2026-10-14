@@ -1,11 +1,11 @@
 // Workspace-level video controls (기획서 14.4, 14.6, 14.9, 14.10): the ⋯ project menu (margin,
 // storage, 📌), [영상 맞추기], the replay / cleaned-video banners, and the automatic behaviours
 // (boundary top-ups 3 s after the last edit, the selected song first, the background replay check).
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, Ban, Download, HardDrive, MoreHorizontal, Pin, PinOff, RefreshCw, Ruler, WifiOff } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import { call } from "@/lib/rpc";
-import { estimate, fetchVideo, len, marginOf, partsIn, prioritizeSong, songHasVideo, songVideo, vodGone } from "@/lib/video";
+import { estimate, fetchVideo, len, marginOf, partsIn, prioritizeSong, songHasVideo, songsToFit, vodGone } from "@/lib/video";
 import { fmtBytes, fmtDurationKo } from "@/lib/format";
 import { getProject, putProject, updateProjectSettings } from "@/state/projects";
 import { openSettings, toast, useApp } from "@/state/app";
@@ -60,7 +60,7 @@ export async function setProjectMargin(p: Project, v: number) {
     return;
   }
   const vs = videoOf(p.id);
-  const ids = p.songs.filter((s) => s.enabled && songHasVideo(p, vs, s) && len(partsIn(vs, s.start - v, s.end + v, ["none", "failed"])) > 0.5).map((s) => s.id);
+  const ids = p.songs.filter((s) => s.enabled && songHasVideo(vs, s) && len(partsIn(vs, s.start - v, s.end + v, ["none", "failed"])) > 0.5).map((s) => s.id);
   if (!ids.length || vodGone(p)) return;
   const est = await estimate(p.id, { song_ids: ids });
   if (est && est.missing_sec > 0.5) useWs.setState({ marginAsk: { songIds: ids, sec: est.missing_sec, bytes: est.estimated_bytes } });
@@ -123,8 +123,7 @@ export function ProjectMenu({ p }: { p: Project }) {
 /** [영상 맞추기 · 3곡 · 1분 20초 분량]: songs whose own range lacks video (14.4). */
 export function FitVideoButton({ p }: { p: Project }) {
   const vs = useVideo((s) => s.byProject[p.id]);
-  if (!vs || vs.local || vodGone(p)) return null;
-  const short = p.songs.filter((s) => s.enabled).map((s) => ({ s, sv: songVideo(p, vs, s) })).filter((x) => x.sv.touched && (x.sv.state === "partial" || x.sv.state === "failed"));
+  const short = songsToFit(p, vs).map((x) => ({ s: x.song, sv: x.sv }));
   if (!short.length) return null;
   const sec = short.reduce((n, x) => n + x.sv.missingSec, 0);
   return (
@@ -236,50 +235,6 @@ export function usePrioritizeSelected(projectId: string, selected: string | null
   }, [projectId, selected]);
 }
 
-/**
- * Boundary top-ups (14.4): when a song that already has video changes its range, 3 s after the
- * last edit fetch what is missing of song ± margin (≤ 5 min automatically, more → ask on the map).
- * Shrinking cancels unstarted top-ups that are now outside. Songs without video are left alone.
- */
-export function useAutoTopUp(p: Project | undefined) {
-  const prev = useRef<{ pid: string; ranges: Map<string, [number, number]> }>({ pid: "", ranges: new Map() });
-  const changed = useRef(new Map<string, [number, number]>());
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    if (!p) return;
-    if (prev.current.pid !== p.id) {
-      prev.current = { pid: p.id, ranges: new Map(p.songs.map((s) => [s.id, [s.start, s.end]])) };
-      changed.current.clear();
-      return;
-    }
-    const m = prev.current.ranges;
-    let any = false;
-    for (const s of p.songs) {
-      const r = m.get(s.id);
-      if (r && (Math.abs(r[0] - s.start) > 0.01 || Math.abs(r[1] - s.end) > 0.01)) {
-        if (!changed.current.has(s.id)) changed.current.set(s.id, r);
-        any = true;
-      }
-      m.set(s.id, [s.start, s.end]);
-    }
-    if (!any) return;
-    if (timer.current) clearTimeout(timer.current);
-    const pid = p.id;
-    timer.current = setTimeout(() => {
-      timer.current = null;
-      const items = [...changed.current.entries()];
-      changed.current.clear();
-      void topUp(pid, items);
-    }, 3000);
-  }, [p]);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
-}
-
 /** Fetch songs' video, separating afterwards only the songs that are already separated (QA-18). */
 export async function fetchSongsVideo(p: Project, ids: string[], o: { priority: "now" | "user" | "auto" | "batch"; reason: string; quiet?: boolean }) {
   const separated = (id: string) => {
@@ -290,44 +245,4 @@ export async function fetchSongsVideo(p: Project, ids: string[], o: { priority: 
   const without = ids.filter((id) => !separated(id));
   if (withStems.length) await fetchVideo(p.id, { song_ids: withStems, ...o, process: true, quiet: o.quiet || without.length > 0 });
   if (without.length) await fetchVideo(p.id, { song_ids: without, ...o, process: false });
-}
-
-async function topUp(pid: string, items: [string, [number, number]][]) {
-  const p = getProject(pid);
-  const vs = videoOf(pid);
-  if (!p || !vs || vs.local || vodGone(p)) return;
-  const m = marginOf(p);
-  const auto = useApp.getState().settings.autoTopUp;
-  for (const [id, was] of items) {
-    const s = p.songs.find((x) => x.id === id);
-    if (!s || !s.enabled) continue;
-    // only songs that had video before the edit — their own range, not a neighbour's margin (QA-4)
-    if (!songHasVideo(p, vs, { id, start: was[0], end: was[1] })) continue;
-    const a = s.start - m;
-    const b = s.end + m;
-    // shrank back: drop top-ups not started yet that reach past the new song ± margin (QA-8)
-    const lo = Math.min(was[0], s.start) - m;
-    const hi = Math.max(was[1], s.end) + m;
-    for (const r of vs.requests) {
-      if (r.reason !== "topup" || r.fetching_sec > 0) continue;
-      if (!r.ranges.some(([x, y]) => y > lo && x < hi)) continue;
-      if (r.ranges.some(([x, y]) => x < a - 0.5 || y > b + 0.5)) await call("video.cancel", { id: pid, request_id: r.id }).catch(() => {});
-    }
-    if (!auto) continue; // the [영상 맞추기] button covers it
-    // only the side(s) that grew, with that side's margin ("늘어난 부분 + 그쪽 여유", 14.4);
-    // shrinking alone never fetches
-    const grown: [number, number][] = [];
-    if (s.start < was[0] - 0.01) grown.push([Math.max(0, a), was[0]]);
-    if (s.end > was[1] + 0.01) grown.push([was[1], b]);
-    const need = grown.flatMap(([x, y]) => partsIn(vs, x, y, ["none", "failed"]));
-    const sec = len(need);
-    if (sec < 0.5) continue;
-    const separated = (p.stems ?? []).some((sp) => sp.end > s.start && sp.start < s.end);
-    if (sec <= 300) {
-      await fetchVideo(pid, { ranges: need, priority: "auto", reason: "topup", process: separated, quiet: true });
-    } else {
-      const est = await estimate(pid, { ranges: need });
-      if (est && est.missing_sec > 0.5) useWs.setState({ topupAsk: { songId: id, ranges: need, sec: est.missing_sec, bytes: est.estimated_bytes } });
-    }
-  }
 }

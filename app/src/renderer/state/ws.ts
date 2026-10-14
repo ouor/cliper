@@ -31,7 +31,7 @@ interface WsStore {
   /** Shift+drag on the map: a VOD range to fetch video for ([이 범위 영상 받기]) */
   videoRange: [number, number] | null;
   /** a boundary top-up over the automatic limit (5 min) waiting for [받기] / [나중에] (14.4) */
-  topupAsk: { songId: string; ranges: [number, number][]; sec: number; bytes: number } | null;
+  topupAsk: { songId: string; ranges: [number, number][]; sec: number; bytes: number }[];
   /** margin changed: offer to fill the larger margin for songs that already have video (14.6) */
   marginAsk: { songIds: string[]; sec: number; bytes: number } | null;
 }
@@ -56,7 +56,7 @@ export const useWs = create<WsStore>(() => ({
   setlistOpen: false,
   audition: false,
   videoRange: null,
-  topupAsk: null,
+  topupAsk: [],
   marginAsk: null,
 }));
 
@@ -75,8 +75,9 @@ export function resetWs(projectId: string) {
     detailView: null,
     pendingRange: null,
     videoRange: null,
-    topupAsk: null,
+    topupAsk: [],
     marginAsk: null,
+    audition: false,
     markStart: null,
     search: "",
     detectOpen: false,

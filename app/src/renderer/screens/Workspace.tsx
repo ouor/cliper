@@ -16,7 +16,7 @@ import { fmtEta, fmtShortDate, fmtTime } from "@/lib/format";
 import { platformLabel, projectTitle, reviewStatus, songNumbers, unconfirmedMutes } from "@/lib/song";
 import { fetchHere, songVideo, spanFor, vodGone } from "@/lib/video";
 import { useVideo, videoOf } from "@/state/video";
-import { FitVideoButton, ProjectMenu, ReplayBanner, useAutoTopUp, usePrioritizeSelected, useVodCheck } from "./workspace/VideoControls";
+import { FitVideoButton, ProjectMenu, ReplayBanner, usePrioritizeSelected, useVodCheck } from "./workspace/VideoControls";
 import { fmtDurationKo } from "@/lib/format";
 import { addSong, confirmSong, deleteMute, deleteSong, endSongHere, mergeSongs, nextUnreviewed, setEdge, splitMute, splitSong, toggleExclude, updateMute, addMute } from "@/lib/edits";
 import { fetchSongs, processAll, startAnalysis } from "@/lib/pipeline";
@@ -92,7 +92,6 @@ function NextBanner({ p }: { p: Project }) {
   const audioJob = runningJobs(jobs, p.id, "audio.fetch")[0];
   const detectJob = runningJobs(jobs, p.id, "detect.run")[0];
   const vs = useVideo((s) => s.byProject[p.id]);
-  const clipsJob = runningJobs(jobs, p.id, "clips.fetch")[0];
   const failed = lastFailed(jobs, p.id, ["audio.fetch", "detect.run"]);
   const songs = p.songs.filter((s) => s.enabled);
   const doubts = songs.filter((s) => reviewStatus(s) === "doubt");
@@ -210,10 +209,10 @@ function NextBanner({ p }: { p: Project }) {
         )}
         {reviewed.length > 0 && needVideo.length > 0 && (
           <>
-            <button className="btn sm subtle" onClick={() => void fetchSongs(p.id, needVideo.map((s) => s.id), `확인한 곡 영상 받기 ${needVideo.length}곡`)} disabled={!!clipsJob}>
+            <button className="btn sm subtle" onClick={() => void fetchSongs(p.id, needVideo.map((s) => s.id), `확인한 곡 영상 받기 ${needVideo.length}곡`)}>
               확인한 {needVideo.length}곡 먼저 받기
             </button>
-            <button className="btn sm ghost" onClick={() => void askOvernight(p)} disabled={!!clipsJob} data-tip="확인한 곡만 처리해요" data-tip-pos="left">
+            <button className="btn sm ghost" onClick={() => void askOvernight(p)} data-tip="확인한 곡만 처리해요" data-tip-pos="left">
               <Moon size={13} /> 밤새 처리
             </button>
           </>
@@ -242,10 +241,10 @@ function NextBanner({ p }: { p: Project }) {
       <div className="next-banner ok">
         <Check size={15} />
         <span className="grow">곡 {reviewed.length}개 확인 완료.</span>
-        <button className="btn sm primary" onClick={() => void fetchSongs(p.id, needVideo.map((s) => s.id), `확인한 곡 영상 받기 ${needVideo.length}곡`)} disabled={!!clipsJob}>
+        <button className="btn sm primary" onClick={() => void fetchSongs(p.id, needVideo.map((s) => s.id), `확인한 곡 영상 받기 ${needVideo.length}곡`)}>
           <Zap size={13} /> 확인한 곡 영상 받기
         </button>
-        <button className="btn sm subtle" onClick={() => void askOvernight(p)} disabled={!!clipsJob}>
+        <button className="btn sm subtle" onClick={() => void askOvernight(p)}>
           <Moon size={13} /> 밤새 전부 처리하기
         </button>
       </div>
@@ -333,7 +332,6 @@ export function Workspace({ projectId }: { projectId: string }) {
   }, [songCount, projectId]);
 
   // video: boundary top-ups, the selected song first, replay check in the background
-  useAutoTopUp(p);
   usePrioritizeSelected(projectId, ws.selected);
   useVodCheck(projectId, engineReady);
 
@@ -387,8 +385,8 @@ export function Workspace({ projectId }: { projectId: string }) {
       const combo = comboFromEvent(e);
       if (!combo) return;
       if (combo === "Escape") {
-        if (st.pendingRange || st.candidate !== null || st.multi.length || st.markStart !== null || st.videoRange || st.topupAsk) {
-          useWs.setState({ pendingRange: null, candidate: null, multi: [], markStart: null, videoRange: null, topupAsk: null });
+        if (st.pendingRange || st.candidate !== null || st.multi.length || st.markStart !== null || st.videoRange || st.topupAsk.length) {
+          useWs.setState({ pendingRange: null, candidate: null, multi: [], markStart: null, videoRange: null, topupAsk: [] });
           e.preventDefault();
         }
         return;

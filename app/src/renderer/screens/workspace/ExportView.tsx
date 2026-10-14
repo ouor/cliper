@@ -10,7 +10,7 @@ import { projectUi, setProjectUi, updateProjectSettings, useProjects } from "@/s
 import { runningJobs, songProgress, startJob, useJobs } from "@/state/jobs";
 import { useWs } from "@/state/ws";
 import { renderDescription, songNumbers, songTitle, unconfirmedMutes, vodLink } from "@/lib/song";
-import { estimate, len, partsIn, songVideo, type SongVideo } from "@/lib/video";
+import { estimate, exportDefaults, len, partsIn, songVideo, type SongVideo } from "@/lib/video";
 import { useVideo } from "@/state/video";
 import { editSong } from "@/state/projects";
 import type { Song } from "@ipc/generated/Song";
@@ -94,12 +94,22 @@ export function ExportView({ p }: { p: Project }) {
   const [refVideo, setRefVideo] = useState(false);
   const [alsoRender, setAlsoRender] = useState(false);
   const [tpl, setTpl] = useState(p.settings.filename_template);
-  // default: reviewed songs that have video (a song without any video can be checked: [받고 내보내기])
-  const [checked, setChecked] = useState<Set<string>>(() => new Set(songs.filter((s) => (s.reviewed || !songs.some((x) => x.reviewed)) && songVideo(p, useVideo.getState().byProject[p.id], s).touched).map((s) => s.id)));
+  // default: reviewed songs that have video (a song without any video can be checked: [받고 내보내기]);
+  // computed once the video state is known, not from whatever was loaded at mount (U-17)
+  const [checked, setChecked] = useState<Set<string>>(() => new Set(vs ? exportDefaults(p, vs) : []));
+  const defaulted = useRef(!!vs);
+  useEffect(() => {
+    if (defaulted.current || !vs) return;
+    defaulted.current = true;
+    setChecked(new Set(exportDefaults(p, vs)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vs]);
   const [free, setFree] = useState<number | null>(null);
   const [results, setResults] = useState<{ exports: { song_id: string; result: ExportResult }[]; stems: { song_id: string; stems: StemsResult }[]; failed?: { song_id: string; error: ApiError }[] } | null>(null);
   const [lastJob, setLastJob] = useState<string | null>(null);
-  const outDir = p.settings.output_dir || `${useApp.getState().engine.projectsRoot ?? ""}\\${p.id}\\exports`;
+  // the project's own folder (it may live outside the projects folder, U-3)
+  const projectDir = useProjects((s) => s.summaries.find((x) => x.id === p.id)?.dir) ?? `${useApp.getState().engine.projectsRoot ?? ""}\\${p.id}`;
+  const outDir = p.settings.output_dir || `${projectDir}\\exports`;
 
   useEffect(() => setTpl(p.settings.filename_template), [p.settings.filename_template]);
   useEffect(() => {
@@ -169,7 +179,7 @@ export function ExportView({ p }: { p: Project }) {
   const estBytes = preset === "audio" ? totalDur * (format === "wav" ? 384000 : format === "flac" ? 200000 : 40000) : preset === "editor" ? totalDur * 384000 * 4 + (alsoRender ? totalDur * mp4Bps : 0) : totalDur * mp4Bps;
   const estSec = preset === "fast" ? selected.length * 4 : preset === "audio" ? selected.length * 3 : preset === "editor" ? selected.length * 8 : totalDur * 0.15;
   const unconfSongs = selected.filter((s) => s.mute_enabled && unconfirmedMutes(s) > 0);
-  const notListened = selected.filter((s) => s.mute_enabled && s.mutes.some((m) => m.confirmed) && !ui.listened.includes(s.id));
+  const notListened = selected.filter((s) => s.mute_enabled && s.mutes.some((m) => m.confirmed) && !s.listened);
   const reexport = selected.filter((s) => s.export);
   const diskShort = free !== null && estBytes > free * 0.95;
 

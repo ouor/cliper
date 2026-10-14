@@ -5,7 +5,7 @@ import { create } from "zustand";
 import type { VideoState } from "@ipc/generated/VideoState";
 import { call, onNotification } from "@/lib/rpc";
 import { toast } from "./app";
-import { getProject } from "./projects";
+import { getProject, onProjectReset } from "./projects";
 import { fmtDurationKo } from "@/lib/format";
 
 interface VideoStore {
@@ -50,6 +50,15 @@ export function onRequestDone(cb: DoneListener): () => void {
 }
 
 export function wireVideo() {
+  // a different folder took this project id over (QA-5 / U-12): drop its coverage and reload
+  onProjectReset((id) => {
+    useVideo.setState((s) => {
+      const byProject = { ...s.byProject };
+      delete byProject[id];
+      return { byProject };
+    });
+    void loadVideo(id);
+  });
   onNotification("video.changed", (p) => put(p.video));
   onNotification("video.request_done", (p) => {
     for (const l of doneListeners) l(p);

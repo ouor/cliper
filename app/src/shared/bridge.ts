@@ -71,7 +71,6 @@ export interface CliperBridge {
 
   drives(): Promise<DriveInfo[]>;
   checkFolder(path: string): Promise<FolderCheck>;
-  dirSize(projectId: string): Promise<{ total: number; clips: number }>;
   logDir(): Promise<string>;
 
   notify(title: string, body: string): Promise<void>;
