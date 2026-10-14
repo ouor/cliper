@@ -2466,6 +2466,12 @@
 }
 .replay-banner {
   margin: 8px 12px 0;
+  /* one line of text next to a taller button: center the row so the space
+     above and below the text is even (the base banner aligns to the top) */
+  align-items: center;
+}
+.replay-banner > svg {
+  margin-top: 0;
 }
 .replay-note {
   display: flex;
