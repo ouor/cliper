@@ -1,10 +1,11 @@
 import { CudaAddonStatus } from "./CudaAddonCard";
 import { useEffect, useState } from "react";
-import { Cpu, HardDrive, Moon, ShieldCheck } from "lucide-react";
+import { Cpu, Download, HardDrive, Moon, Pause, ShieldCheck } from "lucide-react";
+import { useVideo } from "@/state/video";
 import { useApp } from "@/state/app";
 import { runningJobs, useJobs } from "@/state/jobs";
 import { usePlayer, LISTEN_LABEL } from "@/audio/player";
-import { fmtBytes, fmtEta } from "@/lib/format";
+import { fmtBytes, fmtDurationKo, fmtEta } from "@/lib/format";
 
 export function StatusBar() {
   const root = useApp((s) => s.settings.projectsRoot);
@@ -15,6 +16,8 @@ export function StatusBar() {
   const mode = usePlayer((s) => s.mode);
   const source = usePlayer((s) => s.source);
   const [free, setFree] = useState<number | null>(null);
+  const paused = useVideo((s) => s.paused);
+  const videoLeft = useVideo((s) => Object.values(s.byProject).reduce((n, v) => n + v.requests.reduce((m, r) => m + r.remaining_sec, 0), 0));
 
   useEffect(() => {
     if (!root) return;
@@ -60,6 +63,17 @@ export function StatusBar() {
       <CudaAddonStatus />
       {route.name === "workspace" && route.mode === "talk" && source === "stems" && (
         <span className={`sb-item listen-pill m${mode}`}>듣는 중: {LISTEN_LABEL[mode]}</span>
+      )}
+      {paused ? (
+        <button className="sb-item sb-paused" onClick={() => useApp.setState({ jobsOpen: true })} data-tip="작업 현황에서 다시 시작할 수 있어요" data-tip-pos="top">
+          <Pause size={13} /> 영상 받기 일시정지됨
+        </button>
+      ) : (
+        videoLeft > 0.05 && (
+          <span className="sb-item faint" data-tip="작업 현황(Ctrl+J)에서 자세히 볼 수 있어요" data-tip-pos="top">
+            <Download size={13} /> 영상 받는 중 · 남은 {fmtDurationKo(videoLeft)}
+          </span>
+        )
       )}
       {busy && keepAwake && (
         <span className="sb-item faint" data-tip="작업이 끝나면 꺼져요" data-tip-pos="top">

@@ -1,9 +1,10 @@
 // S7 설정.
 import { useEffect, useState, type ReactNode } from "react";
-import { Cookie, Copy, Cpu, Download, Film, FolderOpen, Info, Keyboard, Mic2, RotateCcw, Scissors, Search, Settings2, Trash2, Upload, X } from "lucide-react";
+import { Cookie, Copy, Cpu, Download, Film, FolderOpen, HardDrive, Info, Keyboard, Mic2, RotateCcw, Scissors, Search, Settings2, Upload, X } from "lucide-react";
+import { StorageTab } from "./Storage";
+import { MarginPicker } from "./workspace/VideoControls";
 import { useApp, updateSettings, toast, ask, applyTheme, type SettingsTab } from "@/state/app";
-import { useProjects, getProject } from "@/state/projects";
-import { fmtBytes } from "@/lib/format";
+import { getProject } from "@/state/projects";
 import { KEY_ACTIONS, comboFromEvent, keysFor, prettyKey, SCOPE_LABEL, type KeyScope } from "@/lib/keys";
 import { DESC_VARS, SENSITIVITY_LABEL, renderDescription } from "@/lib/song";
 import { applyDefaultSettings } from "@/lib/pipeline";
@@ -19,6 +20,7 @@ const TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
   { id: "general", label: "일반", icon: <Settings2 size={15} /> },
   { id: "detect", label: "곡 찾기", icon: <Search size={15} /> },
   { id: "video", label: "영상 받기", icon: <Download size={15} /> },
+  { id: "storage", label: "저장 공간", icon: <HardDrive size={15} /> },
   { id: "talk", label: "멘트 지우기", icon: <Scissors size={15} /> },
   { id: "export", label: "내보내기", icon: <Upload size={15} /> },
   { id: "keys", label: "단축키", icon: <Keyboard size={15} /> },
@@ -140,48 +142,6 @@ function KeysTab() {
         </section>
       ))}
     </>
-  );
-}
-
-function CacheSection() {
-  const summaries = useProjects((s) => s.summaries);
-  const [sizes, setSizes] = useState<Record<string, { total: number; clips: number }>>({});
-  useEffect(() => {
-    for (const s of summaries.slice(0, 30)) void window.cliper.dirSize(s.id).then((r) => setSizes((x) => ({ ...x, [s.id]: r })));
-  }, [summaries]);
-  const clearClips = async (id: string, title: string) => {
-    const r = await ask({
-      title: "받은 영상을 지울까요?",
-      body: [title, "곡 목록, 편집 기록, 내보낸 파일은 그대로예요. 다시 작업하려면 영상을 다시 받아야 해요."],
-      icon: "warn",
-      buttons: [
-        { id: "cancel", label: "취소", kind: "ghost" },
-        { id: "ok", label: "받은 영상 지우기", kind: "danger" },
-      ],
-    });
-    if (r !== "ok") return;
-    try {
-      const r = await call("project.drop_media", { id });
-      setSizes((x) => ({ ...x, [id]: { total: x[id].total - x[id].clips, clips: 0 } }));
-      toast(`받은 영상을 지웠어요 (${fmtBytes(r.freed_bytes)} 확보). 곡 목록과 편집은 그대로예요.`, { kind: "ok" });
-    } catch (e) {
-      toast(friendly(e).title, { kind: "error" });
-    }
-  };
-  return (
-    <div className="cache-list">
-      {summaries.length === 0 && <div className="faint">작업이 없어요.</div>}
-      {summaries.slice(0, 30).map((s) => (
-        <div key={s.id} className="cache-row">
-          <span className="grow ellipsis">{s.title || s.id}</span>
-          <span className="faint mono">{sizes[s.id] ? fmtBytes(sizes[s.id].total) : "…"}</span>
-          <span className="faint mono">영상 {sizes[s.id] ? fmtBytes(sizes[s.id].clips) : "…"}</span>
-          <button className="btn xs ghost" disabled={!sizes[s.id]?.clips} onClick={() => void clearClips(s.id, s.title || s.id)}>
-            <Trash2 size={12} /> 받은 영상만 지우기
-          </button>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -356,8 +316,11 @@ export function SettingsScreen() {
                     ))}
                   </select>
                 </Row>
-                <Row label="앞뒤 여유 시간" hint="곡 앞뒤로 더 받아 두는 영상이에요. 길수록 경계를 넓게 고칠 수 있지만 용량이 늘어요.">
-                  <Num value={st.marginSec} onChange={(v) => set({ marginSec: v })} min={0} max={300} step={5} unit="초" />
+                <Row label="앞뒤 여유" hint="곡 앞뒤로 미리 받아 두는 영상이에요. 늘리면 곡을 넓힐 때 기다리지 않아요. 곡 하나에 1분 늘릴 때마다 1080p 기준 약 60MB를 더 써요. 새 작업의 기본값이고, 작업마다 작업공간 ⋯ 메뉴에서 바꿀 수 있어요.">
+                  <MarginPicker value={st.marginSec} onChange={(v) => set({ marginSec: v })} />
+                </Row>
+                <Row label="모자란 영상 자동으로 받기" hint="영상을 받은 곡의 경계를 넓히면, 마지막으로 고친 뒤 3초 뒤에 모자란 부분만 받아요(한 번에 5분까지). 끄면 작업공간 위 [영상 맞추기]로 한꺼번에 받아요.">
+                  <Toggle checked={st.autoTopUp} onChange={(v) => set({ autoTopUp: v })} />
                 </Row>
                 <Row label="확인한 곡만 받기" hint="끄면 '밤새 전부 처리하기'가 확인하지 않은 곡도 받아요.">
                   <Toggle checked={st.onlyReviewedFetch} onChange={(v) => set({ onlyReviewedFetch: v })} />
@@ -452,6 +415,7 @@ export function SettingsScreen() {
               </>
             )}
             {tab === "keys" && <KeysTab />}
+            {tab === "storage" && <StorageTab />}
             {tab === "advanced" && (
               <>
                 <Row label="로그인 쿠키" hint="구독자 전용이나 비공개 다시보기를 받을 때만 필요해요.">
@@ -496,13 +460,11 @@ export function SettingsScreen() {
                       ))}
                   </select>
                 </Row>
-                <div className="set-row col-row">
-                  <div className="set-label">
-                    <div>저장 공간 정리</div>
-                    <div className="hint">받은 영상만 지우면 곡 목록과 편집 기록은 남아요.</div>
-                  </div>
-                  <CacheSection />
-                </div>
+                <Row label="저장 공간 정리" hint="받은 영상과 나눈 소리를 단계별로 정리해요.">
+                  <button className="btn sm subtle" onClick={() => useApp.setState({ settingsTab: "storage" })}>
+                    <HardDrive size={13} /> 저장 공간 열기
+                  </button>
+                </Row>
                 <Row label="로그와 진단">
                   <span className="row">
                     <button className="btn sm subtle" onClick={() => void window.cliper.logDir().then((d) => window.cliper.openPath(d))}>

@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { Ban, CheckCircle2, Clock, Loader2, Moon, RotateCw, Trash2, X, XCircle } from "lucide-react";
+import { Ban, CheckCircle2, Clock, Download, Loader2, Moon, Pause, Play, RotateCw, Trash2, X, XCircle } from "lucide-react";
+import { setPaused, useVideo } from "@/state/video";
 import { useApp, go, openSettings } from "@/state/app";
 import { cancelJob, cancelWaiting, clearFinished, dismissJob, KIND_LABEL, noteKo, retryJob, STAGE_LABEL, useJobs, type Job } from "@/state/jobs";
 import { useProjects } from "@/state/projects";
 import { Progress } from "./common";
 import { fmtDurationKo, fmtEta } from "@/lib/format";
 import { call } from "@/lib/rpc";
-import { projectTitle } from "@/lib/song";
+import { projectTitle, songNumbers } from "@/lib/song";
 
 function useNow(ms = 1000) {
   const [, set] = useState(0);
@@ -30,7 +31,7 @@ export function jobProgressText(j: Job): string {
 function itemsText(j: Job): string {
   if (j.items.length <= 1 || (j.kind !== "clips.fetch" && j.kind !== "export.run")) return "";
   const done = Math.min(j.items.length, j.itemsDone.length);
-  return `${done}/${j.items.length}${j.kind === "clips.fetch" ? "개 구간" : "곡"}`;
+  return `${done}/${j.items.length}곡`;
 }
 
 function JobRow({ j }: { j: Job }) {
@@ -101,6 +102,8 @@ export function JobsPanel() {
   const groups = new Map<string, Job[]>();
   for (const j of jobs) groups.set(j.projectId, [...(groups.get(j.projectId) ?? []), j]);
   for (const w of s.waiting) if (!groups.has(w.projectId)) groups.set(w.projectId, []);
+  const videos = useVideo((x) => x.byProject);
+  for (const [pid, v] of Object.entries(videos)) if (!groups.has(pid) && (v.requests.some((r) => r.remaining_sec > 0.05) || v.failed_sec > 0.05)) groups.set(pid, []);
   const titleOf = (id: string) => projectTitle(projects[id]) || summaries.find((x) => x.id === id)?.title || id;
   const queue = s.queue;
 
@@ -118,6 +121,7 @@ export function JobsPanel() {
           <Moon size={15} /> 절전 방지 켜짐 · 작업이 끝나면 꺼져요
         </div>
       )}
+      <VideoPauseBar />
       <div className="jobs-body">
         {groups.size === 0 && queue.length === 0 && <div className="jobs-empty">진행 중인 작업이 없어요.</div>}
         {[...groups.entries()].map(([pid, list]) => (
@@ -140,6 +144,7 @@ export function JobsPanel() {
                   <div className="job-sub faint">대기 · 앞 작업이 끝나면 시작해요</div>
                 </div>
               ))}
+            <VideoRow pid={pid} />
             {list.map((j) => (
               <JobRow key={j.id} j={j} />
             ))}
@@ -181,5 +186,117 @@ export function JobsPanel() {
         </button>
       </footer>
     </aside>
+  );
+}
+
+const REASON_LABEL: Record<string, string> = {
+  song: "곡 영상",
+  here: "여기 영상 (앞뒤 1분)",
+  range: "고른 범위",
+  topup: "넓힌 경계",
+  fit: "영상 맞추기",
+  margin: "늘린 앞뒤 여유",
+  export: "내보내기에 필요한 영상",
+  batch: "밤새 처리",
+  user: "영상 받기",
+};
+
+/** One project's video downloads (14.7): remaining amount, ETA, requests, failures. */
+function VideoRow({ pid }: { pid: string }) {
+  const vs = useVideo((x) => x.byProject[pid]);
+  const p = useProjects((x) => x.projects[pid]);
+  const [open, setOpen] = useState(false);
+  if (!vs) return null;
+  const reqs = vs.requests.filter((r) => r.remaining_sec > 0.05 || r.failed_sec > 0.05);
+  const remaining = reqs.reduce((n, r) => n + r.remaining_sec, 0);
+  const total = reqs.reduce((n, r) => n + r.total_sec, 0);
+  const have = reqs.reduce((n, r) => n + r.have_sec, 0);
+  if (!reqs.length && vs.failed_sec < 0.05) return null;
+  const nums = p ? songNumbers(p) : new Map<string, number>();
+  const songsText = (ids: string[]) => ids.map((id) => nums.get(id)).filter((n): n is number => !!n).map((n) => String(n).padStart(2, "0")).join(", ");
+  return (
+    <div className={`job-row ${remaining > 0 ? "running" : "failed"}`}>
+      <div className="job-head">
+        {remaining > 0 ? vs.paused ? <Pause size={15} color="var(--text-3)" /> : <Loader2 size={15} className="spin" /> : <XCircle size={15} color="var(--danger)" />}
+        <span className="job-title">영상 받기</span>
+        <span className="faint job-stage">{reqs.length > 1 ? `요청 ${reqs.length}개` : reqs[0] ? REASON_LABEL[reqs[0].reason] ?? "" : ""}</span>
+        <span className="spacer" />
+        {reqs.length > 0 && (
+          <button className="btn xs ghost" onClick={() => setOpen(!open)}>
+            {open ? "접기" : "자세히"}
+          </button>
+        )}
+        {remaining > 0 && (
+          <button className="btn xs ghost" onClick={() => void call("video.cancel", { id: pid }).catch(() => {})} data-tip="아직 받지 않은 부분만 취소해요. 받은 영상은 남아요" data-tip-pos="left">
+            취소
+          </button>
+        )}
+      </div>
+      {remaining > 0 && <Progress value={total > 0 ? have / total : null} />}
+      <div className="job-sub">
+        {remaining > 0 ? `남은 분량 ${fmtDurationKo(remaining)}${vs.paused ? " · 일시정지됨" : vs.eta_sec ? ` · ${fmtEta(vs.eta_sec)}` : " · 계산 중…"}` : ""}
+      </div>
+      {vs.failed_sec > 0.05 && (
+        <div className="job-fail">
+          <div className="row">
+            <span className="err grow">받지 못한 영상 {fmtDurationKo(vs.failed_sec)}{vs.ranges.find((r) => r.state === "failed")?.code === "NETWORK" ? " · 연결이 끊겼어요" : ""}</span>
+            {p?.vod?.status !== "gone" && (
+              <button className="btn xs subtle" onClick={() => void call("video.retry", { id: pid }).catch(() => {})}>
+                <RotateCw size={12} /> 다시 시도
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {open && (
+        <div className="video-reqs">
+          {reqs.map((r) => (
+            <div key={r.id} className="video-req">
+              <span className="grow ellipsis">
+                {REASON_LABEL[r.reason] ?? r.reason}
+                {r.song_ids.length ? ` · 곡 ${songsText(r.song_ids)}` : ""}
+                <span className="faint"> · {r.remaining_sec > 0.05 ? `남은 ${fmtDurationKo(r.remaining_sec)}` : "받지 못한 부분 있음"}</span>
+              </span>
+              {r.priority === "now" ? (
+                <span className="tag outline">먼저</span>
+              ) : (
+                r.remaining_sec > 0.05 && (
+                  <button className="btn xs ghost" onClick={() => void call("video.prioritize", { id: pid, request_id: r.id, priority: "now" }).catch(() => {})}>
+                    먼저 받기
+                  </button>
+                )
+              )}
+              <button className="btn icon xs ghost" onClick={() => void call("video.cancel", { id: pid, request_id: r.id }).catch(() => {})} aria-label="이 요청 취소">
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** [영상 받기 모두 일시정지] / [다시 시작] — app-wide (14.7). */
+function VideoPauseBar() {
+  const paused = useVideo((x) => x.paused);
+  const active = useVideo((x) => Object.values(x.byProject).some((v) => v.requests.some((r) => r.remaining_sec > 0.05)));
+  if (!paused && !active) return null;
+  return (
+    <div className={`banner ${paused ? "warn" : "info"} jobs-sleep`}>
+      {paused ? <Pause size={15} /> : <Download size={15} />}
+      <span className="grow">{paused ? "영상 받기 일시정지됨 · 편집과 재생은 그대로 돼요" : "영상을 받는 중이에요 · 앱 전체 동시 4개"}</span>
+      <button className="btn xs subtle" onClick={() => void setPaused(!paused)}>
+        {paused ? (
+          <>
+            <Play size={12} /> 다시 시작
+          </>
+        ) : (
+          <>
+            <Pause size={12} /> 모두 일시정지
+          </>
+        )}
+      </button>
+    </div>
   );
 }

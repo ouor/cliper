@@ -1,6 +1,8 @@
 // S1 홈 + S2 방송 확인 카드.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Info, Clipboard, Film, FolderOpen, History, Layers, ListPlus, Mic2, MoreHorizontal, Play, Search, Settings2, Trash2, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Info, Clipboard, Film, FolderOpen, HardDrive, History, Layers, ListPlus, Mic2, MoreHorizontal, Pin, PinOff, Play, Search, Settings2, Trash2, Users, X } from "lucide-react";
+import type { StorageUsage } from "@ipc/generated/StorageUsage";
+import { storageAll } from "@/lib/video";
 import type { Project } from "@ipc/generated/Project";
 import type { ProjectSummary } from "@ipc/generated/ProjectSummary";
 import type { AudioTrack } from "@ipc/generated/AudioTrack";
@@ -189,8 +191,19 @@ function ContinueCard({ s }: { s: ProjectSummary }) {
   );
 }
 
-function ProjectRow({ s }: { s: ProjectSummary }) {
+function ProjectRow({ s, usage, onChanged }: { s: ProjectSummary; usage?: StorageUsage; onChanged: () => void }) {
   const [menu, setMenu] = useState(false);
+  const togglePin = async () => {
+    setMenu(false);
+    try {
+      putProject(await call("project.set_pinned", { id: s.id, pinned: !s.pinned }));
+      await refreshList();
+      onChanged();
+      toast(s.pinned ? "보관을 풀었어요." : "보관했어요. 정리 제안과 일괄 정리에서 빠져요.", { kind: "ok" });
+    } catch (e) {
+      toast(friendly(e).title, { kind: "error" });
+    }
+  };
   const status = !s.has_detection ? (s.has_audio ? "곡 찾기 전" : "소리 받기 전") : s.songs === 0 ? "곡 없음" : s.exported >= s.songs ? "완료" : s.exported > 0 ? `${s.exported}곡 내보냄` : s.unreviewed ? `확인 전 ${s.unreviewed}` : s.unconfirmed_mutes ? `멘트 확인 ${s.unconfirmed_mutes}` : "검수 중";
   const err = s.last_error ? friendly({ code: s.last_error.code, message: s.last_error.message }) : null;
   const remove = async () => {
@@ -217,7 +230,10 @@ function ProjectRow({ s }: { s: ProjectSummary }) {
     <div className="proj-row" role="button" tabIndex={0} onClick={() => go({ name: "workspace", projectId: s.id, mode: "review" })} onKeyDown={(e) => e.key === "Enter" && go({ name: "workspace", projectId: s.id, mode: "review" })}>
       <Thumb url={s.thumbnail} platform={s.platform} />
       <div className="grow">
-        <div className="pr-title ellipsis">{s.title || s.id}</div>
+        <div className="pr-title ellipsis">
+          {s.pinned && <Pin size={12} className="pr-pin" aria-label="보관함" />}
+          {s.title || s.id}
+        </div>
         <div className="pr-meta">
           {s.channel && <span>{s.channel}</span>}
           <span>{platformLabel(s.platform)}</span>
@@ -230,7 +246,17 @@ function ProjectRow({ s }: { s: ProjectSummary }) {
           <AlertTriangle size={10} /> 실패
         </span>
       )}
+      {s.vod?.status === "gone" && (
+        <span className="tag doubt" data-tip="다시보기를 더 이상 열 수 없어요. 받아 둔 영상 안에서는 작업할 수 있어요." data-tip-pos="left">
+          다시보기 없음
+        </span>
+      )}
       <span className={`tag ${status === "완료" ? "ok" : status.endsWith("전") ? "" : "accent"}`}>{status}</span>
+      {usage && (
+        <span className="faint mono pr-size" data-tip={`소리 ${fmtBytes(usage.audio)} · 영상 ${fmtBytes(usage.video)} · 나눈 소리 ${fmtBytes(usage.stems)}`} data-tip-pos="left">
+          {fmtBytes(usage.total)}
+        </span>
+      )}
       <span className="faint pr-date">{fmtRelative(s.updated_at)}</span>
       <div className="pr-menu" onClick={(e) => e.stopPropagation()}>
         <button className="btn ghost icon sm" onClick={() => setMenu(!menu)} aria-label="더 보기">
@@ -238,6 +264,18 @@ function ProjectRow({ s }: { s: ProjectSummary }) {
         </button>
         {menu && (
           <div className="menu" onMouseLeave={() => setMenu(false)}>
+            <button onClick={() => void togglePin()}>
+              {s.pinned ? <PinOff size={14} /> : <Pin size={14} />} {s.pinned ? "보관 풀기" : "📌 보관하기"}
+            </button>
+            <button
+              onClick={() => {
+                setMenu(false);
+                useApp.setState({ storageFocus: { ids: s.pinned ? [] : [s.id], level: null } });
+                openSettings("storage");
+              }}
+            >
+              <HardDrive size={14} /> 저장 공간 · 정리
+            </button>
             <button onClick={() => void remove()}>
               <Trash2 size={14} /> 작업 삭제
             </button>
@@ -250,6 +288,14 @@ function ProjectRow({ s }: { s: ProjectSummary }) {
 
 export function Home() {
   const summaries = useProjects((s) => s.summaries);
+  // disk use per project (row sizes, the cleanup card)
+  const [usage, setUsage] = useState<{ byId: Map<string, StorageUsage>; free: number } | null>(null);
+  const loadUsage = () => void storageAll().then((r) => r && setUsage({ byId: new Map(r.projects.map((u) => [u.project_id, u])), free: r.free }));
+  const engineUp = useApp((s) => s.engine.state === "ready");
+  useEffect(() => {
+    if (engineUp) loadUsage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engineUp, summaries.length]);
   const listLoaded = useProjects((s) => s.listLoaded);
   const engineReady = useApp((s) => s.engine.state === "ready");
   const queue = useJobs((s) => s.queue);
@@ -564,6 +610,8 @@ export function Home() {
             </div>
           )}
 
+          {usage && <CleanupCard summaries={summaries} usage={usage} />}
+
           {continueProjects.length > 0 && (
             <section className="home-section">
               <div className="section-title">이어서 할 작업</div>
@@ -636,11 +684,11 @@ export function Home() {
                       {ch} <span className="faint">{list.length}</span>
                     </div>
                     {list.map((s) => (
-                      <ProjectRow key={s.id} s={s} />
+                      <ProjectRow key={s.id} s={s} usage={usage?.byId.get(s.id)} onChanged={loadUsage} />
                     ))}
                   </div>
                 ))
-              : filtered.map((s) => <ProjectRow key={s.id} s={s} />)}
+              : filtered.map((s) => <ProjectRow key={s.id} s={s} usage={usage?.byId.get(s.id)} onChanged={loadUsage} />)}
           </section>
           <div className="home-foot faint">
             <Play size={12} /> 처음이라면 <kbd>?</kbd>로 단축키를 확인해 보세요 · 기본 화질 {settings.videoHeight ? `${settings.videoHeight}p` : "최고"} · 앞뒤 여유 {settings.marginSec}초
@@ -658,3 +706,54 @@ export function Home() {
   );
 }
 
+
+const DAY = 86400 * 1000;
+
+/**
+ * 정리 제안 카드 (14.9, Q-S5): drive under 20 GB free, or unpinned projects untouched for 14+ days
+ * holding over 10 GB of video. Only suggests: [살펴보기] opens 저장 공간 with them selected.
+ * [다음에] hides it for 7 days. Projects whose replay is gone are never preselected.
+ */
+function CleanupCard({ summaries, usage }: { summaries: ProjectSummary[]; usage: { byId: Map<string, StorageUsage>; free: number } }) {
+  const [snoozed, setSnoozed] = useState<boolean | null>(null);
+  useEffect(() => {
+    void window.cliper.getState<number>("cleanupSnoozeUntil").then((t) => setSnoozed(!!t && t > Date.now()));
+  }, []);
+  if (snoozed !== false) return null;
+  const old = summaries.filter((s) => {
+    const u = usage.byId.get(s.id);
+    return u && !u.pinned && s.vod?.status !== "gone" && Date.now() - new Date(u.updated_at).getTime() > 14 * DAY && u.video + u.stems > 0;
+  });
+  const oldBytes = old.reduce((n, s) => n + (usage.byId.get(s.id)!.video + usage.byId.get(s.id)!.stems), 0);
+  const lowDisk = usage.free < 20e9;
+  if (!(oldBytes > 10e9 || (lowDisk && old.length > 0))) return null;
+  return (
+    <div className="banner info cleanup-card">
+      <HardDrive size={15} />
+      <span className="grow">
+        {lowDisk ? `작업 폴더 드라이브의 남은 공간이 ${fmtBytes(usage.free)}예요. ` : ""}
+        2주 넘게 손대지 않은 작업 {old.length}개가 영상 {fmtBytes(oldBytes)}를 쓰고 있어요. 곡 목록과 경계, 멘트 구간은 정리해도 남아요.
+      </span>
+      <div className="actions">
+        <button
+          className="btn sm ghost"
+          onClick={() => {
+            void window.cliper.setState("cleanupSnoozeUntil", Date.now() + 7 * DAY);
+            setSnoozed(true);
+          }}
+        >
+          다음에
+        </button>
+        <button
+          className="btn sm subtle"
+          onClick={() => {
+            useApp.setState({ storageFocus: { ids: old.map((s) => s.id), level: "video" } });
+            openSettings("storage");
+          }}
+        >
+          살펴보기
+        </button>
+      </div>
+    </div>
+  );
+}

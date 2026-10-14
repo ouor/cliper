@@ -2455,3 +2455,137 @@
 .dp-video {
   margin-top: 4px;
 }
+.video-reqs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  padding-left: 22px;
+}
+.video-req {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+}
+.sb-paused {
+  border: 0;
+  background: var(--doubt-soft);
+  color: var(--doubt);
+  border-radius: var(--r-full);
+  padding: 1px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+/* 저장 공간 (14.9) */
+.storage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.st-root {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+.st-total {
+  font-size: var(--fs-xs);
+}
+.st-table {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.st-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 64px 64px 72px 72px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  border-top: 1px solid var(--line-1);
+}
+.st-row > span:nth-child(n + 3) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.st-headrow {
+  border-top: 0;
+  background: var(--bg-2);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.st-row.sel {
+  background: var(--accent-soft);
+}
+.st-row.pinned .st-name {
+  opacity: 0.85;
+}
+.st-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+}
+.st-name .grow {
+  min-width: 0;
+}
+.st-unused {
+  flex-basis: 100%;
+  padding-left: 26px;
+  font-size: var(--fs-2xs);
+}
+.st-tag {
+  margin-left: 6px;
+}
+.st-pin.on {
+  color: var(--accent);
+}
+.st-empty {
+  padding: 12px;
+}
+.st-go {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+.st-explain {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.st-explain b {
+  color: var(--text-1);
+  margin-right: 4px;
+}
+.st-explain .err {
+  color: var(--danger);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pr-pin {
+  color: var(--accent);
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.pr-size {
+  min-width: 52px;
+  text-align: right;
+  font-size: var(--fs-xs);
+}
+.cleanup-card {
+  margin-bottom: 8px;
+}
+.st-pin {
+  color: var(--text-4);
+}
