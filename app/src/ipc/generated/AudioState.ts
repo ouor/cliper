@@ -10,4 +10,8 @@ file: string, variant: number, duration: number, index: SegIndex, fetched_bytes:
  * the audio file was deleted by cleanup (level `audio`); fetch it again to
  * listen / align. The index is kept (it places the video segments).
  */
-dropped: boolean, };
+dropped: boolean, 
+/**
+ * local recordings: the audio track copied (None = remote / older projects)
+ */
+track: number | null, };

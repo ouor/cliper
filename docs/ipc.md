@@ -305,7 +305,13 @@ including the previous ones' effect only where stated:
 | `unused` | video no **enabled** song's `[start − margin, end + margin]` touches (excluded songs don't count; an adopted clip is deleted only if no song touches it) + the caches (views, audio windows) — i.e. `unused_video + cache` | everything else |
 | `stems` | separated audio (all spans) + view cache | video, audio |
 | `video` | all video (segments, adopted clips) + separated audio + view cache | audio |
-| `audio` | all of the above + the analysis audio (`project.audio.dropped = true`) and audio windows | `overview.peaks`, `probs.bin` |
+| `audio` | all of the above + the analysis audio (`project.audio.dropped = true`) and audio windows | `overview.peaks`, `probs.bin`, the detection |
+
+After level `audio`, `audio.fetch` brings the audio back; if it is the same
+audio (same rendition and the same AAC frames in every segment; local: same
+track and length) the detection and `probs.bin` are kept, so the map's curves
+and "노래 겹침" come back without detecting again. Otherwise (a different
+track, the VOD changed) they are dropped as on any new audio.
 
 Decisions are never deleted: songs, boundaries, titles, notes, review state,
 mutes (with their state), `talk` / `talk_scanned`, settings, export history.

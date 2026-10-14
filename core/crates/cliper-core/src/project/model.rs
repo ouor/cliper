@@ -133,6 +133,9 @@ pub struct AudioState {
     /// listen / align. The index is kept (it places the video segments).
     #[serde(default)]
     pub dropped: bool,
+    /// local recordings: the audio track copied (None = remote / older projects)
+    #[serde(default)]
+    pub track: Option<u32>,
 }
 
 impl AudioState {
@@ -147,6 +150,7 @@ impl AudioState {
             fallback_segments: r.fallback_segments,
             elapsed_sec: r.elapsed_sec,
             dropped: false,
+            track: None,
         }
     }
 }

@@ -1818,9 +1818,23 @@ impl Engine {
     pub fn job_fetch_audio(self: &Arc<Self>, id: &str) -> ApiResult<String> {
         let p = self.get(id)?;
         self.spawn_job("audio.fetch", id, Vec::new(), move |eng, ctx| async move {
-            // the old probabilities / frame index describe the old audio
-            let _ = std::fs::remove_file(eng.store.path(&p.id, "probs.bin"));
+            // the old probabilities / frame index describe the old audio — except
+            // when audio dropped by cleanup comes back unchanged (C2-4): then
+            // the detection and probs.bin stay (checked after the download)
+            let refetch = p.audio.clone().filter(|a| a.dropped);
+            if refetch.is_none() {
+                let _ = std::fs::remove_file(eng.store.path(&p.id, "probs.bin"));
+            }
             eng.frame_index.lk().remove(&p.id);
+            let keep_or_drop = {
+                let (eng, pid) = (eng.clone(), p.id.clone());
+                move |same: bool| {
+                    if !same {
+                        let _ = std::fs::remove_file(eng.store.path(&pid, "probs.bin"));
+                    }
+                    same
+                }
+            };
             if is_local(&p) {
                 let path = PathBuf::from(&p.source.as_ref().unwrap().url);
                 let (file, track) = ("audio.mka", p.settings.audio_track);
@@ -1870,11 +1884,15 @@ impl Engine {
                     fallback_segments: 0,
                     elapsed_sec: t0.elapsed().as_secs_f64(),
                     dropped: false,
+                    track: Some(track),
                 };
+                let same = keep_or_drop(refetch.as_ref().is_some_and(|a| a.track == Some(track) && (a.duration - state.duration).abs() < 0.01));
                 let p = eng
                     .mutate(&p.id, |p| {
                         p.audio = Some(state);
-                        p.detection = None;
+                        if !same {
+                            p.detection = None;
+                        }
                         Ok(())
                     })
                     .await?;
@@ -1910,10 +1928,19 @@ impl Engine {
             };
             std::fs::rename(&out, eng.store.path(&p.id, file))?;
             let variant = src.info.audio_variant;
+            // the same audio: same rendition, same AAC frames in every segment
+            let same = keep_or_drop(refetch.as_ref().is_some_and(|a| {
+                a.variant == variant && a.index.first_segment == r.index.first_segment && a.index.frames == r.index.frames && a.index.sample_rate == r.index.sample_rate
+            }));
+            if refetch.is_some() {
+                tracing::info!("{}: re-fetched audio is {}; detection {}", p.id, if same { "unchanged" } else { "different" }, if same { "kept" } else { "dropped" });
+            }
             let p = eng
                 .mutate(&p.id, |p| {
                     p.audio = Some(project::AudioState::from_result(file, variant, &r));
-                    p.detection = None;
+                    if !same {
+                        p.detection = None;
+                    }
                     Ok(())
                 })
                 .await?;

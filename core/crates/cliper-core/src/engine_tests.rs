@@ -173,6 +173,7 @@ fn audio_state(file: &str, frames: Vec<u32>) -> project::AudioState {
         fallback_segments: 0,
         elapsed_sec: 0.0,
         dropped: false,
+        track: None,
     }
 }
 
@@ -477,6 +478,7 @@ async fn audio_window_is_sample_exact_on_adts() {
         fallback_segments: 0,
         elapsed_sec: 0.0,
         dropped: false,
+        track: None,
     });
     eng.store.save(&mut p).unwrap();
     let full = ffmpeg::decode(&aac, 48000, 2, None, None).unwrap().read_all().unwrap();
@@ -749,5 +751,41 @@ fn export_records_follow_a_moved_project() {
     std::fs::write(root.join("m1/exports/a_01.mp4"), b"x").unwrap();
     let q = st.load("m1").unwrap();
     assert_eq!(Path::new(&q.songs[0].export.as_ref().unwrap().path), root.join("m1").join("exports").join("a_01.mp4"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn refetching_cleaned_audio_keeps_the_detection() {
+    // C2-4: "소리까지" cleanup, then audio.fetch: same audio → probs.bin,
+    // detection and songs stay
+    if !ffmpeg_available() {
+        return;
+    }
+    let (eng, _rx, root) = engine("refetch");
+    let rec = root.join("rec.wav");
+    wav::write_f32(&rec, 48000, 2, &noise(20.0, 48000)).unwrap();
+    let p = eng.create(&rec.to_string_lossy()).await.unwrap();
+    let id = p.id.clone();
+    eng.wait_job(&eng.job_fetch_audio(&id).unwrap()).await.unwrap();
+    std::fs::write(eng.store.path(&id, "probs.bin"), Probs { fps: 10.0, duration: 20.0, music: vec![0.5; 200], speech: vec![0.1; 200], sing: vec![0.2; 200] }.to_bytes()).unwrap();
+    eng.mutate(&id, |p| {
+        p.detection = Some(Detection { probs_file: "probs.bin".into(), params: Params::default(), segments: vec![(2.0, 9.0)], candidates: vec![], device: runtime::Device::Cpu });
+        Ok(())
+    })
+    .await
+    .unwrap();
+    eng.add_song(&id, song(2.0, 9.0), None).await.unwrap();
+    let (p, _) = eng.media_drop(&id, DropLevel::Audio, false).await.unwrap();
+    assert!(p.audio.as_ref().unwrap().dropped);
+    eng.wait_job(&eng.job_fetch_audio(&id).unwrap()).await.unwrap();
+    let q = eng.get(&id).unwrap();
+    assert!(!q.audio.as_ref().unwrap().dropped);
+    assert!(q.detection.is_some(), "detection kept");
+    assert!(eng.store.path(&id, "probs.bin").is_file(), "probs.bin kept");
+    assert_eq!(q.songs.len(), 1);
+    assert_eq!((q.songs[0].start, q.songs[0].end), (2.0, 9.0));
+    // an ordinary re-fetch (audio not dropped) still starts over
+    eng.wait_job(&eng.job_fetch_audio(&id).unwrap()).await.unwrap();
+    assert!(eng.get(&id).unwrap().detection.is_none() && !eng.store.path(&id, "probs.bin").exists());
     let _ = std::fs::remove_dir_all(root);
 }
