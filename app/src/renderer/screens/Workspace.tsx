@@ -513,6 +513,13 @@ export function Workspace({ projectId }: { projectId: string }) {
             if (next) selectMute(next, usePlayer.getState().playing);
           }
           return;
+        case "mute.audition":
+          if (!m || m.confirmed) {
+            toast("확인 전 제안을 고르면 적용해서 들어 볼 수 있어요.", { kind: "info", ttl: 2500 });
+            return;
+          }
+          useWs.setState({ audition: !st.audition });
+          return;
         case "mute.delete":
           return s && m && void deleteMute(projectId, s.id, m.id);
         case "mute.mark":

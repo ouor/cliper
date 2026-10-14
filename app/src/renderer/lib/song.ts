@@ -125,6 +125,22 @@ export function unconfirmedMutes(s: Song): number {
   return s.mutes.filter((m) => !m.confirmed).length;
 }
 
+/** The unconfirmed suggestion being auditioned (P), if any. */
+export function auditionedMute(s: Song, selectedMute: string | null, audition: boolean): Mute | null {
+  if (!audition || !selectedMute) return null;
+  return s.mutes.find((m) => m.id === selectedMute && !m.confirmed) ?? null;
+}
+
+/**
+ * Mutes the preview applies in 결과/지운 목소리: exactly what the export applies (confirmed
+ * only — the engine renders `mute_enabled && confirmed`), plus the one suggestion the user is
+ * deliberately auditioning (#4). Unconfirmed suggestions are never heard as removed otherwise.
+ */
+export function previewMutes(s: Song, selectedMute: string | null, audition: boolean): Mute[] {
+  const a = auditionedMute(s, selectedMute, audition);
+  return s.mutes.filter((m) => m.confirmed || m === a);
+}
+
 export type MutePos = "곡 앞" | "전주" | "간주" | "후주" | "곡 뒤";
 
 export function mutePosition(m: Mute, s: Song): MutePos {

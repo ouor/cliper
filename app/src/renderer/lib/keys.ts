@@ -59,6 +59,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: "mute.next", scope: "talk", keys: ["Tab"], label: "다음 멘트 구간 (고르면 바로 재생)" },
   { id: "mute.prev", scope: "talk", keys: ["Shift+Tab"], label: "이전 멘트 구간" },
   { id: "mute.confirm", scope: "talk", keys: ["Enter"], label: "선택 구간 적용 확정" },
+  { id: "mute.audition", scope: "talk", keys: ["P"], label: "선택한 제안을 적용해 듣기 (켜기/끄기, 확정하지 않음)" },
   { id: "mute.delete", scope: "talk", keys: ["Delete"], label: "선택 구간 삭제" },
   { id: "mute.mark", scope: "talk", keys: ["B"], label: "재생 위치에 새 구간 시작 / 끝" },
   { id: "mute.startHere", scope: "talk", keys: ["["], label: "선택 구간 시작을 재생 위치로" },

@@ -166,7 +166,7 @@ class CliperPlayer extends AudioWorkletProcessor {
         this.rmsJobs.push({ id: m.id, ranges: m.ranges, i: 0, f: -1, acc: 0, out: [] });
         break;
       case "dbg":
-        this.port.postMessage({ type: "dbg", src: this.src, origin: this.origin, frames: this.frames, loadedO: this.loadedO, loadedV: this.loadedV, pos: this.pos, chunks: [...this.chunks.keys()], playing: this.playing });
+        this.port.postMessage({ type: "dbg", src: this.src, origin: this.origin, frames: this.frames, loadedO: this.loadedO, loadedV: this.loadedV, pos: this.pos, chunks: [...this.chunks.keys()], playing: this.playing, mutes: this.mutes, muteOn: this.muteOn, loop: this.loop });
         break;
     }
   }

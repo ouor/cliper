@@ -6,7 +6,7 @@ import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
 import { begin, colors, drawGrid, drawRuler, drawWave, hatch, panView, useCanvasSize, useThemeVersion, zoomView } from "@/canvas/draw";
 import type { Peaks, Probs } from "@/lib/peaks";
-import { clipCovered, SING_THRESHOLD } from "@/lib/song";
+import { auditionedMute, clipCovered, SING_THRESHOLD } from "@/lib/song";
 import { fmtTime } from "@/lib/format";
 import { useWs } from "@/state/ws";
 import { player, usePlayer, LISTEN_LABEL } from "@/audio/player";
@@ -455,7 +455,10 @@ export function DetailTimeline({ p, s, clip, orig, voc, probs, muteOn }: { p: Pr
       <div className="tl-canvas" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={() => !drag && setTip(null)} onWheel={onWheel}>
         <canvas ref={ref} role="img" aria-label={`곡 상세 타임라인: 멘트 구간 ${s.mutes.length}개. 구간 목록에서 Tab으로 고를 수 있어요.`} />
         <div className="playhead" ref={playheadRef} />
-        <div className={`mode-badge m${mode}`}>듣는 중 · {LISTEN_LABEL[mode]}</div>
+        <div className={`mode-badge m${mode}`}>
+          듣는 중 · {LISTEN_LABEL[mode]}
+          {(mode === 1 || mode === 2) && muteOn && auditionedMute(s, ws.selectedMute, ws.audition) ? " + 고른 제안 적용" : ""}
+        </div>
         {tip && (
           <div className="map-tip" style={{ left: Math.min(tip.x + 12, w - 220), top: Math.max(0, tip.y - 36) }}>
             {tip.text}

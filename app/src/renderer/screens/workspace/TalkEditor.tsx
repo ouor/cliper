@@ -1,6 +1,6 @@
 // S4 멘트 다듬기.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Check, Download, Hand, Info, Plus, Repeat, Scissors, SkipForward, Trash2, Wand2, Zap } from "lucide-react";
+import { AlertTriangle, Check, Download, Hand, Headphones, Info, Plus, Repeat, Scissors, SkipForward, Trash2, Wand2, Zap } from "lucide-react";
 import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
 import type { Mute } from "@ipc/generated/Mute";
@@ -9,7 +9,7 @@ import { useApp } from "@/state/app";
 import { projectUi, setProjectUi, editSong } from "@/state/projects";
 import { songProgress, useJobs } from "@/state/jobs";
 import { player, usePlayer, LISTEN_KEY, LISTEN_LABEL, type ListenMode } from "@/audio/player";
-import { clipCovered, hostClip, muteOutsideClip, mutePosition, singOverlap, songNumbers, songTitle, unconfirmedMutes, videoState } from "@/lib/song";
+import { clipCovered, hostClip, muteOutsideClip, mutePosition, previewMutes, singOverlap, songNumbers, songTitle, unconfirmedMutes, videoState } from "@/lib/song";
 import { loadPeaks, mediaUrl, type Peaks } from "@/lib/peaks";
 import { fmtTime } from "@/lib/format";
 import { fetchSongs } from "@/lib/pipeline";
@@ -20,8 +20,8 @@ import { Progress } from "@/components/common";
 
 const MODE_TIP = [
   "방송 그대로 (기준)",
-  "내보낼 소리 · 멘트 구간만 목소리 제거\n확인 전 제안도 적용된 것처럼 들려요",
-  "멘트 구간 안에서 빠지는 소리만 (구간 밖은 무음)\n여기서 노래 멜로디가 들리면 과하게 지운 거예요",
+  "내보낼 소리 · 확인한 멘트 구간만 목소리 제거\n확인 전 제안은 목소리가 그대로 들려요 (P로 적용해 듣기)",
+  "결과에서 빠지는 소리만 (확인한 구간, 구간 밖은 무음)\n여기서 노래 멜로디가 들리면 과하게 지운 거예요",
   "분리된 반주 전체 (참고용)",
 ];
 
@@ -177,10 +177,10 @@ export function TalkEditor({ p }: { p: Project }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s?.id, s?.start, s?.end, clip?.id, clip?.stems?.elapsed_sec]);
 
-  // mutes → worklet
+  // mutes → worklet: what the export applies (confirmed only) + the auditioned suggestion (#4)
   useEffect(() => {
-    if (s) player.setMutes(s.mutes, muteOn);
-  }, [s, muteOn]);
+    if (s) player.setMutes(previewMutes(s, ws.selectedMute, ws.audition), muteOn);
+  }, [s, muteOn, ws.selectedMute, ws.audition]);
 
   // video
   useEffect(() => {
@@ -313,7 +313,7 @@ export function TalkEditor({ p }: { p: Project }) {
                 <span className="mono faint">{n ? String(n).padStart(2, "0") : "–"}</span> {songTitle(s)}
               </div>
               <div className="faint mp-sub">
-                멘트 구간 {mutes.length}개{unconf ? ` · 확인 전 ${unconf}개` : mutes.length ? " · 모두 확인함" : ""}
+                멘트 구간 {mutes.length}개{unconf ? ` · 확인 전 ${unconf}개는 아직 적용 안 됨` : mutes.length ? " · 모두 확인함" : ""}
               </div>
             </div>
             <button
@@ -412,6 +412,17 @@ export function TalkEditor({ p }: { p: Project }) {
                 </select>
               </label>
               <span className="spacer" />
+              {!sel.confirmed && (
+                <button
+                  className={`btn sm ${ws.audition ? "active" : "subtle"}`}
+                  aria-pressed={ws.audition}
+                  onClick={() => useWs.setState({ audition: !ws.audition })}
+                  data-tip={ws.audition ? "이 제안을 결과에 적용해서 들려주는 중이에요\n확정한 건 아니에요. 다시 누르면 제안 없이 들어요" : "확정하지 않고 이 제안을 결과에 적용해 들어 봐요\n고른 제안 하나에만 적용돼요"}
+                  data-tip-pos="top"
+                >
+                  <Headphones size={13} /> 적용해 듣기 {ws.audition ? "켬" : "끔"} <kbd>P</kbd>
+                </button>
+              )}
               {!sel.confirmed ? (
                 <button className="btn sm primary" onClick={() => void updateMute(p.id, s.id, sel.id, "적용 확정", (m) => void (m.confirmed = true))}>
                   <Check size={13} /> 적용 확정 <kbd>↵</kbd>

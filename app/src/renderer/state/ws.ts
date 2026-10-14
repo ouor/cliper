@@ -26,6 +26,8 @@ interface WsStore {
   /** shows the detect settings popover */
   detectOpen: boolean;
   setlistOpen: boolean;
+  /** 멘트 다듬기: hear the selected (unconfirmed) suggestion applied in 결과/지운 목소리 (P) */
+  audition: boolean;
 }
 
 export const useWs = create<WsStore>(() => ({
@@ -46,6 +48,7 @@ export const useWs = create<WsStore>(() => ({
   focus: { field: null, n: 0 },
   detectOpen: false,
   setlistOpen: false,
+  audition: false,
 }));
 
 export function requestFocus(field: "title" | "note" | "search") {
