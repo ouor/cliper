@@ -12,7 +12,9 @@ use crate::hls::video_fetch::VideoClip;
 use crate::source::SourceInfo;
 use crate::stems::Stems;
 
-pub const SCHEMA: &str = "cliper/project@1";
+/// `@2`: segment-based video (video in `video/`, stems as [`StemSpan`]s);
+/// `@1` projects (clips) are migrated on load, see `project::migrate`.
+pub const SCHEMA: &str = "cliper/project@2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -32,10 +34,78 @@ pub struct Project {
     pub detection: Option<Detection>,
     pub settings: Settings,
     pub songs: Vec<Song>,
+    /// deprecated (schema @1): always empty since the segment store; kept so
+    /// older clients still parse the project. Video: `video.*` methods.
+    #[serde(default)]
     pub clips: Vec<Clip>,
+    /// separated audio, each a contiguous VOD range (sorted, non-overlapping)
+    #[serde(default)]
+    pub stems: Vec<StemSpan>,
+    /// talk found in the vocal stem (VOD time), the source of mute suggestions
+    #[serde(default)]
+    pub talk: Vec<(f64, f64)>,
+    /// VOD ranges already searched for talk: suggestions are only ever added
+    /// for newly separated ranges, so a deleted suggestion never comes back
+    #[serde(default)]
+    pub talk_scanned: Vec<(f64, f64)>,
+    /// 📌 keep: cleanup refuses this project unless forced
+    #[serde(default)]
+    pub pinned: bool,
+    /// is the VOD (replay) still online? (`vod.check`)
+    #[serde(default)]
+    pub vod: Option<VodStatus>,
     /// last failed job of this project (cleared when a job of that kind succeeds)
     #[serde(default)]
     pub last_error: Option<JobError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "lowercase")]
+pub enum VodState {
+    /// the replay can be played (video can be fetched)
+    Alive,
+    /// deleted / private / expired: nothing more can be fetched
+    Gone,
+    /// couldn't check (offline, login needed, …)
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct VodStatus {
+    pub status: VodState,
+    pub checked_at: String,
+    /// why (`VOD_NOT_FOUND`, `AUTH_REQUIRED`, `NETWORK`, …) when not alive
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// Separated audio of one contiguous VOD range: `orig.wav` (the video's own
+/// audio, 48 kHz stereo float) and `vocals.wav` (same length), plus their
+/// 100/s peaks, in `dir`. Sample k is VOD time `start + k / sample_rate`.
+/// A span's folder never changes once written: growing a span writes a new
+/// one (new id) and drops the old.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct StemSpan {
+    pub id: String,
+    /// VOD time of sample 0 (on the sample grid)
+    pub start: f64,
+    pub end: f64,
+    pub frames: u64,
+    pub sample_rate: u32,
+    /// project-relative folder: `orig.wav`, `vocals.wav`, `orig.peaks`, `vocals.peaks`
+    pub dir: String,
+    pub model: String,
+    pub device: crate::ml::runtime::Device,
+    pub created_at: String,
+}
+
+impl StemSpan {
+    pub fn file(&self, name: &str) -> String {
+        format!("{}/{name}", self.dir)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +129,10 @@ pub struct AudioState {
     pub full_source_bytes: u64,
     pub fallback_segments: u32,
     pub elapsed_sec: f64,
+    /// the audio file was deleted by cleanup (level `audio`); fetch it again to
+    /// listen / align. The index is kept (it places the video segments).
+    #[serde(default)]
+    pub dropped: bool,
 }
 
 impl AudioState {
@@ -72,6 +146,7 @@ impl AudioState {
             full_source_bytes: r.full_source_bytes,
             fallback_segments: r.fallback_segments,
             elapsed_sec: r.elapsed_sec,
+            dropped: false,
         }
     }
 }
@@ -218,6 +293,13 @@ pub struct Song {
     pub export: Option<ExportInfo>,
 }
 
+impl Song {
+    /// VOD range of video wanted for this song (song ± margins).
+    pub fn with_margins(&self, s: &Settings) -> (f64, f64) {
+        ((self.start - s.margin_before).max(0.0), self.end + s.margin_after)
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -336,6 +418,11 @@ impl Project {
             settings: Settings::default(),
             songs: Vec::new(),
             clips: Vec::new(),
+            stems: Vec::new(),
+            talk: Vec::new(),
+            talk_scanned: Vec::new(),
+            pinned: false,
+            vod: None,
             last_error: None,
         }
     }
@@ -354,8 +441,7 @@ impl Project {
     }
 
     /// Does this song carry user work that detection must not throw away?
-    /// (manual, reviewed, titled, noted, muted, disabled, or inside a clip whose
-    /// video was already downloaded — a merely *planned* clip doesn't count)
+    /// (manual, reviewed, titled, noted, muted, disabled, exported)
     pub fn is_touched(&self, s: &Song) -> bool {
         s.origin == Origin::Manual
             || s.reviewed
@@ -368,7 +454,6 @@ impl Project {
             || s.fade_in.is_some()
             || s.fade_out.is_some()
             || s.export.is_some()
-            || s.clip_id.as_deref().and_then(|c| self.clip(c)).is_some_and(|c| c.video.is_some())
     }
 
     /// Replace untouched auto songs with fresh detector output, keeping manual

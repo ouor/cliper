@@ -113,13 +113,15 @@ pub fn talk_regions(vocals: &Probs, mix: &Probs, songs: &[(f64, f64)], tp: &Talk
 /// first syllable ("안…") and the tail ("…다"). Scans the vocal stem's 10 ms
 /// energy outward (at most `refine_search_sec`) until it drops
 /// `refine_below_db` under the region's peak. Never shrinks a region.
-pub fn refine_edges(regions: &[(f64, f64)], vocals: &std::path::Path, tp: &TalkParams) -> std::io::Result<Vec<(f64, f64)>> {
+/// `section`: only `[start, start + duration)` of the file (regions are then
+/// relative to `start`).
+pub fn refine_edges(regions: &[(f64, f64)], vocals: &std::path::Path, section: Option<(f64, f64)>, tp: &TalkParams) -> std::io::Result<Vec<(f64, f64)>> {
     if regions.is_empty() {
         return Ok(Vec::new());
     }
     const RATE: u32 = 8000;
     const HOP: usize = 80; // 10 ms
-    let mut rd = crate::audio::ffmpeg::decode(vocals, RATE, 1, None, None).map_err(std::io::Error::other)?;
+    let mut rd = crate::audio::ffmpeg::decode(vocals, RATE, 1, section.map(|s| s.0), section.map(|s| s.1)).map_err(std::io::Error::other)?;
     let mut env: Vec<f32> = Vec::new();
     let (mut acc, mut k) = (0f64, 0usize);
     let mut buf = vec![0f32; 1 << 15];
@@ -162,13 +164,15 @@ pub fn refine_edges(regions: &[(f64, f64)], vocals: &std::path::Path, tp: &TalkP
         .collect())
 }
 
-/// Tag a stem file (any format ffmpeg reads) on the 10 fps grid.
+/// Tag a stem file (any format ffmpeg reads) on the 10 fps grid; `section`
+/// = only `[start, start + duration)` (times then start at its start).
 pub fn probs_of_file(
     tagger: &mut crate::ml::panns::Tagger,
     file: &std::path::Path,
+    section: Option<(f64, f64)>,
     cancel: &crate::progress::CancellationToken,
 ) -> Result<Probs, crate::ml::panns::PannsError> {
-    let mut rd = crate::audio::ffmpeg::decode(file, crate::ml::panns::SAMPLE_RATE, 1, None, None)
+    let mut rd = crate::audio::ffmpeg::decode(file, crate::ml::panns::SAMPLE_RATE, 1, section.map(|s| s.0), section.map(|s| s.1))
         .map_err(std::io::Error::other)?;
     tagger.probs_streaming(|b| rd.read(b).map_err(std::io::Error::other), None, &crate::progress::noop(), cancel)
 }

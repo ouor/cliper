@@ -363,8 +363,8 @@ async fn run() -> Result<()> {
             use cliper_core::analysis::talk;
             let mut tagger = cliper_core::ml::panns::Tagger::open(&model, false)?;
             let c = CancellationToken::new();
-            let v = talk::probs_of_file(&mut tagger, &clip_dir.join("vocals.wav"), &c)?;
-            let m = talk::probs_of_file(&mut tagger, &clip_dir.join("orig.wav"), &c)?;
+            let v = talk::probs_of_file(&mut tagger, &clip_dir.join("vocals.wav"), None, &c)?;
+            let m = talk::probs_of_file(&mut tagger, &clip_dir.join("orig.wav"), None, &c)?;
             let songs: Vec<(f64, f64)> = song
                 .iter()
                 .filter_map(|s| s.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
@@ -375,7 +375,7 @@ async fn run() -> Result<()> {
                 talk::talk_regions(&v, &m, &songs, &tp)
             } else {
                 let tp = talk::TalkParams::default();
-                talk::refine_edges(&talk::talk_regions(&v, &m, &songs, &tp), &clip_dir.join("vocals.wav"), &tp)?
+                talk::refine_edges(&talk::talk_regions(&v, &m, &songs, &tp), &clip_dir.join("vocals.wav"), None, &tp)?
             };
             for (a, b) in &regs {
                 eprintln!("talk {:7.2} ~ {:7.2} ({:.1}s)", a, b, b - a);
@@ -401,6 +401,8 @@ async fn run() -> Result<()> {
                 orig_wav: clip_dir.join("orig.wav"),
                 vocals_wav: clip_dir.join("vocals.wav"),
                 audio_override: None,
+                override_offset: 0.0,
+                video_offset: 0.0,
                 in_t,
                 out_t,
                 mutes,

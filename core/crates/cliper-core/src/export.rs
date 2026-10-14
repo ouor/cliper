@@ -51,13 +51,17 @@ pub struct ExportSpec {
     pub source_mp4: PathBuf,
     pub orig_wav: PathBuf,
     pub vocals_wav: PathBuf,
-    /// Replace the rendered audio with this file (aligned to clip t = 0, e.g. a
-    /// processed stem edited in a DAW and brought back). Mutes are not applied.
+    /// Replace the rendered audio with this file (e.g. a processed stem edited
+    /// in a DAW and brought back); its t = 0 sits at stem time `override_offset`.
+    /// Mutes are not applied.
     pub audio_override: Option<PathBuf>,
-    /// song range in clip seconds
+    pub override_offset: f64,
+    /// song range in stem seconds (t = 0 = the stems' first frame)
     pub in_t: f64,
     pub out_t: f64,
-    /// mutes in clip seconds
+    /// video file time = stem time + `video_offset`
+    pub video_offset: f64,
+    /// mutes in stem seconds
     pub mutes: Vec<MuteSpan>,
     /// output file (extension should match `format`)
     pub out: PathBuf,
@@ -224,7 +228,7 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
     }
     let video = spec.format.has_video();
     let copy = video && spec.video_codec == "copy";
-    let in_t = if copy { keyframe_before(&spec.source_mp4, spec.in_t)? } else { spec.in_t };
+    let in_t = if copy { (keyframe_before(&spec.source_mp4, spec.in_t + spec.video_offset)? - spec.video_offset).max(0.0) } else { spec.in_t };
     let dur = spec.out_t - in_t;
 
     progress(Progress::note("export.render", "render_audio", "rendering audio"));
@@ -232,7 +236,8 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
         Some(path) => {
             let pcm = ffmpeg::decode(path, crate::stems::STEM_RATE, 2, None, None)?.read_all()?;
             let silence = vec![0f32; pcm.len()];
-            (crate::stems::STEM_RATE, render(&pcm, &silence, crate::stems::STEM_RATE, in_t, spec.out_t, &[], spec.fade_in, spec.fade_out))
+            let off = spec.override_offset;
+            (crate::stems::STEM_RATE, render(&pcm, &silence, crate::stems::STEM_RATE, in_t - off, spec.out_t - off, &[], spec.fade_in, spec.fade_out))
         }
         None => {
             // read just the song's frames; render on that window's time base
@@ -301,7 +306,7 @@ pub fn export_song(spec: &ExportSpec, progress: &ProgressFn, cancel: &Cancellati
         let mut c = ffmpeg::command();
         c.arg("-y").args(["-progress", "pipe:1", "-nostats"]);
         if video {
-            c.args(["-ss", &format!("{in_t:.6}")]).arg("-i").arg(&spec.source_mp4);
+            c.args(["-ss", &format!("{:.6}", in_t + spec.video_offset)]).arg("-i").arg(&spec.source_mp4);
         }
         c.arg("-i").arg(&tmp_wav);
         c.args(["-t", &format!("{dur:.6}")]);
@@ -402,7 +407,7 @@ pub struct StemsSpec {
     pub source_mp4: PathBuf,
     pub orig_wav: PathBuf,
     pub vocals_wav: PathBuf,
-    /// song range in clip seconds; files cover `[in − handles, out + handles]`
+    /// song range in stem seconds; files cover `[in − handles, out + handles]`
     pub in_t: f64,
     pub out_t: f64,
     pub handles: f64,
@@ -411,8 +416,10 @@ pub struct StemsSpec {
     pub dir: PathBuf,
     /// base name for the files
     pub name: String,
-    /// VOD time of clip t = 0 (for the marker sheet)
+    /// VOD time of stem t = 0 (for the marker sheet)
     pub vod_offset: f64,
+    /// video file time = stem time + `video_offset`
+    pub video_offset: f64,
     /// also write a light 720p reference video
     pub reference_video: bool,
 }
@@ -426,7 +433,7 @@ pub struct StemsResult {
     pub markers_csv: PathBuf,
     pub reaper_project: PathBuf,
     pub reference_video: Option<PathBuf>,
-    /// clip seconds where the files start
+    /// VOD time where the files start
     pub start: f64,
     pub duration: f64,
 }
@@ -500,7 +507,7 @@ pub fn export_stems(spec: &StemsSpec, progress: &ProgressFn) -> Result<StemsResu
         progress(Progress::note("export.stems", "write_reference_video", "writing reference video"));
         let p = spec.dir.join(format!("{}_reference.mp4", spec.name));
         let mut c = ffmpeg::command();
-        c.arg("-y").args(["-ss", &format!("{a:.6}")]).arg("-i").arg(&spec.source_mp4);
+        c.arg("-y").args(["-ss", &format!("{:.6}", a + spec.video_offset)]).arg("-i").arg(&spec.source_mp4);
         c.args(["-t", &format!("{len:.6}"), "-vf", "scale=-2:720", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "128k"]);
         c.arg(&p);
         ffmpeg::run(c)?;
@@ -508,5 +515,5 @@ pub fn export_stems(spec: &StemsSpec, progress: &ProgressFn) -> Result<StemsResu
     } else {
         None
     };
-    Ok(StemsResult { dir: spec.dir.clone(), files, markers_csv, reaper_project, reference_video, start: a, duration: len })
+    Ok(StemsResult { dir: spec.dir.clone(), files, markers_csv, reaper_project, reference_video, start: a + spec.vod_offset, duration: len })
 }

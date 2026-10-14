@@ -7,9 +7,15 @@
 //!   audio.aac             analysis audio (lossless ADTS)
 //!   probs.bin             PANNs probabilities (CLPROBS1)
 //!   overview.peaks        waveform peaks of the whole VOD
-//!   clips/<clip id>/source.mp4, orig.wav, vocals.wav, *.peaks
+//!   video/                downloaded HLS segments + index.json (see `video::store`)
+//!   stems/<span id>/      orig.wav, vocals.wav, *.peaks (see `StemSpan`)
+//!   clips/<clip id>/      adopted from schema @1 projects (source.mp4, stems)
+//!   cache/                audio windows, playable views
 //!   exports/              rendered songs (unless settings.output_dir)
 //! ```
+//!
+//! Every path stored in the project is relative to this folder, so the folder
+//! can be moved as a whole.
 
 use std::path::{Path, PathBuf};
 
@@ -76,7 +82,19 @@ impl Store {
             std::io::ErrorKind::NotFound => StoreError::NotFound(id.to_string()),
             _ => e.into(),
         })?;
-        Ok(serde_json::from_slice(&b)?)
+        let mut p: Project = serde_json::from_slice(&b)?;
+        if p.schema != super::model::SCHEMA {
+            // one migration at a time (concurrent loads of the same project)
+            static MIGRATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _g = MIGRATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let fresh: Project = serde_json::from_slice(&std::fs::read(&path)?)?;
+            p = fresh;
+            if super::migrate::migrate(&mut p, &self.dir(id))? {
+                tracing::info!("migrated project {id} to {}", super::model::SCHEMA);
+                self.save_raw(&p)?;
+            }
+        }
+        Ok(p)
     }
 
     /// Save with `updated_at` bumped; write-then-rename so a crash never leaves

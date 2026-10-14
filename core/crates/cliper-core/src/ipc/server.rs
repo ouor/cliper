@@ -17,10 +17,12 @@ use crate::analysis::detect::Params;
 use crate::engine::{ApiError, Engine, EngineConfig, Event};
 use crate::project::{Mute, Settings, Song};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3: segment-based video (`video.*`, `stems.ensure`, `storage.*`, `media.drop`,
+/// `vod.check`; `Project.clips` is gone, see docs/ipc.md "What changed").
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Oldest client protocol this engine still serves (clients built for an
 /// older protocol should warn).
-pub const MIN_CLIENT_PROTOCOL: u32 = 2;
+pub const MIN_CLIENT_PROTOCOL: u32 = 3;
 
 fn rpc_error(code: i64, message: &str, data: Option<Value>) -> Value {
     let mut e = json!({ "code": code, "message": message });
@@ -32,7 +34,13 @@ fn rpc_error(code: i64, message: &str, data: Option<Value>) -> Value {
 
 fn api_error(e: &ApiError) -> Value {
     let code = if e.code == "INVALID_PARAMS" { -32602 } else { -32000 };
-    rpc_error(code, &e.message, Some(json!({ "code": e.code })))
+    let mut data = json!({ "code": e.code });
+    if let Some(Value::Object(extra)) = &e.data {
+        for (k, v) in extra {
+            data[k] = v.clone();
+        }
+    }
+    rpc_error(code, &e.message, Some(data))
 }
 
 pub fn event_to_notification(e: Event) -> Value {
@@ -43,6 +51,8 @@ pub fn event_to_notification(e: Event) -> Value {
         Event::JobFailed { .. } => "job.failed",
         Event::ProjectChanged { .. } => "project.changed",
         Event::QueueChanged { .. } => "queue.changed",
+        Event::VideoChanged { .. } => "video.changed",
+        Event::VideoRequestDone { .. } => "video.request_done",
     };
     let mut params = serde_json::to_value(&e).unwrap_or(Value::Null);
     if let Some(o) = params.as_object_mut() {
@@ -122,7 +132,65 @@ struct MuteRemoveArg {
 #[derive(Deserialize)]
 struct DropMediaArg {
     id: String,
-    clip_id: Option<String>,
+}
+#[derive(Deserialize)]
+struct MediaDropArg {
+    id: String,
+    level: crate::storage::DropLevel,
+    #[serde(default)]
+    force: bool,
+}
+#[derive(Deserialize)]
+struct OptIdArg {
+    id: Option<String>,
+}
+#[derive(Deserialize)]
+struct VideoFetchArg {
+    id: String,
+    #[serde(flatten)]
+    args: crate::engine::FetchArgs,
+}
+#[derive(Deserialize)]
+struct VideoCancelArg {
+    id: String,
+    request_id: Option<String>,
+}
+#[derive(Deserialize)]
+struct VideoPrioArg {
+    id: String,
+    request_id: String,
+    priority: crate::video::store::Priority,
+}
+#[derive(Deserialize)]
+struct RangesArg {
+    id: String,
+    ranges: Option<Vec<(f64, f64)>>,
+}
+#[derive(Deserialize)]
+struct PauseArg {
+    paused: bool,
+}
+#[derive(Deserialize)]
+struct ViewArg {
+    id: String,
+    t: f64,
+    end: Option<f64>,
+}
+#[derive(Deserialize)]
+struct StemsArg {
+    id: String,
+    song_ids: Option<Vec<String>>,
+    ranges: Option<Vec<(f64, f64)>>,
+}
+#[derive(Deserialize)]
+struct PinArg {
+    id: String,
+    pinned: bool,
+}
+#[derive(Deserialize, Default)]
+struct NetArg {
+    #[serde(default)]
+    reset: bool,
 }
 #[derive(Deserialize)]
 struct WindowArg {
@@ -135,13 +203,6 @@ struct WindowArg {
 #[derive(Deserialize)]
 struct KeepAwakeArg {
     enabled: bool,
-}
-#[derive(Deserialize)]
-struct ExtendArg {
-    id: String,
-    clip_id: String,
-    start: f64,
-    end: f64,
 }
 #[derive(Deserialize)]
 struct RerunArg {
@@ -158,10 +219,7 @@ struct DetectArg {
 #[derive(Deserialize)]
 struct ClipsArg {
     id: String,
-    clip_ids: Option<Vec<String>>,
     song_ids: Option<Vec<String>>,
-    #[serde(default)]
-    exact: bool,
 }
 #[derive(Deserialize)]
 struct ExportArg {
@@ -262,14 +320,80 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
             let a: MuteRemoveArg = p(&params)?;
             to_json(eng.remove_mute(&a.id, &a.song_id, &a.mute_id, a.base_revision).await?)
         }
-        "project.drop_media" | "clip.drop_media" => {
+        "project.drop_media" => {
+            // protocol 2: video + stems
             let a: DropMediaArg = p(&params)?;
-            if method == "clip.drop_media" && a.clip_id.is_none() {
-                return Err(ApiError::new("INVALID_PARAMS", "clip_id is required"));
-            }
-            let (project, freed) = eng.drop_media(&a.id, a.clip_id.as_deref()).await?;
+            let (project, freed) = eng.media_drop(&a.id, crate::storage::DropLevel::Video, false).await?;
             Ok(json!({ "project": project, "freed_bytes": freed }))
         }
+        "media.drop" => {
+            let a: MediaDropArg = p(&params)?;
+            let (project, freed) = eng.media_drop(&a.id, a.level, a.force).await?;
+            Ok(json!({ "project": project, "freed_bytes": freed }))
+        }
+        "storage.usage" => {
+            let a: OptIdArg = if params.is_null() { OptIdArg { id: None } } else { p(&params)? };
+            match a.id {
+                Some(id) => {
+                    let eng = eng.clone();
+                    to_json(tokio::task::spawn_blocking(move || eng.storage_usage(&id)).await.map_err(|e| ApiError::new("INTERNAL", e))??)
+                }
+                None => eng.storage_all().await,
+            }
+        }
+        "project.set_pinned" => {
+            let a: PinArg = p(&params)?;
+            to_json(eng.set_pinned(&a.id, a.pinned).await?)
+        }
+        "vod.check" => to_json(eng.vod_check(&p::<IdArg>(&params)?.id).await?),
+        "video.status" => {
+            let a: OptIdArg = if params.is_null() { OptIdArg { id: None } } else { p(&params)? };
+            match a.id {
+                Some(id) => to_json(eng.video_state(&id)?),
+                None => to_json(eng.video_states()),
+            }
+        }
+        "video.fetch" => {
+            let a: VideoFetchArg = p(&params)?;
+            to_json(eng.video_fetch(&a.id, a.args)?)
+        }
+        "video.estimate" => {
+            let a: VideoFetchArg = p(&params)?;
+            to_json(eng.video_estimate(&a.id, &a.args)?)
+        }
+        "video.cancel" => {
+            let a: VideoCancelArg = p(&params)?;
+            Ok(json!({ "cancelled": eng.video_cancel(&a.id, a.request_id.as_deref())? }))
+        }
+        "video.prioritize" => {
+            let a: VideoPrioArg = p(&params)?;
+            eng.video_prioritize(&a.id, &a.request_id, a.priority)?;
+            Ok(json!(true))
+        }
+        "video.retry" => {
+            let a: RangesArg = p(&params)?;
+            to_json(eng.video_retry(&a.id, a.ranges)?)
+        }
+        "video.pause" => {
+            eng.video_pause(p::<PauseArg>(&params)?.paused)?;
+            Ok(json!(true))
+        }
+        "video.view" => {
+            let a: ViewArg = p(&params)?;
+            to_json(eng.video_view(&a.id, a.t, a.end).await?)
+        }
+        "stems.ensure" => {
+            let a: StemsArg = p(&params)?;
+            job(eng.job_stems(&a.id, a.song_ids, a.ranges))
+        }
+        "system.net_stats" => {
+            let a: NetArg = if params.is_null() { NetArg::default() } else { p(&params)? };
+            to_json(crate::http::net_stats(a.reset))
+        }
+        "clip.drop_media" | "clip.extend" => Err(ApiError::new(
+            "INVALID_PARAMS",
+            format!("{method} was removed in protocol 3: video is kept per VOD range (video.fetch, media.drop)"),
+        )),
         "audio.window" => {
             let a: WindowArg = p(&params)?;
             eng.audio_window(&a.id, a.start, a.duration, a.sample_rate, a.channels).await
@@ -282,11 +406,8 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
             let a: MetaArg = p(&params)?;
             eng.export_metadata(&a.id, a.format, a.include_disabled, a.path.as_deref())
         }
-        "clips.plan" => to_json(eng.plan(&p::<IdArg>(&params)?.id).await?),
-        "clip.extend" => {
-            let a: ExtendArg = p(&params)?;
-            to_json(eng.extend_clip(&a.id, &a.clip_id, a.start, a.end).await?)
-        }
+        // protocol 2: nothing to plan any more
+        "clips.plan" => to_json(eng.get(&p::<IdArg>(&params)?.id)?),
         "detect.default_params" => to_json(Params::default()),
         "detect.rerun" => {
             let a: RerunArg = p(&params)?;
@@ -299,7 +420,7 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
         }
         "clips.fetch" => {
             let a: ClipsArg = p(&params)?;
-            job(eng.job_fetch_clips(&a.id, a.clip_ids, a.song_ids, a.exact).await)
+            job(eng.job_fetch_clips(&a.id, a.song_ids))
         }
         "export.run" => {
             let a: ExportArg = p(&params)?;

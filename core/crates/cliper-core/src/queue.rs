@@ -200,8 +200,9 @@ impl Engine {
             return Ok(());
         }
         let p = self.get(&p.id)?;
-        if p.clips.iter().any(|c| c.video.is_none() || c.stems.is_none()) {
-            let j = self.job_fetch_clips(&p.id, None, None, false).await?;
+        let sep: Vec<crate::ranges::Range> = p.stems.iter().map(|s| (s.start, s.end)).collect();
+        if p.songs.iter().any(|s| s.enabled && !crate::ranges::covers(&sep, (s.start, s.end), 0.05)) {
+            let j = self.job_fetch_clips_with(&p.id, None, crate::video::store::Priority::Batch)?;
             step("clips.fetch", j.clone());
             self.wait_job(&j).await?;
         }

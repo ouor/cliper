@@ -165,6 +165,36 @@ pub fn separate_clip(clip: &Path, out_dir: &Path, sep: &mut Separator, progress:
     })
 }
 
+/// Separate a 48 kHz stereo float WAV (e.g. a stretch of decoded video
+/// audio) into `out` (vocals, same rate and exactly as many frames). Streams:
+/// input → model rate → separator → back to the stem rate. Returns frames.
+pub fn separate_wav(input: &Path, out: &Path, sep: &mut Separator, progress: &ProgressFn, cancel: &CancellationToken) -> Result<u64, StemError> {
+    let (_, _, frames) = wav::info(input)?;
+    let model_rate = sep.spec.sample_rate;
+    let tmp = out.with_extension("model.wav");
+    {
+        let mut vw = wav::WavWriter::create(&tmp, model_rate, 2)?;
+        let mut rd = ffmpeg::decode(input, model_rate, 2, None, None)?;
+        let total = (frames as f64 * model_rate as f64 / STEM_RATE as f64) as u64;
+        sep.separate_stream(&mut |b: &mut [f32]| rd.read(b).map_err(std::io::Error::other), &mut |x: &[f32]| vw.write(x), Some(total), progress, cancel)?;
+        vw.finish()?;
+    }
+    let mut vw = wav::WavWriter::create(out, STEM_RATE, 2)?;
+    let want = frames * 2;
+    let mut got = 0u64;
+    pump(&tmp, STEM_RATE, 0, &mut |x| {
+        let n = ((want - got) as usize).min(x.len());
+        got += n as u64;
+        vw.write(&x[..n])
+    })?;
+    if got < want {
+        vw.write(&vec![0f32; (want - got) as usize])?;
+    }
+    vw.finish()?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok(frames)
+}
+
 /// Open a separator and separate (CLI use): on GPU out-of-memory at batch 1
 /// the clip is redone on the CPU.
 pub fn separate_clip_auto(

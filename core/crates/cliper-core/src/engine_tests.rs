@@ -1,6 +1,6 @@
 //! Engine-level tests: project mutations, optimistic concurrency, job
-//! bookkeeping, clip planning interplay, IPC dispatch, queue, alignment and
-//! audio windows. Tests that need ffmpeg or model files skip when those are
+//! bookkeeping, cleanup levels, migration of clip projects, IPC dispatch,
+//! queue, alignment and audio windows. Tests that need ffmpeg or model files skip when those are
 //! missing.
 
 use super::*;
@@ -131,7 +131,7 @@ async fn jobs_busy_conflicts_wait_and_panics() {
     assert_eq!(busy(eng.spawn_job("audio.fetch", "t1", Vec::new(), |_e, _c| async { Ok(json!(null)) })), "BUSY");
     assert_eq!(busy(eng.spawn_job("detect.run", "t1", Vec::new(), |_e, _c| async { Ok(json!(null)) })), "BUSY");
     // an unrelated kind is fine
-    let j2 = eng.spawn_job("export.run", "t1", Vec::new(), |_e, _c| async { Ok(json!(2)) }).unwrap();
+    let j2 = eng.spawn_job("vod.check", "t1", Vec::new(), |_e, _c| async { Ok(json!(2)) }).unwrap();
     assert_eq!(eng.wait_job(&j2).await.unwrap(), json!(2));
     tx.send(()).unwrap();
     assert_eq!(eng.wait_job(&j1).await.unwrap(), json!({ "ok": 1 }));
@@ -160,47 +160,211 @@ async fn failed_job_is_recorded() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[tokio::test]
-async fn drop_media_and_extend_keep_edits() {
-    let (eng, _rx, root) = engine("media");
-    let p = project_with_songs(&eng).await;
-    // pretend the first clip was fetched
-    let cid = p.songs[0].clip_id.clone().unwrap();
-    let dir = eng.store.dir("t1").join(format!("clips/{cid}"));
+fn audio_state(file: &str, frames: Vec<u32>) -> project::AudioState {
+    let n = frames.len();
+    let dur = frames.iter().map(|&f| f as f64).sum::<f64>() * 1024.0 / 48000.0;
+    project::AudioState {
+        file: file.into(),
+        variant: 0,
+        duration: dur,
+        index: crate::hls::audio_extract::SegIndex { first_segment: 0, frames, durations: vec![8.0; n], samples_per_frame: 1024, sample_rate: 48000 },
+        fetched_bytes: 0,
+        full_source_bytes: 0,
+        fallback_segments: 0,
+        elapsed_sec: 0.0,
+        dropped: false,
+    }
+}
+
+fn source_info(container: crate::source::Container) -> crate::source::SourceInfo {
+    crate::source::SourceInfo {
+        platform: crate::source::Platform::Chzzk,
+        video_id: "x".into(),
+        url: String::new(),
+        title: String::new(),
+        channel: String::new(),
+        duration: 80.0,
+        container,
+        variants: vec![crate::hls::m3u8::Variant { width: 1920, height: 1080, bandwidth: 8_000_000, codecs: None, url: String::new() }],
+        audio_variant: 0,
+        catalog: Default::default(),
+        notes: Vec::new(),
+        notices: Vec::new(),
+        audio_tracks: Vec::new(),
+    }
+}
+
+fn fake_span(eng: &Arc<Engine>, pid: &str, id: &str, start: f64, secs: f64) -> project::StemSpan {
+    let dir = eng.store.dir(pid).join(format!("stems/{id}"));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("source.mp4"), vec![0u8; 4096]).unwrap();
-    let sid = p.songs[0].id.clone();
-    eng.upsert_mute("t1", &sid, mute(120.0, 125.0, Origin::Manual), None).await.unwrap();
-    eng.mutate("t1", |p| {
-        let c = p.clip_mut(&cid).unwrap();
-        c.video = Some(VideoClip {
-            path: dir.join("source.mp4"),
+    let frames = (secs * 48000.0) as u64;
+    for f in ["orig.wav", "vocals.wav"] {
+        wav::write_f32(&dir.join(f), 48000, 2, &vec![0.1; frames as usize * 2]).unwrap();
+    }
+    project::StemSpan {
+        id: id.into(),
+        start,
+        end: start + secs,
+        frames,
+        sample_rate: 48000,
+        dir: format!("stems/{id}"),
+        model: "m".into(),
+        device: runtime::Device::Cpu,
+        created_at: project::now(),
+    }
+}
+
+#[tokio::test]
+async fn cleanup_levels_keep_decisions_and_respect_pin() {
+    let (eng, _rx, root) = engine("cleanup");
+    let mut p = eng.store.create("t2", "test").unwrap();
+    p.source = Some(source_info(crate::source::Container::Ts));
+    // ten 8 s segments
+    p.audio = Some(audio_state("audio.aac", vec![375; 10]));
+    p.settings.margin_before = 0.0;
+    p.settings.margin_after = 0.0;
+    let mut s = song(20.0, 30.0);
+    s.id = "s1".into();
+    s.mutes.push(mute(21.0, 22.0, Origin::Manual));
+    let mut off = song(60.0, 70.0);
+    off.id = "s2".into();
+    off.enabled = false;
+    p.songs = vec![s, off];
+    p.pinned = true;
+    std::fs::write(eng.store.path("t2", "audio.aac"), vec![1u8; 1000]).unwrap();
+    for i in 0..10 {
+        let f = vstore::segment_path(&eng.store.dir("t2"), 0, i, crate::source::Container::Ts);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, vec![0x47u8; 188]).unwrap();
+    }
+    p.stems.push(fake_span(&eng, "t2", "st1", 16.0, 2.0));
+    eng.store.save(&mut p).unwrap();
+
+    let u = eng.storage_usage("t2").unwrap();
+    assert_eq!((u.video, u.unused_video, u.audio), (1880, 188 * 8, 1000));
+    assert_eq!(u.video_sec, 80.0);
+    assert!(u.stems > 0 && u.pinned);
+
+    // pinned: refused unless forced
+    assert_eq!(eng.media_drop("t2", DropLevel::Unused, false).await.unwrap_err().code, "PINNED");
+    let (_, freed) = eng.media_drop("t2", DropLevel::Unused, true).await.unwrap();
+    assert_eq!(freed, 188 * 8);
+    // segments 2 and 3 (16–32 s) hold the enabled song; the excluded one doesn't count
+    let left: Vec<usize> = eng.with_ps("t2", |ps| ps.have.keys().copied().collect()).unwrap();
+    assert_eq!(left, vec![2, 3]);
+    assert_eq!(eng.video_state("t2").unwrap().have_sec, 16.0);
+
+    eng.set_pinned("t2", false).await.unwrap();
+    let (p, _) = eng.media_drop("t2", DropLevel::Stems, false).await.unwrap();
+    assert!(p.stems.is_empty() && !eng.store.dir("t2").join("stems/st1").exists());
+    assert_eq!(eng.video_state("t2").unwrap().have_sec, 16.0, "stems level keeps video");
+    let (_, freed) = eng.media_drop("t2", DropLevel::Video, false).await.unwrap();
+    assert_eq!(freed, 376);
+    assert_eq!(eng.video_state("t2").unwrap().have_sec, 0.0);
+    let (p, _) = eng.media_drop("t2", DropLevel::Audio, false).await.unwrap();
+    assert!(p.audio.as_ref().unwrap().dropped && !eng.store.path("t2", "audio.aac").exists());
+    // decisions stay
+    assert_eq!(p.songs.len(), 2);
+    assert_eq!(p.songs[0].mutes.len(), 1);
+    assert!(eng.list()[0].pinned == p.pinned && !eng.list()[0].has_audio);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn video_requests_need_audio_and_respect_gone_vods() {
+    let (eng, _rx, root) = engine("vreq");
+    let mut p = eng.store.create("t3", "test").unwrap();
+    eng.store.save(&mut p).unwrap();
+    let r = crate::ipc::server::dispatch(&eng, "video.fetch", json!({ "id": "t3", "ranges": [[0.0, 10.0]] })).await;
+    assert_eq!(r.unwrap_err().code, "PRECONDITION");
+    p = eng.get("t3").unwrap();
+    p.source = Some(source_info(crate::source::Container::Ts));
+    p.audio = Some(audio_state("audio.aac", vec![375; 10]));
+    p.vod = Some(project::VodStatus { status: project::VodState::Gone, checked_at: project::now(), code: None });
+    eng.store.save(&mut p).unwrap();
+    eng.reload_ps("t3").unwrap();
+    // estimate works offline: 0–10 s widened by the edge margin → 2 segments
+    let e = eng.video_estimate("t3", &FetchArgs { ranges: Some(vec![(0.0, 10.0)]), ..Default::default() }).unwrap();
+    assert_eq!((e.total_sec, e.missing_sec), (16.0, 16.0));
+    assert_eq!(e.estimated_bytes, 16_000_000);
+    assert_eq!(eng.video_fetch("t3", FetchArgs { ranges: Some(vec![(0.0, 10.0)]), ..Default::default() }).unwrap_err().code, "VOD_GONE");
+    let r = crate::ipc::server::dispatch(&eng, "video.status", json!({ "id": "t3" })).await.unwrap();
+    assert_eq!(r["ranges"], json!([]));
+    assert_eq!(crate::ipc::server::dispatch(&eng, "clip.extend", json!({})).await.unwrap_err().code, "INVALID_PARAMS");
+    let n = crate::ipc::server::dispatch(&eng, "system.net_stats", serde_json::Value::Null).await.unwrap();
+    assert_eq!(n["limit"], json!(4));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn clip_projects_are_adopted_without_downloading() {
+    let (eng, _rx, root) = engine("migrate");
+    let dir = root.join("old1");
+    std::fs::create_dir_all(dir.join("clips/c1")).unwrap();
+    std::fs::write(dir.join("clips/c1/source.mp4"), vec![0u8; 3000]).unwrap();
+    for f in ["orig.wav", "vocals.wav"] {
+        wav::write_f32(&dir.join("clips/c1").join(f), 48000, 2, &vec![0.0; 48000 * 2 * 3]).unwrap();
+    }
+    let mut p = Project::new("old1", "x");
+    p.schema = "cliper/project@1".into();
+    p.source = Some(source_info(crate::source::Container::Fmp4));
+    p.audio = Some(audio_state("audio.aac", vec![375; 10]));
+    let mut s = song(17.0, 19.0);
+    s.id = "s1".into();
+    s.clip_id = Some("c1".into());
+    p.songs.push(s);
+    p.clips.push(Clip {
+        id: "c1".into(),
+        start: 15.0,
+        end: 21.0,
+        video: Some(crate::hls::video_fetch::VideoClip {
+            path: PathBuf::from("C:/somewhere/else/source.mp4"),
             variant: 0,
-            resolution: "1x1".into(),
-            segments: crate::hls::m3u8::SegRange { first: 0, last: 1, seg_start: c.start, trim: 0.0 },
-            vod_start: c.start,
-            duration: c.end - c.start,
-            bytes: 4096,
+            resolution: "1920x1080".into(),
+            segments: crate::hls::m3u8::SegRange { first: 1, last: 3, seg_start: 8.0, trim: 0.0 },
+            vod_start: 8.0,
+            duration: 16.0,
+            bytes: 3000,
             skipped_variants: Vec::new(),
-        });
-        Ok(())
-    })
-    .await
-    .unwrap();
+        }),
+        offset: 0.0123,
+        stems: Some(crate::stems::Stems {
+            orig: PathBuf::from("C:/somewhere/else/orig.wav"),
+            vocals: PathBuf::from("C:/somewhere/else/vocals.wav"),
+            sample_rate: 48000,
+            frames: 48000 * 3,
+            model: "m".into(),
+            device: runtime::Device::Cuda,
+            elapsed_sec: 1.0,
+        }),
+        talk: vec![(17.5, 18.0)],
+        song_ids: vec!["s1".into()],
+        pinned: false,
+        alignment: None,
+    });
+    std::fs::write(dir.join("project.json"), serde_json::to_vec(&p).unwrap()).unwrap();
 
-    let (p2, freed) = eng.drop_media("t1", None).await.unwrap();
-    assert!(freed >= 4096);
-    assert!(!dir.exists());
-    assert!(p2.clips.iter().all(|c| c.video.is_none()));
-    assert_eq!(p2.songs[0].mutes.len(), 1, "edits survive dropping media");
-
-    // extend: the clip keeps its new range through re-planning
-    let cid = p2.songs[0].clip_id.clone().unwrap();
-    let p3 = eng.extend_clip("t1", &cid, 10.0, 400.0).await.unwrap();
-    let c = p3.clip(&cid).unwrap();
-    assert!(c.pinned && c.start == 10.0 && c.end == 400.0);
-    let p4 = eng.update_song("t1", &sid, json!({ "title": "x" }), None).await.unwrap();
-    assert_eq!(p4.clip(&cid).map(|c| (c.start, c.end)), Some((10.0, 400.0)));
+    let q = eng.get("old1").unwrap();
+    assert_eq!(q.schema, project::SCHEMA);
+    assert!(q.clips.is_empty() && q.songs[0].clip_id.is_none());
+    assert_eq!(q.stems.len(), 1);
+    let sp = &q.stems[0];
+    assert_eq!(sp.dir, "clips/c1");
+    assert_eq!((sp.start * 48000.0).round() as i64, ((8.0123f64) * 48000.0).round() as i64);
+    assert_eq!(sp.frames, 48000 * 3);
+    assert_eq!(q.talk, vec![(17.5, 18.0)]);
+    assert_eq!(q.talk_scanned, vec![(8.0123, 24.0123)]);
+    // the clip's two segments count as video on disk; nothing is queued
+    let st = eng.video_state("old1").unwrap();
+    assert_eq!(st.have_sec, 16.0);
+    assert!(st.requests.is_empty());
+    assert_eq!(st.ranges[0].height, Some(1080));
+    // saved: loading again doesn't migrate twice
+    let idx = vstore::VideoIndex::load(&dir);
+    assert_eq!(idx.legacy.len(), 1);
+    assert_eq!((idx.legacy[0].first, idx.legacy[0].last, idx.legacy[0].file.as_str()), (1, 3, "clips/c1/source.mp4"));
+    let _ = eng.get("old1").unwrap();
+    assert_eq!(vstore::VideoIndex::load(&dir).legacy.len(), 1);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -222,6 +386,14 @@ async fn ipc_dispatch_shapes() {
     assert_eq!(n["method"], "job.started");
     assert!(n["params"].get("event").is_none());
     assert_eq!(n["params"]["items"], json!(["a"]));
+    let n = crate::ipc::server::event_to_notification(Event::VideoRequestDone {
+        project_id: "p".into(),
+        request_id: "r".into(),
+        status: "done".into(),
+        failed: vec![],
+        code: None,
+    });
+    assert_eq!(n["method"], "video.request_done");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -304,6 +476,7 @@ async fn audio_window_is_sample_exact_on_adts() {
         full_source_bytes: 0,
         fallback_segments: 0,
         elapsed_sec: 0.0,
+        dropped: false,
     });
     eng.store.save(&mut p).unwrap();
     let full = ffmpeg::decode(&aac, 48000, 2, None, None).unwrap().read_all().unwrap();
@@ -323,49 +496,27 @@ async fn alignment_measures_known_offset_and_flags_silence() {
     if !ffmpeg_available() {
         return;
     }
-    let (eng, _rx, root) = engine("align");
+    let (_eng, _rx, root) = engine("align");
     let rec = root.join("rec.wav");
-    wav::write_f32(&rec, 48000, 2, &noise(90.0, 48000)).unwrap();
-    // local project: the analysis audio is the recording itself
-    let mut p = eng.store.create("a1", "test").unwrap();
-    encode(&rec, &eng.store.path("a1", "audio.mka"), &["-c:a", "flac"]);
-    p.source = Some(crate::local::source_info(&rec).unwrap());
-    p.audio = Some(project::AudioState {
-        file: "audio.mka".into(),
-        variant: 0,
-        duration: 90.0,
-        index: crate::hls::audio_extract::SegIndex { first_segment: 0, frames: Vec::new(), durations: Vec::new(), samples_per_frame: 1024, sample_rate: 48000 },
-        fetched_bytes: 0,
-        full_source_bytes: 0,
-        fallback_segments: 0,
-        elapsed_sec: 0.0,
-    });
-    eng.store.save(&mut p).unwrap();
-    // a "clip" whose t = 0 is recording t = 20.5 but which claims vod_start 20
-    let clip = root.join("clip.m4a");
+    let sig = noise(90.0, 48000);
+    wav::write_f32(&rec, 48000, 2, &sig).unwrap();
+    // a stretch whose media t = 0 is VOD 20.5 (so m = −20.5), predicted as −20.0
+    let clip = root.join("clip.mka");
     let mut c = ffmpeg::command();
-    c.arg("-y").args(["-ss", "20.5"]).arg("-i").arg(&rec).args(["-t", "60", "-c:a", "flac"]).arg(root.join("clip.mka"));
+    c.arg("-y").args(["-ss", "20.5"]).arg("-i").arg(&rec).args(["-t", "60", "-c:a", "flac"]).arg(&clip);
     ffmpeg::run(c).unwrap();
-    let v = |path: PathBuf| VideoClip {
-        path,
-        variant: 0,
-        resolution: String::new(),
-        segments: crate::hls::m3u8::SegRange { first: 0, last: 0, seg_start: 20.0, trim: 0.0 },
-        vod_start: 20.0,
-        duration: 60.0,
-        bytes: 0,
-        skipped_variants: Vec::new(),
-    };
-    let a = eng.align_clip(&p, &v(root.join("clip.mka"))).await;
+    let analysis = |s: f64, d: f64| -> ApiResult<Vec<f32>> { Ok(ffmpeg::decode(&rec, 8000, 1, Some(s), Some(d))?.read_all()?) };
+    let pieces = [crate::video::media::Piece::Local { file: clip.clone(), track: 0 }];
+    let a = video_impl::measure_m(&root, crate::source::Container::Fmp4, &pieces, 0.0, -20.0, 0, analysis);
     assert!(a.ok && a.method == "measured", "{} {}", a.method, a.corr);
-    assert!((a.offset - 0.5).abs() < 0.002, "offset {}", a.offset);
+    assert!((a.m + 20.5).abs() < 0.002, "m {}", a.m);
 
-    // silent clip: not confirmed, falls back to the prediction (not a fake 0 match)
+    // silent stretch: not confirmed, falls back to the prediction (not a fake match)
     let silent = root.join("silent.wav");
     wav::write_f32(&silent, 48000, 2, &vec![0.0; 48000 * 2 * 60]).unwrap();
-    let _ = clip;
-    let a = eng.align_clip(&p, &v(silent)).await;
-    assert!(!a.ok && a.method == "predicted");
+    let pieces = [crate::video::media::Piece::Local { file: silent, track: 0 }];
+    let a = video_impl::measure_m(&root, crate::source::Container::Fmp4, &pieces, 0.0, -20.0, 0, analysis);
+    assert!(!a.ok && a.method == "predicted" && a.m == -20.0);
     let _ = std::fs::remove_dir_all(root);
 }
 

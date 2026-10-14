@@ -18,11 +18,10 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::analysis::detect::{self, Params};
-use crate::analysis::talk::{self, TalkParams};
-use crate::audio::{align, ffmpeg, peaks, wav};
+use crate::audio::{ffmpeg, peaks, wav};
 use crate::export::{ExportSpec, OutputFormat, StemsSpec, export_song, export_stems};
 use crate::hls::audio_extract::{self, ExtractOptions};
-use crate::hls::video_fetch::{self, VideoClip, VideoOptions};
+use crate::hls::video_fetch;
 use crate::ml::panns::{self, Probs, Tagger};
 use crate::ml::runtime;
 use crate::ml::separator::ModelSpec;
@@ -30,9 +29,21 @@ use crate::progress::{CancellationToken, Progress, ProgressFn};
 use crate::project::report::{self, ReportFormat};
 use crate::project::setlist::{self, SetlistMatch};
 use crate::cookies::{CookieJar, CookieStatus};
-use crate::project::{self, Alignment, Detection, JobError, naming, Mute, Origin, Project, Settings, Song, Store, plan};
+use crate::project::{self, Detection, JobError, naming, Mute, Origin, Project, Settings, Song, Store};
+use crate::ranges::{self, Range};
 use crate::render::MuteSpan;
 use crate::source::{ResolveError, Source};
+use crate::storage::{DropLevel, StorageUsage};
+use crate::video::store as vstore;
+
+#[path = "engine_video.rs"]
+mod video_impl;
+#[path = "engine_stems.rs"]
+mod stems_impl;
+
+pub use stems_impl::EnsureResult;
+pub use video_impl::{FetchArgs, FetchPlan, VideoView};
+use video_impl::VideoMgr;
 
 /// `lock()` that survives a panic in another holder (the data is still usable
 /// for this engine's simple maps; a poisoned lock must not take the engine down).
@@ -68,14 +79,18 @@ pub struct EngineConfig {
 pub struct ApiError {
     /// INVALID_PARAMS | NOT_FOUND | BUSY | CONFLICT | ADDON | UNRECOGNIZED_INPUT | AUTH_REQUIRED | VOD_NOT_FOUND |
     /// NETWORK | CDN_TRUNCATED | FORMAT | FFMPEG_MISSING | FFMPEG_FAILED | MODEL_MISSING |
-    /// MODEL | CANCELLED | PRECONDITION | IO | INTERNAL
+    /// MODEL | CANCELLED | PRECONDITION | IO | INTERNAL | VIDEO_MISSING | VOD_GONE | NO_SPACE | PINNED
     pub code: String,
     pub message: String,
+    /// details, e.g. `{ranges}` for VIDEO_MISSING, `{need, free}` for NO_SPACE
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub data: Option<Value>,
 }
 
 impl ApiError {
     pub fn new(code: &str, message: impl std::fmt::Display) -> Self {
-        Self { code: code.into(), message: message.to_string() }
+        Self { code: code.into(), message: message.to_string(), data: None }
     }
 }
 
@@ -181,6 +196,11 @@ pub enum Event {
     JobFailed { job_id: String, kind: String, project_id: String, error: ApiError },
     ProjectChanged { project: Box<Project> },
     QueueChanged { queue: Vec<crate::queue::QueueEntry> },
+    /// coverage / requests of a project's video changed (throttled, at most 4/s)
+    VideoChanged { video: Box<crate::video::VideoState> },
+    /// a `video.fetch` request ended: `status` "done" | "failed" | "cancelled";
+    /// `failed` = ranges that couldn't be fetched, `code` = why (first failure)
+    VideoRequestDone { project_id: String, request_id: String, status: String, failed: Vec<Range>, code: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,8 +270,10 @@ pub struct ProjectSummary {
     pub unreviewed: usize,
     /// mute suggestions waiting for confirmation (enabled songs)
     pub unconfirmed_mutes: usize,
-    /// enabled songs whose clip is downloaded and separated
+    /// enabled songs whose whole range has video and is separated
     pub clips_ready: usize,
+    pub pinned: bool,
+    pub vod: Option<project::VodStatus>,
     pub has_audio: bool,
     pub has_detection: bool,
     pub last_error: Option<JobError>,
@@ -278,6 +300,12 @@ pub struct Engine {
     pub(crate) queue: Mutex<Vec<crate::queue::QueueEntry>>,
     pub(crate) queue_wake: tokio::sync::Notify,
     pub(crate) queue_worker: AtomicBool,
+    /// segment store + fetch scheduler
+    pub(crate) video: VideoMgr,
+    /// project → lock serialising changes to its stems (ensure, export, cleanup)
+    stems_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// project → ranges to separate once the running stems.ensure finishes
+    pending_process: Mutex<HashMap<String, Vec<Range>>>,
 }
 
 /// Keep Windows from sleeping while jobs run (unattended overnight batches).
@@ -345,45 +373,18 @@ fn release_models_when_idle(eng: std::sync::Weak<Engine>) {
         .ok();
 }
 
-struct AlignOutcome {
-    method: String,
-    offset: f64,
-    corr: f32,
-    predicted: f64,
-    ok: bool,
-}
-
-/// Which clips a `clips.fetch` job works on (re-evaluated as the plan changes).
-enum FetchTarget {
-    /// every clip missing video or stems
-    Missing,
-    /// clips hosting these songs
-    Songs(Vec<String>),
-    /// these clips, or — once re-planned — unfinished clips hosting their songs
-    Clips(Vec<String>, Vec<String>),
-}
-
-impl FetchTarget {
-    fn wants(&self, c: &project::Clip) -> bool {
-        let unfinished = c.video.is_none() || c.stems.is_none();
-        match self {
-            FetchTarget::Missing => unfinished,
-            FetchTarget::Songs(s) => c.song_ids.iter().any(|x| s.contains(x)),
-            FetchTarget::Clips(ids, songs) => ids.contains(&c.id) || (unfinished && c.song_ids.iter().any(|x| songs.contains(x))),
-        }
-    }
-}
-
 /// Engine preferences persisted in `<projects>/engine.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct EnginePrefs {
     keep_awake: bool,
+    /// video downloads paused app-wide (`video.pause`)
+    video_paused: bool,
 }
 
 impl Default for EnginePrefs {
     fn default() -> Self {
-        Self { keep_awake: true }
+        Self { keep_awake: true, video_paused: false }
     }
 }
 
@@ -424,8 +425,8 @@ fn validate_settings(s: &Settings) -> ApiResult<()> {
     let range = |v: f64, lo: f64, hi: f64, what: &str| -> ApiResult<()> {
         if v.is_finite() && (lo..=hi).contains(&v) { Ok(()) } else { Err(invalid(format!("{what} must be within {lo}..{hi}"))) }
     };
-    range(s.margin_before, 0.0, 600.0, "margin_before")?;
-    range(s.margin_after, 0.0, 600.0, "margin_after")?;
+    range(s.margin_before, 0.0, 300.0, "margin_before")?;
+    range(s.margin_after, 0.0, 300.0, "margin_after")?;
     range(s.mute_fade, 0.0, 5.0, "mute_fade")?;
     if let Some(g) = s.mute_gain_db {
         range(g, -120.0, 0.0, "mute_gain_db")?;
@@ -598,20 +599,6 @@ impl AnalysisSource {
     }
 }
 
-/// Clip offset predicted from stored indexes: where the clip's first segment
-/// starts on the analysis (decoded-sample) timeline vs. on the EXTINF timeline.
-fn predicted_offset(p: &Project, v: &VideoClip) -> f64 {
-    if is_local(p) {
-        return 0.0;
-    }
-    let Some(a) = &p.audio else { return 0.0 };
-    let seg = v.segments.first;
-    if seg < a.index.first_segment || seg - a.index.first_segment > a.index.frames.len() || a.index.sample_rate == 0 {
-        return 0.0;
-    }
-    a.index.sample_at_segment(seg - a.index.first_segment) as f64 / a.index.sample_rate as f64 - v.vod_start
-}
-
 /// Builds `overview.peaks` while the analysis audio is still being written:
 /// tails the growing ADTS file into an ffmpeg decoder and snapshots the peaks
 /// every few seconds. `until_ms` = how far the written peaks reach.
@@ -746,7 +733,7 @@ type StageClock = (String, Option<String>, Instant, u64);
 /// the analysis audio that detect.run and clips.fetch (alignment) read.
 fn conflicts(a: &str, b: &str) -> bool {
     let pair = |x: &str, y: &str| (a == x && b == y) || (a == y && b == x);
-    pair("audio.fetch", "detect.run") || pair("audio.fetch", "clips.fetch")
+    pair("audio.fetch", "detect.run") || pair("audio.fetch", "clips.fetch") || pair("audio.fetch", "stems.ensure") || pair("audio.fetch", "export.run")
 }
 
 fn is_local(p: &Project) -> bool {
@@ -768,6 +755,7 @@ impl Engine {
         let cookies = CookieJar::load(&cfg.projects_root);
         let prefs = EnginePrefs::load(&cfg.projects_root);
         let keep_awake = cfg.keep_awake.unwrap_or(prefs.keep_awake);
+        let video_paused = prefs.video_paused;
         let eng = Arc::new(Self {
             cfg,
             store,
@@ -785,9 +773,13 @@ impl Engine {
             queue: Mutex::new(Vec::new()),
             queue_wake: tokio::sync::Notify::new(),
             queue_worker: AtomicBool::new(false),
+            video: VideoMgr::new(video_paused),
+            stems_locks: Mutex::new(HashMap::new()),
+            pending_process: Mutex::new(HashMap::new()),
         });
         keep_awake_while_busy(Arc::downgrade(&eng));
         release_models_when_idle(Arc::downgrade(&eng));
+        eng.video_start();
         eng
     }
 
@@ -956,7 +948,9 @@ impl Engine {
     /// Keep the PC awake while jobs run (persisted).
     pub fn set_keep_awake(&self, enabled: bool) -> ApiResult<()> {
         self.keep_awake.store(enabled, Ordering::Relaxed);
-        EnginePrefs { keep_awake: enabled }.save(&self.cfg.projects_root)?;
+        let mut prefs = EnginePrefs::load(&self.cfg.projects_root);
+        prefs.keep_awake = enabled;
+        prefs.save(&self.cfg.projects_root)?;
         Ok(())
     }
 
@@ -1053,9 +1047,14 @@ impl Engine {
             }
             eng.job_finished.notify_waiters();
             eng.record_outcome(&pid, &kind_s, &res).await;
+            let stems_job = kind_s == "stems.ensure";
             match res {
-                Ok(result) => eng.emit(Event::JobDone { job_id: jid, kind: kind_s, project_id: pid, result }),
-                Err(error) => eng.emit(Event::JobFailed { job_id: jid, kind: kind_s, project_id: pid, error }),
+                Ok(result) => eng.emit(Event::JobDone { job_id: jid, kind: kind_s, project_id: pid.clone(), result }),
+                Err(error) => eng.emit(Event::JobFailed { job_id: jid, kind: kind_s, project_id: pid.clone(), error }),
+            }
+            if stems_job {
+                // separation queued by fetches that finished meanwhile
+                eng.after_stems_job(&pid);
             }
         });
         Ok(job_id)
@@ -1136,13 +1135,13 @@ fn summarize(projects: Vec<Project>) -> Vec<ProjectSummary> {
                 thumbnail: p.source.as_ref().and_then(|s| s.catalog.thumbnail.clone()),
                 unreviewed: p.songs.iter().filter(|s| s.enabled && !s.reviewed).count(),
                 unconfirmed_mutes: p.songs.iter().filter(|s| s.enabled).flat_map(|s| &s.mutes).filter(|m| !m.confirmed).count(),
-                clips_ready: p
-                    .songs
-                    .iter()
-                    .filter(|s| s.enabled)
-                    .filter(|s| s.clip_id.as_deref().and_then(|c| p.clip(c)).is_some_and(|c| c.video.is_some() && c.stems.is_some()))
-                    .count(),
-                has_audio: p.audio.is_some(),
+                clips_ready: {
+                    let sep: Vec<Range> = p.stems.iter().map(|x| (x.start, x.end)).collect();
+                    p.songs.iter().filter(|s| s.enabled && ranges::covers(&sep, (s.start, s.end), 0.05)).count()
+                },
+                pinned: p.pinned,
+                vod: p.vod.clone(),
+                has_audio: p.audio.as_ref().is_some_and(|a| !a.dropped),
                 has_detection: p.detection.is_some(),
                 last_error: p.last_error.clone(),
                 updated_at: p.updated_at,
@@ -1157,6 +1156,7 @@ impl Engine {
         if self.jobs.lk().values().any(|j| j.info.project_id == id) {
             return Err(ApiError::new("BUSY", "project has running jobs"));
         }
+        self.forget_ps(id);
         let store = self.store.clone();
         let idc = id.to_string();
         tokio::task::spawn_blocking(move || store.delete(&idc)).await??;
@@ -1254,7 +1254,6 @@ impl Engine {
         validate_settings(&settings)?;
         self.mutate(id, |p| {
             p.settings = settings;
-            plan::plan_clips(p);
             Ok(())
         })
         .await
@@ -1273,7 +1272,6 @@ impl Engine {
         self.mutate(id, |p| {
             check_revision(p, base_revision)?;
             p.songs = songs;
-            plan::plan_clips(p);
             Ok(())
         })
         .await
@@ -1300,7 +1298,6 @@ impl Engine {
             validate_song(&mut ns)?;
             *s = ns;
             sort_songs(p);
-            plan::plan_clips(p);
             Ok(())
         })
         .await
@@ -1318,8 +1315,7 @@ impl Engine {
                 check_revision(p, base_revision)?;
                 p.songs.push(song);
                 sort_songs(p);
-                plan::plan_clips(p);
-                Ok(())
+                    Ok(())
             })
             .await?;
         Ok((p, sid))
@@ -1333,7 +1329,6 @@ impl Engine {
             if p.songs.len() == n {
                 return Err(ApiError::new("NOT_FOUND", format!("song {song_id}")));
             }
-            plan::plan_clips(p);
             Ok(())
         })
         .await
@@ -1409,81 +1404,176 @@ impl Engine {
         Ok(json!({ "text": text, "path": path }))
     }
 
-    pub async fn plan(&self, id: &str) -> ApiResult<Project> {
+    /// Bytes on disk by kind (S-E8).
+    pub fn storage_usage(&self, id: &str) -> ApiResult<StorageUsage> {
+        let p = self.get(id)?;
+        let dir = self.store.dir(id);
+        let used = crate::storage::used_ranges(&p);
+        let (video, video_sec, unused_video) = self.with_ps(id, |ps| {
+            let legacy_size = |n: usize| ps.idx.legacy.get(n).and_then(|l| std::fs::metadata(dir.join(&l.file)).ok()).map(|m| m.len()).unwrap_or(0);
+            let raw: u64 = ps.have.values().filter(|h| matches!(h.kind, vstore::HaveKind::Raw(_))).map(|h| h.bytes).sum();
+            let legacy: u64 = (0..ps.idx.legacy.len()).map(legacy_size).sum();
+            let unused = match (&ps.tl, ps.local) {
+                (Some(tl), false) => {
+                    let (r, l) = crate::storage::unused_selection(&ps.have, tl, &used);
+                    r.iter().map(|i| ps.have[i].bytes).sum::<u64>() + l.iter().map(|&n| legacy_size(n)).sum::<u64>()
+                }
+                _ => 0,
+            };
+            let sec = if ps.local { 0.0 } else { ranges::total(&ps.have_ranges()) };
+            (if ps.local { 0 } else { raw + legacy }, sec, unused)
+        })?;
+        let fsize = |rel: &str| std::fs::metadata(dir.join(rel)).map(|m| m.len()).unwrap_or(0);
+        let audio = p.audio.as_ref().map(|a| fsize(&a.file)).unwrap_or(0) + fsize("overview.peaks") + fsize("probs.bin");
+        let stems: u64 = p.stems.iter().map(|s| ["orig.wav", "vocals.wav", "orig.peaks", "vocals.peaks"].iter().map(|f| fsize(&s.file(f))).sum::<u64>()).sum();
+        let cache = vstore::dir_size(&dir.join("cache")) + vstore::dir_size(&dir.join(vstore::DIR).join("views"));
+        let exports = vstore::dir_size(&dir.join("exports"));
+        Ok(StorageUsage {
+            project_id: id.into(),
+            audio,
+            video,
+            stems,
+            unused_video,
+            cache,
+            exports,
+            total: audio + video + stems + cache,
+            pinned: p.pinned,
+            video_sec,
+            updated_at: p.updated_at,
+        })
+    }
+
+    /// Usage of every project (+ free space on the projects drive).
+    pub async fn storage_all(self: &Arc<Self>) -> ApiResult<Value> {
+        let eng = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let projects: Vec<StorageUsage> = eng.store.list().iter().filter_map(|p| eng.storage_usage(&p.id).ok()).collect();
+            Ok(json!({ "projects": projects, "free": crate::storage::free_space(&eng.cfg.projects_root), "root": eng.cfg.projects_root }))
+        })
+        .await?
+    }
+
+    /// Keep (pin) this project out of cleanup.
+    pub async fn set_pinned(&self, id: &str, pinned: bool) -> ApiResult<Project> {
         self.mutate(id, |p| {
-            plan::plan_clips(p);
+            p.pinned = pinned;
             Ok(())
         })
         .await
     }
 
-    /// Change a clip's VOD range (e.g. a song was extended past its margins).
-    /// Drops the clip's video/stems; the next `clips.fetch` re-downloads it.
-    pub async fn extend_clip(&self, id: &str, clip_id: &str, start: f64, end: f64) -> ApiResult<Project> {
-        if !(start.is_finite() && end.is_finite()) || end <= start || start < 0.0 {
-            return Err(invalid("bad clip range"));
+    /// Cleanup (S-E8): delete media up to `level`; decisions always stay.
+    /// Refused for pinned projects unless `force`, and while the project's
+    /// video is being fetched or a job runs on it. Returns the bytes freed.
+    pub async fn media_drop(self: &Arc<Self>, id: &str, level: DropLevel, force: bool) -> ApiResult<(Project, u64)> {
+        let p = self.get(id)?;
+        if p.pinned && !force {
+            return Err(ApiError::new("PINNED", "this project is pinned (kept); unpin it or pass force"));
         }
-        if self.jobs.lk().values().any(|j| j.info.project_id == id && (j.info.kind == "clips.fetch" || j.info.kind == "export.run")) {
-            return Err(ApiError::new("BUSY", "clips are being fetched or exported"));
+        if let Some(j) = self.jobs.lk().values().find(|j| j.info.project_id == id) {
+            return Err(ApiError::new("BUSY", format!("{} is running for {id}", j.info.kind)));
         }
-        let dir = self.store.dir(id).join(format!("clips/{clip_id}"));
-        let p = self
-            .mutate(id, |p| {
-                let c = p.clip_mut(clip_id).ok_or_else(|| ApiError::new("NOT_FOUND", format!("clip {clip_id}")))?;
-                c.start = start;
-                c.end = end;
-                c.video = None;
-                c.stems = None;
-                c.talk.clear();
-                c.offset = 0.0;
-                c.alignment = None;
-                // keep the requested range through re-planning
-                c.pinned = true;
-                plan::plan_clips(p);
-                Ok(())
-            })
-            .await?;
-        let _ = std::fs::remove_dir_all(dir);
-        Ok(p)
-    }
-
-    /// Delete downloaded video + stems of one clip (or all clips) to free disk
-    /// space. Songs, mutes and edits stay; `clips.fetch` downloads again.
-    /// Returns the project and the bytes freed.
-    pub async fn drop_media(&self, id: &str, clip_id: Option<&str>) -> ApiResult<(Project, u64)> {
-        if self.jobs.lk().values().any(|j| j.info.project_id == id && (j.info.kind == "clips.fetch" || j.info.kind == "export.run")) {
-            return Err(ApiError::new("BUSY", "clips are being fetched or exported"));
+        let busy = self.with_ps(id, |ps| !ps.idx.requests.is_empty() || !ps.fetching.is_empty())?;
+        if busy {
+            return Err(ApiError::new("BUSY", "video is being fetched for this project; cancel it first (video.cancel)"));
         }
-        let mut dirs = Vec::new();
-        let p = self
-            .mutate(id, |p| {
-                if let Some(c) = clip_id
-                    && p.clip(c).is_none() {
-                        return Err(ApiError::new("NOT_FOUND", format!("clip {c}")));
-                    }
-                for c in p.clips.iter_mut().filter(|c| clip_id.is_none_or(|x| x == c.id)) {
-                    dirs.push(c.dir_name());
-                    c.video = None;
-                    c.stems = None;
-                    c.talk.clear();
-                    c.offset = 0.0;
+        let lock = self.stems_lock(id);
+        let _g = lock.lock().await;
+        let dir = self.store.dir(id);
+        let before = self.storage_usage(id)?;
+        let eng = self.clone();
+        let (idc, pc) = (id.to_string(), p.clone());
+        tokio::task::spawn_blocking(move || -> ApiResult<()> {
+            let id = idc.as_str();
+            let rm = |f: &Path| {
+                let _ = std::fs::remove_file(f);
+            };
+            // the view cache goes with every level
+            eng.drop_views(id);
+            if level == DropLevel::Unused && !is_local(&pc) {
+                let used = crate::storage::used_ranges(&pc);
+                let (raw, files, container) = eng.with_ps(id, |ps| {
+                    let tl = ps.tl.clone();
+                    let (r, l) = tl.as_ref().map(|tl| crate::storage::unused_selection(&ps.have, tl, &used)).unwrap_or_default();
+                    let raw: Vec<(usize, usize)> = r
+                        .iter()
+                        .filter_map(|i| match ps.have[i].kind {
+                            vstore::HaveKind::Raw(v) => Some((v, *i)),
+                            _ => None,
+                        })
+                        .collect();
+                    let files: Vec<String> = l.iter().filter_map(|&n| ps.idx.legacy.get(n).map(|x| x.file.clone())).collect();
+                    (raw, files, ps.container)
+                })?;
+                for (v, i) in raw {
+                    rm(&vstore::segment_path(&dir, v, i, container));
                 }
-                plan::plan_clips(p);
+                for f in &files {
+                    rm(&dir.join(f));
+                }
+                if !files.is_empty() {
+                    eng.with_ps(id, |ps| {
+                        ps.idx.legacy.retain(|l| !files.contains(&l.file));
+                        ps.idx_dirty = true;
+                    })?;
+                    eng.save_index(id);
+                }
+            }
+            if level >= DropLevel::Stems {
+                for s in &pc.stems {
+                    for f in ["orig.wav", "vocals.wav", "orig.peaks", "vocals.peaks"] {
+                        rm(&dir.join(s.file(f)));
+                    }
+                    let _ = std::fs::remove_dir(dir.join(&s.dir));
+                }
+                let _ = std::fs::remove_dir(dir.join("stems"));
+            }
+            if level >= DropLevel::Video {
+                for e in std::fs::read_dir(dir.join(vstore::DIR)).into_iter().flatten().flatten() {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    if n.strip_prefix('v').is_some_and(|x| x.parse::<usize>().is_ok()) {
+                        let _ = std::fs::remove_dir_all(e.path());
+                    }
+                }
+                let files: Vec<String> = eng.with_ps(id, |ps| {
+                    ps.idx.failed.clear();
+                    ps.idx_dirty = true;
+                    ps.idx.legacy.drain(..).map(|l| l.file).collect()
+                })?;
+                eng.save_index(id);
+                for f in files {
+                    rm(&dir.join(&f));
+                    if let Some(d) = Path::new(&f).parent() {
+                        let _ = std::fs::remove_dir(dir.join(d));
+                    }
+                }
+            }
+            if level >= DropLevel::Audio {
+                if let Some(a) = &pc.audio {
+                    rm(&dir.join(&a.file));
+                }
+                let _ = std::fs::remove_dir_all(dir.join("cache"));
+                eng.frame_index.lk().remove(id);
+            }
+            Ok(())
+        })
+        .await??;
+        let p = self
+            .mutate(id, |p| {
+                if level >= DropLevel::Stems {
+                    p.stems.clear();
+                }
+                if level >= DropLevel::Audio
+                    && let Some(a) = p.audio.as_mut()
+                {
+                    a.dropped = true;
+                }
                 Ok(())
             })
             .await?;
-        let root = self.store.dir(id);
-        let freed = tokio::task::spawn_blocking(move || {
-            let mut freed = 0u64;
-            for d in dirs {
-                let d = root.join(d);
-                freed += dir_size(&d);
-                let _ = std::fs::remove_dir_all(&d);
-            }
-            freed
-        })
-        .await?;
-        Ok((p, freed))
+        self.reload_ps(id)?;
+        let after = self.storage_usage(id)?;
+        Ok((p, before.total.saturating_sub(after.total)))
     }
 
     /// Decode `[start, start+duration)` (VOD seconds) of the analysis audio to
@@ -1607,6 +1697,7 @@ impl Engine {
                     full_source_bytes: bytes,
                     fallback_segments: 0,
                     elapsed_sec: t0.elapsed().as_secs_f64(),
+                    dropped: false,
                 };
                 let p = eng
                     .mutate(&p.id, |p| {
@@ -1615,6 +1706,7 @@ impl Engine {
                         Ok(())
                     })
                     .await?;
+                eng.reload_ps(&p.id)?;
                 return Ok(json!({ "audio": p.audio }));
             }
             let src = eng.source(&p).await?;
@@ -1653,6 +1745,8 @@ impl Engine {
                     Ok(())
                 })
                 .await?;
+            // the segment timeline comes from the audio index
+            eng.reload_ps(&p.id)?;
             Ok(json!({ "audio": p.audio }))
         })
     }
@@ -1720,8 +1814,7 @@ impl Engine {
                         device,
                     });
                     p.apply_detection(&a);
-                    plan::plan_clips(p);
-                    Ok(())
+                            Ok(())
                 })
                 .await?;
             Ok(json!({ "segments": segs, "songs": p.songs.len(), "clips": p.clips.len(), "candidates": a.candidates.len() }))
@@ -1750,345 +1843,76 @@ impl Engine {
                 device,
             });
             p.apply_detection(&a);
-            plan::plan_clips(p);
             Ok(())
         })
         .await
     }
 
-    // ── clips: video → align → stems → talk ─────────────────────────────
+    // ── clips.fetch (protocol 2 compatibility) ──────────────────────────
 
-    /// Fetch + process clips: video → alignment → stems → talk suggestions.
-    /// Select by `clip_ids`, or by `song_ids` (their clips — "finish this song
-    /// first", "fetch only the reviewed songs"); neither = every clip still
-    /// missing video or stems.
-    ///
-    /// `exact` (with `song_ids`): plan clips covering just those songs (± margins)
-    /// instead of the merged clips, so close neighbours aren't fetched along.
-    pub async fn job_fetch_clips(self: &Arc<Self>, id: &str, clip_ids: Option<Vec<String>>, song_ids: Option<Vec<String>>, exact: bool) -> ApiResult<String> {
-        let mut p = self.get(id)?;
+    /// `clips.fetch`: fetch the video of songs ± margins (default: every
+    /// enabled song), wait for it, then separate and suggest mutes — the old
+    /// one-call pipeline on top of the segment store. New clients use
+    /// `video.fetch {process: true}` / `stems.ensure`.
+    pub fn job_fetch_clips(self: &Arc<Self>, id: &str, song_ids: Option<Vec<String>>) -> ApiResult<String> {
+        self.job_fetch_clips_with(id, song_ids, vstore::Priority::User)
+    }
+
+    /// [`Engine::job_fetch_clips`] at a given fetch priority (the batch queue uses `batch`).
+    pub fn job_fetch_clips_with(self: &Arc<Self>, id: &str, song_ids: Option<Vec<String>>, priority: vstore::Priority) -> ApiResult<String> {
+        let p = self.get(id)?;
         if p.audio.is_none() {
             return Err(precondition("fetch the audio first"));
         }
-        if exact
-            && let Some(ids) = &song_ids {
-                if self.jobs.lk().values().any(|j| j.info.project_id == id && j.info.kind == "clips.fetch") {
-                    return Err(ApiError::new("BUSY", format!("clips.fetch is already running for {id}")));
-                }
-                p = self
-                    .mutate(id, |p| {
-                        plan::pin_exact(p, ids);
-                        Ok(())
-                    })
-                    .await?;
-            }
-        // What to work on, expressed so it survives re-planning while the job
-        // runs (edits re-plan unfetched clips and may change their ids): the
-        // target songs, plus explicitly named clips.
-        let target = match (&clip_ids, &song_ids) {
-            (Some(ids), _) => FetchTarget::Clips(
-                ids.clone(),
-                p.clips.iter().filter(|c| ids.contains(&c.id)).flat_map(|c| c.song_ids.clone()).collect(),
-            ),
-            (None, Some(ids)) => FetchTarget::Songs(ids.clone()),
-            (None, None) => FetchTarget::Missing,
-        };
-        let todo: Vec<String> = p.clips.iter().filter(|c| target.wants(c)).map(|c| c.id.clone()).collect();
-        if todo.is_empty() {
-            return Err(precondition("no clips to fetch (plan clips / run detection first)"));
+        let songs: Vec<String> = song_ids.unwrap_or_else(|| p.songs.iter().filter(|s| s.enabled).map(|s| s.id.clone()).collect());
+        if songs.is_empty() {
+            return Err(precondition("no songs to fetch (run detection first)"));
         }
-        self.spawn_job("clips.fetch", id, todo.clone(), move |eng, ctx| async move {
-            let mut done = Vec::new();
-            let mut attempted: std::collections::HashSet<String> = std::collections::HashSet::new();
-            loop {
-                if ctx.cancel.is_cancelled() {
-                    return Err(ApiError::new("CANCELLED", "cancelled"));
-                }
-                // re-read the plan every time: the user may have edited songs
-                let cur = eng.get(&p.id)?;
-                let Some(cid) = cur.clips.iter().filter(|c| !attempted.contains(&c.id)).find(|c| target.wants(c)).map(|c| c.id.clone()) else {
-                    break;
-                };
-                attempted.insert(cid.clone());
-                let (k, n) = (attempted.len() - 1, todo.len().max(attempted.len()));
-                (ctx.progress)(Progress {
-                    message: Some(format!("clip {}/{n}", k + 1)),
-                    item: Some(cid.clone()),
-                    ..Progress::new("clips.fetch", k as u64, n as u64)
-                });
-                // tag every progress event of this clip with its id
-                let tagged: ProgressFn = {
-                    let (inner, cid) = (ctx.progress.clone(), cid.clone());
-                    Arc::new(move |mut pr: Progress| {
-                        pr.item.get_or_insert_with(|| cid.clone());
-                        inner(pr)
-                    })
-                };
-                let cctx = JobCtx { progress: tagged, ..ctx.clone() };
-                if eng.process_clip(&p.id, &cid, &cctx).await? {
-                    done.push(cid.clone());
-                }
-            }
-            eng.remove_orphan_clip_dirs(&p.id);
-            Ok(json!({ "clips": done }))
+        let targets = self.stem_targets(&p, Some(&songs), None)?;
+        self.spawn_job("clips.fetch", id, songs, move |eng, ctx| async move {
+            let failed = eng.fetch_and_wait(&p.id, &targets, priority, "clips.fetch", &ctx).await?;
+            let r = eng.stems_ensure(&p.id, &targets, &ctx).await?;
+            Ok(json!({ "clips": [], "video_failed": failed, "stems": r }))
         })
     }
 
-    /// Delete `clips/<id>/` folders no clip refers to (left behind when a clip
-    /// was re-planned away while it downloaded).
-    fn remove_orphan_clip_dirs(&self, pid: &str) {
-        let Ok(p) = self.get(pid) else { return };
-        let Ok(rd) = std::fs::read_dir(self.store.dir(pid).join("clips")) else { return };
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if !p.clips.iter().any(|c| c.id == name) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
+    /// Queue the video of `rs` and wait until the request ends; returns the
+    /// ranges still without video. Cancelling the job cancels the request.
+    pub(crate) async fn fetch_and_wait(self: &Arc<Self>, pid: &str, rs: &[Range], priority: vstore::Priority, reason: &str, ctx: &JobCtx) -> ApiResult<Vec<Range>> {
+        let plan = self.video_fetch(pid, FetchArgs { ranges: Some(rs.to_vec()), priority: Some(priority), reason: Some(reason.into()), ..Default::default() })?;
+        if let Some(rid) = plan.request_id {
+            self.wait_request(pid, &rid, ctx).await?;
         }
+        Ok(ranges::drop_short(ranges::subtract(rs, &self.video_have(pid)?), 0.05))
     }
 
-    /// Returns false when the clip was re-planned away (the user edited its
-    /// songs) — not an error; the job moves on.
-    async fn process_clip(self: &Arc<Self>, pid: &str, cid: &str, ctx: &JobCtx) -> ApiResult<bool> {
-        // pin it so edits during the download don't re-plan it away
-        let p = match self
-            .mutate(pid, |p| {
-                let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", format!("clip {cid}")))?;
-                c.pinned = true;
-                Ok(())
-            })
-            .await
-        {
-            Ok(p) => p,
-            Err(e) if e.code == "NOT_FOUND" && self.store.exists(pid) => return Ok(false),
-            Err(e) => return Err(e),
-        };
-        let clip = p.clip(cid).cloned().unwrap();
-        let dir = self.store.dir(pid).join(clip.dir_name());
-        std::fs::create_dir_all(&dir)?;
-        let mp4 = dir.join("source.mp4");
-
-        // 1) video
-        let clip = if clip.video.is_none() || !mp4.is_file() {
-            let v = if is_local(&p) {
-                (ctx.progress)(Progress::note("video.fetch", "cut_recording", "cutting the recording"));
-                let (path, track, mp4c, (a, b), cancel) =
-                    (PathBuf::from(&p.source.as_ref().unwrap().url), p.settings.audio_track, mp4.clone(), (clip.start, clip.end), ctx.cancel.clone());
-                let r = tokio::task::spawn_blocking(move || crate::local::cut_clip(&path, a, b, track, &mp4c, &cancel)).await?;
-                if ctx.cancel.is_cancelled() {
-                    return Err(ApiError::new("CANCELLED", "cancelled"));
-                }
-                r?
-            } else {
-                let src = self.source(&p).await?;
-                let opts = VideoOptions { height: p.settings.video_height, workers: None };
-                video_fetch::fetch_video(&src, clip.start, clip.end, &mp4, &opts, ctx.progress.clone(), ctx.cancel.clone()).await?
-            };
-            // 2) align against the analysis audio
-            let al = self.align_clip(&p, &v).await;
-            if !al.ok {
-                (ctx.progress)(
-                    Progress::note("align", "alignment_weak", format!("clip audio didn't match the analysis audio (corr {:.2}); using the predicted offset", al.corr))
-                        .arg("corr", (al.corr as f64 * 100.0).round() / 100.0),
-                );
-            }
-            let offset = if al.method == "measured" { al.offset } else { al.predicted };
-            let alignment = Alignment { method: al.method, corr: al.corr, predicted: al.predicted, ok: al.ok };
-            let r = self
-                .mutate(pid, |p| {
-                    let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
-                    c.video = Some(v);
-                    c.offset = offset;
-                    c.alignment = Some(alignment);
-                    c.stems = None;
-                    Ok(())
-                })
-                .await;
-            match r {
-                Ok(p2) => p2.clip(cid).cloned().unwrap(),
-                Err(e) if e.code == "NOT_FOUND" => {
-                    // re-planned away while downloading: nothing refers to it any more
-                    let _ = std::fs::remove_dir_all(&dir);
-                    return Ok(false);
-                }
-                Err(e) => return Err(e),
-            }
-        } else {
-            clip
-        };
-
-        // 3) stems
-        let clip = if clip.stems.as_ref().is_none_or(|s| !s.vocals.is_file()) {
-            let (eng, progress, cancel, mp4c, dirc) = (self.clone(), ctx.progress.clone(), ctx.cancel.clone(), mp4.clone(), dir.clone());
-            let stems = tokio::task::spawn_blocking(move || eng.separate_with_fallback(&mp4c, &dirc, &progress, &cancel)).await??;
-            let r = self
-                .mutate(pid, |p| {
-                    let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
-                    c.stems = Some(stems);
-                    Ok(())
-                })
-                .await;
-            match r {
-                Ok(p2) => p2.clip(cid).cloned().unwrap(),
-                Err(e) if e.code == "NOT_FOUND" => return Ok(false),
-                Err(e) => return Err(e),
-            }
-        } else {
-            clip
-        };
-
-        // 4) talk → mute suggestions
-        if !p.settings.suggest_mutes {
-            return Ok(true);
-        }
-        (ctx.progress)(Progress::note("talk", "find_talk", "finding talk in the vocal stem"));
-        let stems = clip.stems.clone().unwrap();
-        let songs_clip: Vec<(f64, f64)> = p
-            .songs
-            .iter()
-            .filter(|s| s.clip_id.as_deref() == Some(cid))
-            .filter_map(|s| Some((clip.to_clip_time(s.start)?, clip.to_clip_time(s.end)?)))
-            .collect();
-        let (eng, cancel) = (self.clone(), ctx.cancel.clone());
-        let regions = tokio::task::spawn_blocking(move || -> ApiResult<Vec<(f64, f64)>> {
-            let mut slot = eng.tagger.lk();
-            let tagger = eng.tagger(&mut slot)?;
-            let v = talk::probs_of_file(tagger, &stems.vocals, &cancel)?;
-            let m = talk::probs_of_file(tagger, &stems.orig, &cancel)?;
-            drop(slot);
-            let tp = TalkParams::default();
-            let regs = talk::talk_regions(&v, &m, &songs_clip, &tp);
-            Ok(talk::refine_edges(&regs, &stems.vocals, &tp)?)
-        })
-        .await??;
-        let (fade, gain_db) = (p.settings.mute_fade, p.settings.mute_gain_db);
-        let r = self.mutate(pid, |p| {
-            let c = p.clip_mut(cid).ok_or_else(|| ApiError::new("NOT_FOUND", cid))?;
-            let talk_vod: Vec<(f64, f64)> = regions.iter().filter_map(|&(a, b)| Some((c.to_vod_time(a)?, c.to_vod_time(b)?))).collect();
-            c.talk = talk_vod.clone();
-            let (mb, ma) = (p.settings.margin_before, p.settings.margin_after);
-            for s in p.songs.iter_mut().filter(|s| s.clip_id.as_deref() == Some(cid)) {
-                // keep the user's own and confirmed mutes; refresh unconfirmed suggestions
-                s.mutes.retain(|m| m.origin == Origin::Manual || m.confirmed);
-                let kept: Vec<(f64, f64)> = s.mutes.iter().map(|m| (m.start, m.end)).collect();
-                let fresh: Vec<Mute> = talk_vod
-                    .iter()
-                    .filter(|&&(a, b)| b > s.start - mb && a < s.end + ma)
-                    .filter(|&&(a, b)| !kept.iter().any(|&(x, y)| a < y && x < b))
-                    // fades lie inside a mute: put them outside the speech so the
-                    // voice is fully removed from its first syllable on
-                    .map(|&(a, b)| Mute {
-                        id: project::new_id("m"),
-                        start: (a - fade).max(0.0),
-                        end: b + fade,
-                        fade_in: fade.min(a),
-                        fade_out: fade,
-                        origin: Origin::Auto,
-                        confirmed: false,
-                        gain_db,
-                    })
-                    .collect();
-                s.mutes.extend(fresh);
-                s.mutes.sort_by(|a, b| a.start.total_cmp(&b.start));
-            }
-            Ok(())
-        })
-        .await;
-        match r {
-            Ok(_) => Ok(true),
-            Err(e) if e.code == "NOT_FOUND" => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Offset of the clip's files against the analysis timeline.
-    ///
-    /// The offset is *predicted* exactly from the segment index (frame-count
-    /// time of the clip's first segment − its EXTINF time) and *confirmed* by
-    /// cross-correlating the clip audio with the analysis audio in a narrow
-    /// window around the prediction, trying a few spots in the clip (a silent
-    /// intro can't be matched). Without confirmation the prediction is used
-    /// and the clip is flagged (`ok: false`) instead of silently assuming 0.
-    async fn align_clip(self: &Arc<Self>, p: &Project, v: &VideoClip) -> AlignOutcome {
-        let predicted = predicted_offset(p, v);
-        let fallback = move |corr: f32| AlignOutcome { method: "predicted".into(), offset: predicted, corr, predicted, ok: false };
-        let (eng, pc, vc) = (self.clone(), p.clone(), v.clone());
-        let r = tokio::task::spawn_blocking(move || -> ApiResult<AlignOutcome> {
-            const RATE: u32 = 8000;
-            const W: f64 = 2.0; // search ± around the prediction
-            let src = eng.analysis_source(&pc)?;
-            let mut best = (0.0f32, None);
-            for t0 in [5.0, 60.0, 120.0, 0.0] {
-                let len = (vc.duration - t0).min(40.0);
-                if len < 8.0 {
-                    continue;
-                }
-                let clip = ffmpeg::decode(&vc.path, RATE, 1, Some(t0), Some(len))?.read_all()?;
-                // analysis time of clip t0 is expected at vod_start + predicted + t0
-                let expect = vc.vod_start + predicted + t0;
-                let s0 = (expect - W).max(0.0);
-                let ana = src.decode(s0, len + 2.0 * W, RATE, 1)?;
-                if clip.is_empty() || ana.is_empty() {
-                    continue;
-                }
-                // clip[t] ≈ ana[t + lag]; expected lag = expect − s0
-                let (lag, corr) = align::find_lag(&ana, &clip, RATE, (expect - s0) + W);
-                let offset = s0 + lag - vc.vod_start - t0;
-                tracing::info!("clip alignment @{t0}s: offset {offset:.4}s (predicted {predicted:.4}) corr {corr:.3}");
-                if corr >= 0.3 && (offset - predicted).abs() <= W {
-                    return Ok(AlignOutcome { method: "measured".into(), offset, corr, predicted, ok: true });
-                }
-                if corr > best.0 {
-                    best = (corr, Some(offset));
-                }
-            }
-            Ok(fallback(best.0))
-        })
-        .await;
-        match r {
-            Ok(Ok(a)) => a,
-            Ok(Err(e)) => {
-                tracing::warn!("alignment failed ({e}); using the predicted offset");
-                fallback(0.0)
-            }
-            Err(e) => {
-                tracing::warn!("alignment task failed ({e}); using the predicted offset");
-                fallback(0.0)
-            }
-        }
-    }
-
-    /// Separate a clip with the cached separator. On GPU out-of-memory at
-    /// batch 1: free the detection model's GPU memory and retry once, then
-    /// redo this clip on the CPU. Blocking.
-    fn separate_with_fallback(&self, mp4: &Path, dir: &Path, progress: &ProgressFn, cancel: &CancellationToken) -> ApiResult<crate::stems::Stems> {
-        use crate::ml::separator::{SeparateError, Separator};
-        use crate::stems::StemError;
-        let mut slot = self.separator.lk();
-        let mut freed = false;
+    /// Wait for a fetch request to leave the queue, reporting `video.fetch` progress.
+    async fn wait_request(self: &Arc<Self>, pid: &str, rid: &str, ctx: &JobCtx) -> ApiResult<()> {
         loop {
-            if slot.is_none() {
-                *slot = Some(Separator::open(&self.cfg.models_dir, ModelSpec::voc_ft(), self.cfg.prefer_cpu)?);
+            if ctx.cancel.is_cancelled() {
+                let _ = self.video_cancel(pid, Some(rid));
+                return Err(ApiError::new("CANCELLED", "cancelled"));
             }
-            match crate::stems::separate_clip(mp4, dir, slot.as_mut().unwrap(), progress, cancel) {
-                Err(StemError::Separate(SeparateError::OutOfMemory)) if !freed => {
-                    freed = true;
-                    *slot = None;
-                    *self.tagger.lk() = None;
-                    tracing::warn!("separation out of GPU memory; freeing the detection model and retrying");
-                }
-                Err(StemError::Separate(SeparateError::OutOfMemory)) => {
-                    *slot = None;
-                    progress(Progress::note("separate", "gpu_out_of_memory", "GPU out of memory; separating this clip on the CPU"));
-                    let mut cpu = Separator::open(&self.cfg.models_dir, ModelSpec::voc_ft(), true)?;
-                    return Ok(crate::stems::separate_clip(mp4, dir, &mut cpu, progress, cancel)?);
-                }
-                r => return Ok(r?),
-            }
+            let st = self.video_state(pid)?;
+            let Some(r) = st.requests.iter().find(|r| r.id == rid) else { return Ok(()) };
+            (ctx.progress)(Progress {
+                message: Some(format!("video {:.0}/{:.0} s", r.have_sec, r.total_sec)),
+                ..Progress::new("video.fetch", (r.have_sec * 1000.0) as u64, (r.total_sec * 1000.0) as u64)
+            });
+            self.video_wait_change(Duration::from_secs(1)).await;
         }
     }
 
     // ── export ──────────────────────────────────────────────────────────
+
+    /// VOD ranges of a song that have no video.
+    fn song_video_missing(&self, p: &Project, s: &Song) -> ApiResult<Vec<Range>> {
+        if is_local(p) {
+            return Ok(Vec::new());
+        }
+        let have = self.video_have(&p.id)?;
+        Ok(ranges::drop_short(ranges::subtract(&[(s.start, s.end)], &have), 0.05))
+    }
 
     pub fn job_export(self: &Arc<Self>, id: &str, opts: ExportOptions) -> ApiResult<String> {
         let p = self.get(id)?;
@@ -2101,127 +1925,316 @@ impl Engine {
         if songs.is_empty() {
             return Err(precondition("no songs to export"));
         }
+        if p.audio.is_none() {
+            return Err(precondition("fetch the audio first"));
+        }
         if let Some(c) = &opts.video_codec
-            && !VIDEO_CODECS.contains(&c.as_str()) {
-                return Err(invalid(format!("video_codec must be one of {VIDEO_CODECS:?}")));
-            }
+            && !VIDEO_CODECS.contains(&c.as_str())
+        {
+            return Err(invalid(format!("video_codec must be one of {VIDEO_CODECS:?}")));
+        }
         validate_encode(opts.export_height, opts.video_bitrate_k, opts.audio_bitrate_k)?;
         let no_video = p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local && s.variants.first().is_none_or(|v| v.height == 0));
         if no_video && opts.format.unwrap_or_default().has_video() && (!opts.stems || opts.also_render) {
             return Err(precondition("this recording has no video; export as wav / flac / mp3"));
         }
+        let mut missing = Vec::new();
         for s in &songs {
-            let ok = s.clip_id.as_ref().and_then(|c| p.clip(c)).is_some_and(|c| c.stems.is_some() && c.video.is_some());
-            if !ok {
-                return Err(precondition(format!("song {} has no processed clip yet (fetch clips first)", s.id)));
+            let m = self.song_video_missing(&p, s)?;
+            if !m.is_empty() {
+                missing.push(json!({ "song_id": s.id, "ranges": m }));
             }
             if let Some(path) = opts.audio_overrides.get(&s.id).filter(|p| !Path::new(p).is_file()) {
                 return Err(invalid(format!("audio override for {} not found: {path}", s.id)));
             }
         }
-        let items: Vec<String> = songs.iter().map(|s| s.id.clone()).collect();
+        if !missing.is_empty() && !opts.fetch {
+            return Err(ApiError::new("VIDEO_MISSING", format!("{} song(s) lack video in their range (fetch it, or export with fetch: true)", missing.len()))
+                .with_data(json!({ "songs": missing })));
+        }
+        if !missing.is_empty() && p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone) && missing.len() == songs.len() {
+            return Err(ApiError::new("VOD_GONE", "the replay is gone and these songs lack video").with_data(json!({ "songs": missing })));
+        }
+        // songs with all their video first; the others download meanwhile
+        let missing_ids: Vec<String> = missing.iter().filter_map(|m| m["song_id"].as_str().map(str::to_string)).collect();
+        let mut order: Vec<Song> = songs.iter().filter(|s| !missing_ids.contains(&s.id)).cloned().collect();
+        order.extend(songs.iter().filter(|s| missing_ids.contains(&s.id)).cloned());
+        let items: Vec<String> = order.iter().map(|s| s.id.clone()).collect();
         self.spawn_job("export.run", id, items, move |eng, ctx| async move {
+            // queue the missing video now
+            let mut waiting: HashMap<String, String> = HashMap::new();
+            for s in order.iter().filter(|s| missing_ids.contains(&s.id)) {
+                match eng.video_fetch(&p.id, FetchArgs { ranges: Some(vec![(s.start, s.end)]), song_ids: None, reason: Some("export".into()), ..Default::default() }) {
+                    Ok(plan) => {
+                        if let Some(r) = plan.request_id {
+                            waiting.insert(s.id.clone(), r);
+                        }
+                    }
+                    Err(e) => tracing::warn!("export: fetching video of {}: {e}", s.id),
+                }
+            }
             let out_dir = p.settings.output_dir.clone().map(PathBuf::from).unwrap_or_else(|| eng.store.dir(&p.id).join("exports"));
             std::fs::create_dir_all(&out_dir)?;
-            let all: Vec<&Song> = p.songs.iter().filter(|s| s.enabled).collect();
             let format = opts.format.unwrap_or_default();
             let mut results = Vec::new();
             let mut stems_out = Vec::new();
-            for (k, s) in songs.iter().enumerate() {
+            let mut failed = Vec::new();
+            for (k, s0) in order.iter().enumerate() {
                 if ctx.cancel.is_cancelled() {
+                    for r in waiting.values() {
+                        let _ = eng.video_cancel(&p.id, Some(r));
+                    }
                     return Err(ApiError::new("CANCELLED", "cancelled"));
                 }
                 (ctx.progress)(Progress {
-                    message: Some(format!("song {}/{}", k + 1, songs.len())),
-                    item: Some(s.id.clone()),
-                    ..Progress::new("export.run", k as u64, songs.len() as u64)
+                    message: Some(format!("song {}/{}", k + 1, order.len())),
+                    item: Some(s0.id.clone()),
+                    ..Progress::new("export.run", k as u64, order.len() as u64)
                 });
                 let tagged: ProgressFn = {
-                    let (inner, sid) = (ctx.progress.clone(), s.id.clone());
+                    let (inner, sid) = (ctx.progress.clone(), s0.id.clone());
                     Arc::new(move |mut pr: Progress| {
                         pr.item.get_or_insert_with(|| sid.clone());
                         inner(pr)
                     })
                 };
-                // edits made while earlier songs exported apply to this one
-                // (same clip only: a re-fetched clip has different stems)
-                let latest = eng.get(&p.id).ok();
-                let s = &latest
-                    .as_ref()
-                    .and_then(|q| q.song(&s.id).cloned())
-                    .filter(|x| x.clip_id == s.clip_id && x.enabled)
-                    .unwrap_or_else(|| s.clone());
-                let clip = p.clip(s.clip_id.as_ref().unwrap()).unwrap();
-                let (stems, video) = (clip.stems.clone().unwrap(), clip.video.clone().unwrap());
-                let ct = |t: f64| clip.to_clip_time(t).unwrap();
-                let number = all.iter().position(|x| x.id == s.id).map(|i| i + 1).unwrap_or(k + 1);
-                let name = naming::limit_len(&naming::render_name(&p.settings.filename_template, &p, s, number));
-                let mutes: Vec<MuteSpan> = s
-                    .mutes
-                    .iter()
-                    .filter(|m| opts.apply_mutes.unwrap_or(true) && s.mute_enabled && (m.confirmed || opts.include_unconfirmed))
-                    .map(|m| MuteSpan { start: ct(m.start), end: ct(m.end), fade_in: m.fade_in, fade_out: m.fade_out, gain_db: m.gain_db })
-                    .collect();
-                let (in_t, out_t) = (ct(s.start).max(0.0), ct(s.end).min(video.duration));
-
-                if opts.stems {
-                    let spec = StemsSpec {
-                        source_mp4: video.path.clone(),
-                        orig_wav: stems.orig.clone(),
-                        vocals_wav: stems.vocals.clone(),
-                        in_t,
-                        out_t,
-                        handles: opts.handles.unwrap_or(3.0).max(0.0),
-                        mutes: mutes.clone(),
-                        dir: naming::unique_dir(&out_dir, &format!("{name}_stems")),
-                        name: name.clone(),
-                        vod_offset: video.vod_start + clip.offset,
-                        reference_video: opts.reference_video,
-                    };
-                    let progress = tagged.clone();
-                    let r = tokio::task::spawn_blocking(move || export_stems(&spec, &progress)).await??;
-                    stems_out.push(json!({ "song_id": s.id, "stems": r }));
-                    if !opts.also_render {
-                        continue;
+                let sctx = JobCtx { progress: tagged.clone(), ..ctx.clone() };
+                if let Some(rid) = waiting.get(&s0.id) {
+                    eng.wait_request(&p.id, rid, &sctx).await?;
+                }
+                match eng.export_one(&p.id, &s0.id, &opts, format, &out_dir, &sctx).await {
+                    Ok(SongExport::Rendered(r)) => results.push(json!({ "song_id": s0.id, "result": r })),
+                    Ok(SongExport::Stems(r, rendered)) => {
+                        stems_out.push(json!({ "song_id": s0.id, "stems": r }));
+                        if let Some(r) = rendered {
+                            results.push(json!({ "song_id": s0.id, "result": r }));
+                        }
+                    }
+                    Err(e) if e.code == "CANCELLED" => return Err(e),
+                    Err(e) if order.len() == 1 => return Err(e),
+                    Err(e) => {
+                        tracing::warn!("export of {} failed: {e}", s0.id);
+                        failed.push(json!({ "song_id": s0.id, "error": e }));
                     }
                 }
-
-                let metadata = song_metadata(&p, s);
-                let spec = ExportSpec {
-                    source_mp4: video.path.clone(),
-                    orig_wav: stems.orig.clone(),
-                    vocals_wav: stems.vocals.clone(),
-                    audio_override: opts.audio_overrides.get(&s.id).map(PathBuf::from),
-                    in_t,
-                    out_t,
-                    mutes,
-                    out: naming::unique_path(&out_dir, &name, format.extension()),
-                    format,
-                    video_codec: opts.video_codec.clone().unwrap_or_else(|| p.settings.video_codec.clone()),
-                    video_quality: p.settings.video_quality,
-                    scale_height: opts.export_height.or(p.settings.export_height),
-                    video_bitrate_k: opts.video_bitrate_k.or(p.settings.video_bitrate_k),
-                    audio_bitrate_k: opts.audio_bitrate_k.unwrap_or(p.settings.audio_bitrate_k),
-                    fade_in: s.fade_in.unwrap_or(p.settings.song_fade_in),
-                    fade_out: s.fade_out.unwrap_or(p.settings.song_fade_out),
-                    loudness: p.settings.loudness,
-                    metadata,
-                };
-                let cancel = ctx.cancel.clone();
-                let r = tokio::task::spawn_blocking(move || export_song(&spec, &tagged, &cancel)).await??;
-                let sid = s.id.clone();
-                let info = project::ExportInfo { path: r.path.to_string_lossy().into_owned(), exported_at: project::now(), duration: r.duration };
-                eng.mutate(&p.id, |p| {
-                    if let Some(s) = p.song_mut(&sid) {
-                        s.export = Some(info);
-                    }
-                    Ok(())
-                })
-                .await?;
-                results.push(json!({ "song_id": sid, "result": r }));
             }
-            Ok(json!({ "exports": results, "stems": stems_out }))
+            if results.is_empty() && stems_out.is_empty() && !failed.is_empty() {
+                let first = serde_json::from_value::<ApiError>(failed[0]["error"].clone()).unwrap_or_else(|_| ApiError::new("INTERNAL", "export failed"));
+                return Err(ApiError { data: Some(json!({ "failed": failed })), ..first });
+            }
+            Ok(json!({ "exports": results, "stems": stems_out, "failed": failed }))
         })
+    }
+
+    /// Export one song from the segment store: stems for its range (separated
+    /// now if needed), video cut from whatever pieces cover it.
+    async fn export_one(self: &Arc<Self>, pid: &str, sid: &str, opts: &ExportOptions, format: OutputFormat, out_dir: &Path, ctx: &JobCtx) -> ApiResult<SongExport> {
+        // the latest edits apply
+        let p = self.get(pid)?;
+        let s = p.song(sid).cloned().ok_or_else(|| ApiError::new("NOT_FOUND", format!("song {sid}")))?;
+        let missing = self.song_video_missing(&p, &s)?;
+        if !missing.is_empty() {
+            let gone = p.vod.as_ref().is_some_and(|v| v.status == project::VodState::Gone);
+            let msg = if gone { "the replay is gone and part of this song has no video" } else { "part of this song has no video" };
+            return Err(ApiError::new("VIDEO_MISSING", msg).with_data(json!({ "song_id": sid, "ranges": missing, "vod_gone": gone })));
+        }
+        let video = format.has_video() && (!opts.stems || opts.also_render);
+        let copy = video && opts.video_codec.as_deref().unwrap_or(&p.settings.video_codec) == "copy";
+        let handles = if opts.stems { opts.handles.unwrap_or(3.0).max(0.0) } else { 0.0 };
+        // audio window: copy mode may start up to a segment early (keyframe)
+        let pre = (if copy { 12.0f64 } else { 0.0 }).max(handles);
+        let have = if is_local(&p) { vec![(0.0, f64::MAX)] } else { self.video_have(pid)? };
+        let around: Vec<Range> = ranges::intersect(&[((s.start - pre).max(0.0), s.end + handles)], &have);
+        let window = around.iter().find(|r| r.0 <= s.start + 0.05 && r.1 >= s.end - 0.05).copied().unwrap_or((s.start, s.end));
+        self.stems_ensure(pid, &[window], ctx).await?;
+        let p = self.get(pid)?;
+        // the separated range around the song bounds the audio window
+        let sep = p.stems.iter().find(|x| x.start <= s.start + 1e-6 && x.end >= s.end - 1e-6).map(|x| (x.start, x.end));
+        let (a0, a1) = match sep {
+            Some((x, y)) => (window.0.max(x), window.1.min(y)),
+            None => (s.start, s.end),
+        };
+        let lock = self.stems_lock(pid);
+        let _g = lock.lock().await;
+        let all: Vec<&Song> = p.songs.iter().filter(|x| x.enabled).collect();
+        let number = all.iter().position(|x| x.id == s.id).map(|i| i + 1).unwrap_or(1);
+        let name = naming::limit_len(&naming::render_name(&p.settings.filename_template, &p, &s, number));
+        let mutes: Vec<MuteSpan> = s
+            .mutes
+            .iter()
+            .filter(|m| opts.apply_mutes.unwrap_or(true) && s.mute_enabled && (m.confirmed || opts.include_unconfirmed))
+            .map(|m| MuteSpan { start: m.start - a0, end: m.end - a0, fade_in: m.fade_in, fade_out: m.fade_out, gain_db: m.gain_db })
+            .collect();
+        let tmp = self.store.dir(pid).join("cache").join(format!("export_{}", project::new_id("")));
+        std::fs::create_dir_all(&tmp)?;
+        let _cleanup = TempDir(tmp.clone());
+        let eng = self.clone();
+        let (pc, tmpc) = (p.clone(), tmp.clone());
+        let (orig_wav, vocals_wav) = (tmp.join("orig.wav"), tmp.join("vocals.wav"));
+        let (ow, vw) = (orig_wav.clone(), vocals_wav.clone());
+        tokio::task::spawn_blocking(move || -> ApiResult<()> {
+            let (o, v) = eng.read_stems(&pc, a0, a1)?;
+            wav::write_f32(&ow, crate::stems::STEM_RATE, 2, &o)?;
+            wav::write_f32(&vw, crate::stems::STEM_RATE, 2, &v)?;
+            let _ = tmpc;
+            Ok(())
+        })
+        .await??;
+        // the video: one file covering [a0, a1] (VOD time origin at its t = 0)
+        let need_video = video || (opts.stems && opts.reference_video);
+        let (source_mp4, video_offset, copy_ok) = if need_video {
+            let eng = self.clone();
+            let (pc, tmpc, cancel) = (p.clone(), tmp.clone(), ctx.cancel.clone());
+            let (f, origin, single) = tokio::task::spawn_blocking(move || eng.export_source(&pc, a0, a1, &tmpc, &cancel)).await??;
+            (f, a0 - origin, single)
+        } else {
+            (PathBuf::new(), 0.0, true)
+        };
+        let latest_codec = opts.video_codec.clone().unwrap_or_else(|| p.settings.video_codec.clone());
+        let codec = if latest_codec == "copy" && !copy_ok {
+            (ctx.progress)(Progress::note("export.encode", "reencode_joined", "the song joins video of two renditions; re-encoding"));
+            "libx264".to_string()
+        } else {
+            latest_codec
+        };
+        let mut stems_r = None;
+        if opts.stems {
+            let spec = StemsSpec {
+                source_mp4: source_mp4.clone(),
+                orig_wav: orig_wav.clone(),
+                vocals_wav: vocals_wav.clone(),
+                in_t: s.start - a0,
+                out_t: s.end - a0,
+                handles,
+                mutes: mutes.clone(),
+                dir: naming::unique_dir(out_dir, &format!("{name}_stems")),
+                name: name.clone(),
+                vod_offset: a0,
+                video_offset,
+                reference_video: opts.reference_video,
+            };
+            let progress = ctx.progress.clone();
+            stems_r = Some(tokio::task::spawn_blocking(move || export_stems(&spec, &progress)).await??);
+            if !opts.also_render {
+                return Ok(SongExport::Stems(stems_r.unwrap(), None));
+            }
+        }
+        let spec = ExportSpec {
+            source_mp4,
+            orig_wav,
+            vocals_wav,
+            audio_override: opts.audio_overrides.get(&s.id).map(PathBuf::from),
+            // an override comes back from an editor aligned to the hand-off files' start
+            override_offset: (s.start - opts.handles.unwrap_or(3.0).max(0.0)) - a0,
+            in_t: s.start - a0,
+            out_t: s.end - a0,
+            video_offset,
+            mutes,
+            out: naming::unique_path(out_dir, &name, format.extension()),
+            format,
+            video_codec: codec,
+            video_quality: p.settings.video_quality,
+            scale_height: opts.export_height.or(p.settings.export_height),
+            video_bitrate_k: opts.video_bitrate_k.or(p.settings.video_bitrate_k),
+            audio_bitrate_k: opts.audio_bitrate_k.unwrap_or(p.settings.audio_bitrate_k),
+            fade_in: s.fade_in.unwrap_or(p.settings.song_fade_in),
+            fade_out: s.fade_out.unwrap_or(p.settings.song_fade_out),
+            loudness: p.settings.loudness,
+            metadata: song_metadata(&p, &s),
+        };
+        let (cancel, progress) = (ctx.cancel.clone(), ctx.progress.clone());
+        let r = tokio::task::spawn_blocking(move || export_song(&spec, &progress, &cancel)).await??;
+        let info = project::ExportInfo { path: r.path.to_string_lossy().into_owned(), exported_at: project::now(), duration: r.duration };
+        let sidc = s.id.clone();
+        self.mutate(pid, |p| {
+            if let Some(s) = p.song_mut(&sidc) {
+                s.export = Some(info);
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(match stems_r {
+            Some(st) => SongExport::Stems(st, Some(r)),
+            None => SongExport::Rendered(r),
+        })
+    }
+
+    /// A video file holding VOD `[a, b]`: the view / legacy clip / recording
+    /// when one file covers it, else a remux of the covering segments; a range
+    /// crossing renditions is joined by re-encoding into one intermediate.
+    /// Returns (file, VOD time at its t = 0, single-stream = stream-copy safe). Blocking.
+    fn export_source(&self, p: &Project, a: f64, b: f64, tmp: &Path, cancel: &CancellationToken) -> ApiResult<(PathBuf, f64, bool)> {
+        if is_local(p) {
+            let m = self.align_local(p)?.m;
+            return Ok((PathBuf::from(&p.source.as_ref().unwrap().url), -m, true));
+        }
+        let (tl, pieces, dir, container) = self.with_ps(&p.id, |ps| {
+            let tl = ps.tl.clone();
+            let pcs: Vec<crate::video::media::Piece> = ps.stretches().into_iter().flat_map(|(_, _, pcs)| pcs).collect();
+            (tl, pcs, ps.dir.clone(), ps.container)
+        })?;
+        let tl = tl.ok_or_else(|| precondition("fetch the audio first"))?;
+        let segs = tl.segments_for(a, b, crate::video::timeline::EDGE_EPS);
+        let mut parts: Vec<(PathBuf, f64, Range)> = Vec::new();
+        for pc in pieces {
+            let (f, l) = (pc.first().max(segs.start), pc.last().min(segs.end));
+            if l <= f {
+                continue;
+            }
+            let span = (tl.start(f).max(a), tl.end(l - 1).min(b));
+            match pc {
+                crate::video::media::Piece::Legacy { file, origin, .. } => parts.push((file, origin, span)),
+                crate::video::media::Piece::Raw { variant, .. } => {
+                    let out = tmp.join(format!("src_{variant}_{f}_{l}.mp4"));
+                    crate::video::media::remux(&dir, container, &[crate::video::media::Piece::Raw { variant, first: f, last: l }], &out, cancel)?;
+                    let origin = self.probe_raw(&p.id, variant, f)?.format_start - self.align_raw(&p.id, variant)?.m;
+                    parts.push((out, origin, span));
+                }
+                crate::video::media::Piece::Local { .. } => {}
+            }
+        }
+        match parts.len() {
+            0 => Err(ApiError::new("VIDEO_MISSING", "no video for this range").with_data(json!({ "ranges": [[a, b]] }))),
+            1 => {
+                let (f, o, _) = parts.remove(0);
+                Ok((f, o, true))
+            }
+            _ => {
+                // join: trim each part to its VOD span, scale to the smallest height, concat
+                let out = tmp.join("joined.mp4");
+                let mut c = ffmpeg::command();
+                c.arg("-y");
+                for (f, o, (x, y)) in &parts {
+                    c.args(["-ss", &format!("{:.6}", (x - o).max(0.0)), "-t", &format!("{:.6}", y - x)]).arg("-i").arg(f);
+                }
+                let h = self.with_ps(&p.id, |ps| ps.heights.iter().copied().filter(|h| *h > 0).min()).ok().flatten().unwrap_or(720);
+                let mut fc = String::new();
+                for i in 0..parts.len() {
+                    fc.push_str(&format!("[{i}:v:0]scale=-2:{h},setsar=1[v{i}];"));
+                }
+                for i in 0..parts.len() {
+                    fc.push_str(&format!("[v{i}]"));
+                }
+                fc.push_str(&format!("concat=n={}:v=1:a=0[v]", parts.len()));
+                c.args(["-filter_complex", &fc, "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-an"]).arg(&out);
+                ffmpeg::run_cancellable(c, cancel)?;
+                Ok((out, parts[0].2.0, false))
+            }
+        }
+    }
+}
+
+enum SongExport {
+    Rendered(crate::export::ExportResult),
+    Stems(crate::export::StemsResult, Option<crate::export::ExportResult>),
+}
+
+/// Removes a temporary folder on drop.
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -2255,20 +2268,12 @@ pub struct ExportOptions {
     pub handles: Option<f64>,
     /// with `stems`: add a light 720p reference video
     pub reference_video: bool,
-    /// song id → audio file (aligned to the clip start) replacing the rendered audio
+    /// song id → audio file replacing the rendered audio, aligned to the start
+    /// of that song's editor hand-off files (song start − `handles`, default 3 s)
     pub audio_overrides: BTreeMap<String, String>,
-}
-
-fn dir_size(d: &Path) -> u64 {
-    std::fs::read_dir(d)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| match e.file_type() {
-            Ok(t) if t.is_dir() => dir_size(&e.path()),
-            _ => e.metadata().map(|m| m.len()).unwrap_or(0),
-        })
-        .sum()
+    /// songs whose range lacks video: fetch it and export when it arrives
+    /// (other songs export meanwhile). false = fail with VIDEO_MISSING.
+    pub fetch: bool,
 }
 
 /// Keep at most `keep` newest finished windows in a cache dir (in-flight temp
