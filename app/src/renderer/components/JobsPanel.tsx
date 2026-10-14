@@ -294,11 +294,12 @@ function VideoRow({ pid }: { pid: string }) {
 function VideoPauseBar() {
   const paused = useVideo((x) => x.paused);
   const active = useVideo((x) => Object.values(x.byProject).some((v) => v.requests.some((r) => r.remaining_sec > 0.05)));
+  const offline = useVideo((x) => Object.values(x.byProject).some((v) => !!v.offline));
   if (!paused && !active) return null;
   return (
     <div className={`banner ${paused ? "warn" : "info"} jobs-sleep`}>
       {paused ? <Pause size={15} /> : <Download size={15} />}
-      <span className="grow">{paused ? "영상 받기 일시정지됨 · 편집과 재생은 그대로 돼요" : "영상을 받는 중이에요 · 앱 전체 동시 4개"}</span>
+      <span className="grow">{paused ? "영상 받기 일시정지됨 · 편집과 재생은 그대로 돼요" : offline ? "인터넷 연결을 기다리는 중이에요 · 연결되면 알아서 이어 받아요" : "영상을 받는 중이에요 · 앱 전체 동시 4개"}</span>
       <button className="btn xs subtle" onClick={() => void setPaused(!paused)}>
         {paused ? (
           <>

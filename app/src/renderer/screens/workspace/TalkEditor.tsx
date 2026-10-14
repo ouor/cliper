@@ -23,6 +23,8 @@ import { VideoPane } from "@/components/VideoPane";
 
 /** stems.ensure asked once per song and unseparated state (no loop when it can't separate) */
 const askedEnsure = new Set<string>();
+/** the stem span ids last seen per project */
+const seenSpans = new Map<string, string[]>();
 // another folder took this project id over (QA-5 / U-12): forget its keys
 onProjectReset((id) => {
   for (const k of [...askedEnsure]) if (k.startsWith(id + "|")) askedEnsure.delete(k);
@@ -165,6 +167,13 @@ export function TalkEditor({ p }: { p: Project }) {
     ? jobs.order.map((id) => jobs.jobs[id]).find((j) => j && j.projectId === p.id && j.kind === "stems.ensure" && ((j.request?.params as { song_ids?: string[] } | undefined)?.song_ids ?? []).includes(s.id))
     : undefined;
   const ensureFailed = lastEnsure?.status === "failed" ? lastEnsure : undefined;
+  // stems were removed (cleanup "나눈 소리" etc.): earlier "already asked" marks no longer hold
+  // (compared with what this module saw last, also across unmounts: the cleanup happens elsewhere)
+  useEffect(() => {
+    const now = (p.stems ?? []).map((x) => x.id);
+    if ((seenSpans.get(p.id) ?? []).some((id) => !now.includes(id))) for (const k of [...askedEnsure]) if (k.startsWith(p.id + "|")) askedEnsure.delete(k);
+    seenSpans.set(p.id, now);
+  }, [p.id, spansKey]);
   const runEnsure = () => {
     if (!s) return;
     askedEnsure.add(ensureKey);
