@@ -1680,8 +1680,21 @@
   font-size: var(--fs-xs);
   color: var(--text-2);
 }
-.mp-all {
+/* bulk actions under the mute list: 이 곡 확정 / 지우기, then 모든 곡 지우기 (#2) */
+.mp-bulk {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin: 0 8px 8px;
+}
+.mp-bulk-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.mp-bulk-all {
+  align-self: center;
+  color: var(--text-3);
 }
 .listen-bar {
   flex: none;

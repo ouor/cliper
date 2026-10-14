@@ -5,7 +5,7 @@ import type { Project } from "@ipc/generated/Project";
 import type { Song } from "@ipc/generated/Song";
 import type { Mute } from "@ipc/generated/Mute";
 import { useWs } from "@/state/ws";
-import { useApp } from "@/state/app";
+import { ask, useApp } from "@/state/app";
 import { projectUi, setProjectUi, editSong } from "@/state/projects";
 import { songProgress, useJobs } from "@/state/jobs";
 import { player, usePlayer, LISTEN_KEY, LISTEN_LABEL, type ListenMode } from "@/audio/player";
@@ -13,7 +13,7 @@ import { clipCovered, hostClip, muteOutsideClip, mutePosition, previewMutes, sin
 import { loadPeaks, mediaUrl, type Peaks } from "@/lib/peaks";
 import { fmtTime } from "@/lib/format";
 import { fetchSongs } from "@/lib/pipeline";
-import { addMute, deleteMute, endSongHere, splitMute, updateMute } from "@/lib/edits";
+import { addMute, deleteMute, deleteSuggestions, endSongHere, isSuggestion, splitMute, updateMute } from "@/lib/edits";
 import { DetailTimeline, selectMute } from "./DetailTimeline";
 import { useMapData } from "./OverviewMap";
 import { Progress, VideoOutside } from "@/components/common";
@@ -289,6 +289,21 @@ export function TalkEditor({ p }: { p: Project }) {
   const mutes = [...s.mutes].sort((a, b) => a.start - b.start);
   const sel = mutes.find((m) => m.id === ws.selectedMute) ?? null;
   const unconf = unconfirmedMutes(s);
+  // 확인 전 제안 across all (enabled) songs, for "모든 곡의 제안 지우기" (#2)
+  const suggestSongs = p.songs.filter((x) => x.enabled && x.mutes.some(isSuggestion));
+  const allSuggest = suggestSongs.reduce((n, x) => n + x.mutes.filter(isSuggestion).length, 0);
+  const deleteAllSuggestions = async () => {
+    const r = await ask({
+      title: "모든 곡의 확인 전 제안을 지울까요?",
+      body: [`곡 ${suggestSongs.length}개에서 확인 전 제안 ${allSuggest}개를 지워요. 확인한 구간과 직접 만든 구간은 그대로예요.`, "Ctrl+Z 한 번으로 모두 되돌릴 수 있어요."],
+      icon: "warn",
+      buttons: [
+        { id: "cancel", label: "취소", kind: "ghost" },
+        { id: "delete", label: `제안 ${allSuggest}개 지우기`, kind: "danger" },
+      ],
+    });
+    if (r === "delete") void deleteSuggestions(p.id, suggestSongs.map((x) => x.id), "모든 곡의 제안 지우기");
+  };
   const selWarn = sel ? warnings.get(sel.id) ?? [] : [];
   const loadingStems = stems && stems.clipId === clip.id && stems.progress < 1 && !stems.error;
 
@@ -348,17 +363,31 @@ export function TalkEditor({ p }: { p: Project }) {
               <MuteRow key={m.id} p={p} s={s} m={m} selected={m.id === ws.selectedMute} warn={warnings.get(m.id) ?? []} />
             ))}
           </div>
-          {unconf > 1 && (
-            <button
-              className="btn sm subtle mp-all"
-              onClick={() =>
-                void editSong(p.id, s.id, "제안 모두 확정", (x) => {
-                  for (const m of x.mutes) m.confirmed = true;
-                })
-              }
-            >
-              <Check size={13} /> 제안 {unconf}개 모두 확정
-            </button>
+          {(unconf > 1 || allSuggest > unconf) && (
+            <div className="mp-bulk">
+              {unconf > 1 && (
+                <div className="mp-bulk-row">
+                  <button
+                    className="btn sm subtle"
+                    onClick={() =>
+                      void editSong(p.id, s.id, "제안 모두 확정", (x) => {
+                        for (const m of x.mutes) m.confirmed = true;
+                      })
+                    }
+                  >
+                    <Check size={13} /> 제안 {unconf}개 모두 확정
+                  </button>
+                  <button className="btn sm subtle" onClick={() => void deleteSuggestions(p.id, [s.id])} data-tip={"이 곡의 확인 전 제안만 지워요\n확인한 구간·직접 만든 구간은 그대로, Ctrl+Z로 되돌려요"} data-tip-pos="top">
+                    <Trash2 size={13} /> 제안 {unconf}개 지우기
+                  </button>
+                </div>
+              )}
+              {allSuggest > unconf && (
+                <button className="btn xs ghost mp-bulk-all" onClick={() => void deleteAllSuggestions()}>
+                  <Trash2 size={12} /> 모든 곡의 확인 전 제안 지우기 · {suggestSongs.length}곡 {allSuggest}개
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>

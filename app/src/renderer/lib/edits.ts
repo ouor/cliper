@@ -260,3 +260,32 @@ export async function endSongHere(pid: string, songId: string, muteId: string) {
     action: { label: "되돌리기 Ctrl+Z", run: () => void undo(pid) },
   });
 }
+
+/** A mute the user hasn't accepted yet (job suggestion). Manual mutes are always confirmed. */
+export function isSuggestion(m: Mute): boolean {
+  return !m.confirmed && m.origin !== "manual";
+}
+
+/**
+ * Delete the unconfirmed suggestions of `songIds` in one edit, so one undo brings them all back
+ * (#2). Confirmed and manual mutes stay. Several songs → one atomic `songs.set`.
+ */
+export async function deleteSuggestions(pid: string, songIds: string[], label = "제안 모두 지우기") {
+  const p = getProject(pid);
+  if (!p) return;
+  const want = new Set(songIds.flatMap((id) => [id, rid(pid, id)]));
+  const gone = p.songs.filter((s) => want.has(s.id)).flatMap((s) => s.mutes.filter(isSuggestion));
+  if (!gone.length) return;
+  const songsHit = p.songs.filter((s) => want.has(s.id) && s.mutes.some(isSuggestion)).length;
+  const synced = editSongs(pid, label, (songs) => {
+    for (const s of songs) if (want.has(s.id)) s.mutes = s.mutes.filter((m) => !isSuggestion(m));
+    return songs;
+  });
+  const sel = useWs.getState().selectedMute;
+  if (sel && gone.some((m) => m.id === sel)) useWs.setState({ selectedMute: null });
+  toast(`확인 전 제안 ${gone.length}개를 지웠어요${songsHit > 1 ? ` (${songsHit}곡)` : ""}. 확인한 구간과 직접 만든 구간은 그대로예요.`, {
+    kind: "ok",
+    action: { label: "되돌리기 Ctrl+Z", run: () => void undo(pid) },
+  });
+  await synced;
+}
