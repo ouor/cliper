@@ -23,4 +23,9 @@ pinned?: boolean,
 /**
  * last replay check (absent = never checked)
  */
-vod?: VodStatus, has_audio: boolean, has_detection: boolean, last_error: JobError | null, };
+vod?: VodStatus, has_audio: boolean, has_detection: boolean, last_error: JobError | null, 
+/**
+ * absolute folder of the project (projects outside the projects folder
+ * too: `project.open`, `projects.add_root`); always sent by the engine
+ */
+dir?: string, };

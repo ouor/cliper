@@ -60,6 +60,16 @@ pub struct CoverageRange {
     pub code: Option<String>,
 }
 
+/// Progress of one song inside a request (its range ± margins).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SongProgress {
+    pub song_id: String,
+    pub total_sec: f64,
+    pub have_sec: f64,
+    pub failed_sec: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RequestStatus {
@@ -76,6 +86,8 @@ pub struct RequestStatus {
     pub failed_sec: f64,
     /// still to download (queued + fetching)
     pub remaining_sec: f64,
+    /// per song of `song_ids` (whole segments of its range ± margins)
+    pub songs: Vec<SongProgress>,
     pub created_at: String,
 }
 
@@ -160,11 +172,52 @@ impl PState {
         None
     }
 
-    /// Rendition for segment `i`: continue the neighbouring video (so ranges
-    /// stay one stream and join without a seam), else the request's height.
-    pub fn choose_variant(&self, i: usize, preferred: usize) -> usize {
-        let left = i.checked_sub(1).and_then(|j| self.variant_of(j));
-        left.or_else(|| self.variant_of(i + 1)).filter(|&v| v < self.heights.len().max(1)).unwrap_or(preferred)
+    /// Rendition of the video on disk / being fetched at segment `i`, as an
+    /// index into the current rendition list. An adopted clip's rendition is
+    /// looked up by its resolution (the list order may have changed since);
+    /// None when that rendition isn't offered any more.
+    pub fn usable_variant_of(&self, i: usize) -> Option<usize> {
+        if let Some(h) = self.have.get(&i) {
+            return match h.kind {
+                HaveKind::Raw(v) => Some(v),
+                HaveKind::Legacy(n) => {
+                    let l = self.idx.legacy.get(n)?;
+                    if self.variants.is_empty() {
+                        return Some(l.variant);
+                    }
+                    let same = |k: usize| self.variants.get(k).is_some_and(|x| x.resolution() == l.resolution);
+                    if same(l.variant) { Some(l.variant) } else { (0..self.variants.len()).find(|&k| same(k)) }
+                }
+            };
+        }
+        self.fetching.get(&i).map(|(v, _)| *v)
+    }
+
+    /// Rendition for segment `i`: continue the video next to the gap `i` is in
+    /// (on disk, adopted clip, or being fetched; looking across segments that
+    /// are queued too), so a range stays one stream and joins without a seam;
+    /// else the request's height. The left side wins over the right.
+    pub fn choose_variant(&self, i: usize, preferred: usize, queued: &std::collections::BTreeSet<usize>) -> usize {
+        let n = self.heights.len().max(1);
+        let walk = |mut j: usize, step: isize| -> Option<usize> {
+            for _ in 0..100_000 {
+                if self.have.contains_key(&j) || self.fetching.contains_key(&j) {
+                    return self.usable_variant_of(j);
+                }
+                if !queued.contains(&j) {
+                    return None;
+                }
+                j = j.checked_add_signed(step)?;
+            }
+            None
+        };
+        let left = i.checked_sub(1).and_then(|j| walk(j, -1));
+        left.or_else(|| walk(i + 1, 1)).filter(|&v| v < n).unwrap_or(preferred)
+    }
+
+    /// Segments some request still needs.
+    pub fn queued(&self) -> std::collections::BTreeSet<usize> {
+        self.idx.requests.iter().flat_map(|r| self.needed(r)).collect()
     }
 
     pub fn coverage(&self) -> Vec<CoverageRange> {
@@ -221,6 +274,21 @@ impl PState {
             fetching_sec,
             failed_sec,
             remaining_sec: (total_sec - have_sec - failed_sec).max(0.0),
+            songs: r
+                .song_ids
+                .iter()
+                .zip(&r.song_ranges)
+                .map(|(id, &rg)| {
+                    let segs: Vec<usize> = tl.map(|t| t.segments_in(&[rg], EDGE_EPS).into_iter().collect()).unwrap_or_default();
+                    let sec = |f: &dyn Fn(usize) -> bool| -> f64 { tl.map(|t| t.seconds(segs.iter().copied().filter(|&i| f(i)))).unwrap_or(0.0) };
+                    SongProgress {
+                        song_id: id.clone(),
+                        total_sec: sec(&|_| true),
+                        have_sec: sec(&|i| self.have.contains_key(&i)),
+                        failed_sec: sec(&|i| !self.have.contains_key(&i) && self.idx.failed.contains_key(&i)),
+                    }
+                })
+                .collect(),
             created_at: r.created_at.clone(),
         }
     }
@@ -334,7 +402,7 @@ mod tests {
     }
 
     fn req(id: &str, ranges: Vec<Range>, priority: Priority, seq: u64) -> FetchRequest {
-        FetchRequest { id: id.into(), ranges, priority, reason: "test".into(), song_ids: vec![], height: None, process: false, created_at: String::new(), seq }
+        FetchRequest { id: id.into(), ranges, priority, reason: "test".into(), song_ids: vec![], song_ranges: vec![], height: None, process: false, created_at: String::new(), seq }
     }
 
     #[test]
@@ -380,9 +448,10 @@ mod tests {
         // then the automatic top-up (12..13 widened by the edge margin starts in segment 2)
         assert_eq!(p.next_segment().map(|x| (x.0, x.2)), Some((Priority::Auto, 2)));
         // a segment next to one being fetched at 144p continues at 144p
-        assert_eq!(p.choose_variant(8, 0), 2);
-        assert_eq!(p.choose_variant(6, 0), 2);
-        assert_eq!(p.choose_variant(0, 1), 1);
+        let q = p.queued();
+        assert_eq!(p.choose_variant(8, 0, &q), 2);
+        assert_eq!(p.choose_variant(6, 0, &q), 2);
+        assert_eq!(p.choose_variant(0, 1, &q), 1);
     }
 
     #[test]
@@ -404,5 +473,28 @@ mod tests {
         assert_eq!(s[0].2[1], media::Piece::Raw { variant: 1, first: 2, last: 4 });
         assert_eq!((s[1].0, s[1].1), (7, 8));
         assert_eq!(p.have_ranges(), vec![(0.0, 20.0), (28.0, 32.0)]);
+    }
+
+    #[test]
+    fn top_up_next_to_an_adopted_clip_continues_its_rendition() {
+        let var = |w: u32, h: u32| crate::hls::m3u8::Variant { width: w, height: h, bandwidth: 0, codecs: None, url: String::new() };
+        let mut p = ps();
+        p.variants = vec![var(960, 540), var(1280, 720), var(2560, 1440)];
+        p.heights = vec![540, 720, 1440];
+        // adopted 1440p clip at segments 6..9, recorded when 1440p was rendition 3
+        p.idx.legacy.push(store::LegacyPiece { id: "c".into(), file: "x".into(), variant: 3, first: 6, last: 9, origin: 0.0, resolution: "2560x1440".into() });
+        for i in 6..9 {
+            p.have.insert(i, Have { kind: HaveKind::Legacy(0), bytes: 1 });
+        }
+        // the song grows 20 s to the front: segments 1..6 are queued
+        p.idx.requests.push(req("topup", vec![(5.0, 24.0)], Priority::Auto, 1));
+        let q = p.queued();
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        // the first segment fetched (farthest from the clip) already continues 1440p
+        assert_eq!(p.choose_variant(1, 0, &q), 2);
+        // 1440p no longer offered: fall back to the request's rendition
+        p.variants.pop();
+        p.heights.pop();
+        assert_eq!(p.choose_variant(1, 0, &q), 0);
     }
 }

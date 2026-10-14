@@ -284,6 +284,11 @@ pub struct ProjectSummary {
     pub has_audio: bool,
     pub has_detection: bool,
     pub last_error: Option<JobError>,
+    /// absolute folder of the project (projects outside the projects folder
+    /// too: `project.open`, `projects.add_root`); always sent by the engine
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub dir: Option<PathBuf>,
 }
 
 pub struct Engine {
@@ -389,11 +394,15 @@ struct EnginePrefs {
     keep_awake: bool,
     /// video downloads paused app-wide (`video.pause`)
     video_paused: bool,
+    /// other folders holding projects (e.g. the previous projects folder)
+    project_roots: Vec<PathBuf>,
+    /// single project folders opened from elsewhere
+    project_dirs: Vec<PathBuf>,
 }
 
 impl Default for EnginePrefs {
     fn default() -> Self {
-        Self { keep_awake: true, video_paused: false }
+        Self { keep_awake: true, video_paused: false, project_roots: Vec::new(), project_dirs: Vec::new() }
     }
 }
 
@@ -749,6 +758,17 @@ fn is_local(p: &Project) -> bool {
     p.source.as_ref().is_some_and(|s| s.platform == crate::source::Platform::Local)
 }
 
+/// Absolute path without the `\\?\` prefix canonicalize adds on Windows
+/// (ffmpeg and concat lists don't take it).
+fn canonical(p: &Path) -> Option<PathBuf> {
+    let c = std::fs::canonicalize(p).ok()?;
+    let s = c.to_string_lossy();
+    Some(match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => c,
+    })
+}
+
 fn invalid(msg: impl std::fmt::Display) -> ApiError {
     ApiError::new("INVALID_PARAMS", msg)
 }
@@ -765,6 +785,9 @@ impl Engine {
         let prefs = EnginePrefs::load(&cfg.projects_root);
         let keep_awake = cfg.keep_awake.unwrap_or(prefs.keep_awake);
         let video_paused = prefs.video_paused;
+        for (id, d) in store.set_locations(prefs.project_roots.clone(), prefs.project_dirs.clone()) {
+            tracing::warn!("project {id} at {} is hidden by another project with the same id", d.display());
+        }
         let eng = Arc::new(Self {
             cfg,
             store,
@@ -1113,11 +1136,11 @@ impl Engine {
 
     pub async fn list_async(&self) -> ApiResult<Vec<ProjectSummary>> {
         let store = self.store.clone();
-        Ok(tokio::task::spawn_blocking(move || summarize(store.list())).await?)
+        Ok(tokio::task::spawn_blocking(move || summarize(&store, store.list())).await?)
     }
 
     pub fn list(&self) -> Vec<ProjectSummary> {
-        summarize(self.store.list())
+        summarize(&self.store, self.store.list())
     }
 
     /// Cancel every running job (shutdown).
@@ -1128,10 +1151,11 @@ impl Engine {
     }
 }
 
-fn summarize(projects: Vec<Project>) -> Vec<ProjectSummary> {
+fn summarize(store: &Store, projects: Vec<Project>) -> Vec<ProjectSummary> {
     projects
         .into_iter()
             .map(|p| ProjectSummary {
+                dir: Some(store.dir(&p.id)),
                 id: p.id.clone(),
                 title: p.source.as_ref().map(|s| s.title.clone()),
                 channel: p.source.as_ref().map(|s| s.channel.clone()),
@@ -1166,11 +1190,96 @@ impl Engine {
         self.forget_ps(id);
         let store = self.store.clone();
         let idc = id.to_string();
+        let external = self.store.is_external(id);
         tokio::task::spawn_blocking(move || store.delete(&idc)).await??;
         self.frame_index.lk().remove(id);
         self.sources.lock().await.remove(id);
         self.locks.lk().remove(id);
+        if external {
+            self.apply_locations(|_, dirs| dirs.retain(|d| d.exists()))?;
+        }
         Ok(())
+    }
+
+    // ── project locations (C2-2) ────────────────────────────────────────
+
+    /// Change the remembered other locations, re-index them, persist.
+    /// Returns ids hidden by a project with the same id elsewhere.
+    fn apply_locations(&self, f: impl FnOnce(&mut Vec<PathBuf>, &mut Vec<PathBuf>)) -> ApiResult<Vec<(String, PathBuf)>> {
+        let mut prefs = EnginePrefs::load(&self.cfg.projects_root);
+        f(&mut prefs.project_roots, &mut prefs.project_dirs);
+        let before: Vec<String> = self.store.ids();
+        let skipped = self.store.set_locations(prefs.project_roots.clone(), prefs.project_dirs.clone());
+        prefs.save(&self.cfg.projects_root)?;
+        let after: Vec<String> = self.store.ids();
+        for id in before.iter().filter(|id| !after.contains(id)) {
+            self.forget_ps(id);
+        }
+        Ok(skipped)
+    }
+
+    /// Where projects are listed from: the projects folder, other roots,
+    /// single project folders.
+    pub fn locations(&self) -> Value {
+        let (roots, projects) = self.store.locations();
+        json!({ "root": self.cfg.projects_root, "roots": roots, "projects": projects })
+    }
+
+    /// Open a project folder that lives elsewhere (moved by hand, another
+    /// drive, an old projects folder): it joins `project.list` and stays
+    /// there across restarts. Its files stay where they are (all paths inside
+    /// a project are relative).
+    pub async fn open_project_at(&self, path: &Path) -> ApiResult<Project> {
+        let dir = canonical(path).ok_or_else(|| ApiError::new("NOT_FOUND", format!("no folder {}", path.display())))?;
+        let id = project::store::project_id_at(&dir).ok_or_else(|| invalid(format!("{} is not a Cliper project folder (no project.json)", path.display())))?;
+        let known = self.store.dir(&id);
+        if known.join("project.json").is_file() {
+            if canonical(&known).as_deref() == Some(dir.as_path()) {
+                return self.get(&id);
+            }
+            return Err(ApiError::new("CONFLICT", format!("a project with the same id ({id}) is already open from {}", known.display()))
+                .with_data(json!({ "id": id, "dir": known })));
+        }
+        let d = dir.clone();
+        self.apply_locations(move |_, dirs| {
+            if !dirs.contains(&d) {
+                dirs.push(d);
+            }
+        })?;
+        let p = self.get(&id)?;
+        self.emit(Event::ProjectChanged { project: Box::new(p.clone()) });
+        Ok(p)
+    }
+
+    /// Also list every project in another folder (e.g. the previous projects
+    /// folder after the user picked a new one). Returns `{projects, skipped}`.
+    pub fn add_root(&self, path: &Path) -> ApiResult<Value> {
+        let dir = canonical(path).ok_or_else(|| ApiError::new("NOT_FOUND", format!("no folder {}", path.display())))?;
+        if canonical(&self.cfg.projects_root).as_deref() == Some(dir.as_path()) {
+            return Err(invalid("that is the projects folder itself"));
+        }
+        let d = dir.clone();
+        let skipped = self.apply_locations(move |roots, _| {
+            if !roots.contains(&d) {
+                roots.push(d);
+            }
+        })?;
+        let projects: Vec<ProjectSummary> = self.list().into_iter().filter(|s| s.dir.as_ref().is_some_and(|x| x.starts_with(&dir))).collect();
+        let skipped: Vec<Value> = skipped.into_iter().map(|(id, d)| json!({ "id": id, "dir": d })).collect();
+        Ok(json!({ "projects": projects, "skipped": skipped }))
+    }
+
+    /// Stop listing a root / project folder (nothing is deleted).
+    pub fn remove_location(&self, path: &Path) -> ApiResult<bool> {
+        let dir = canonical(path).unwrap_or_else(|| path.to_path_buf());
+        let mut found = false;
+        self.apply_locations(|roots, dirs| {
+            let n = roots.len() + dirs.len();
+            roots.retain(|r| r != &dir && r != path);
+            dirs.retain(|r| r != &dir && r != path);
+            found = n != roots.len() + dirs.len();
+        })?;
+        Ok(found)
     }
 
     /// Resolve `input` and create (or reopen) its project. Id = `<platform>-<video id>`.

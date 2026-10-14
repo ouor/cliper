@@ -183,6 +183,10 @@ struct StemsArg {
     ranges: Option<Vec<(f64, f64)>>,
 }
 #[derive(Deserialize)]
+struct PathArg {
+    path: std::path::PathBuf,
+}
+#[derive(Deserialize)]
 struct PinArg {
     id: String,
     pinned: bool,
@@ -346,6 +350,10 @@ pub async fn dispatch(eng: &Arc<Engine>, method: &str, params: Value) -> Result<
             to_json(eng.set_pinned(&a.id, a.pinned).await?)
         }
         "vod.check" => to_json(eng.vod_check(&p::<IdArg>(&params)?.id).await?),
+        "project.open" => to_json(eng.open_project_at(&p::<PathArg>(&params)?.path).await?),
+        "projects.add_root" => eng.add_root(&p::<PathArg>(&params)?.path),
+        "projects.remove_location" => Ok(json!(eng.remove_location(&p::<PathArg>(&params)?.path)?)),
+        "projects.locations" => Ok(eng.locations()),
         "video.status" => {
             let a: OptIdArg = if params.is_null() { OptIdArg { id: None } } else { p(&params)? };
             match a.id {

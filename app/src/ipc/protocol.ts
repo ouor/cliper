@@ -139,6 +139,14 @@ export interface Methods {
   "storage.usage": { params: { id: string }; result: StorageUsage };  /** Cleanup: unused < stems < video < audio. Decisions always stay. PINNED unless force. */
   "media.drop": { params: { id: string; level: DropLevel; force?: boolean }; result: { project: Project; freed_bytes: number } };
   "project.set_pinned": { params: { id: string; pinned: boolean }; result: Project };
+  /** Open a project folder that lives elsewhere; it joins project.list and is remembered.
+   *  CONFLICT (data.dir) if a project with the same id is already listed from another place. */
+  "project.open": { params: { path: string }; result: Project };
+  /** Also list every project in another folder (e.g. the previous projects folder). */
+  "projects.add_root": { params: { path: string }; result: { projects: ProjectSummary[]; skipped: { id: string; dir: string }[] } };
+  /** Stop listing a root or project folder added above (nothing is deleted). */
+  "projects.remove_location": { params: { path: string }; result: boolean };
+  "projects.locations": { params: NoParams; result: { root: string; roots: string[]; projects: string[] } };
   /** Is the replay still online? (call in the background when a project opens) */
   "vod.check": { params: { id: string }; result: VodStatus };
   /** Network counters (the app-wide cap of 4 in-flight requests). */

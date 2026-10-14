@@ -143,7 +143,9 @@ on every save), the call fails with `CONFLICT` and nothing is written — reload
   "requests": [ { "id": "r…", "priority": "user", "reason": "song", "song_ids": ["s…"],
                   "ranges": [[2590, 2710]], "process": false, "total_sec": 108.3,
                   "have_sec": 16.7, "fetching_sec": 8.3, "failed_sec": 0,
-                  "remaining_sec": 91.6, "created_at": "…" } ],
+                  "remaining_sec": 91.6,
+                  "songs": [ { "song_id": "s…", "total_sec": 108.3, "have_sec": 16.7, "failed_sec": 0 } ],
+                  "created_at": "…" } ],
   "paused": false,                  // app-wide
   "have_sec": 266.7, "fetching_sec": 16.7, "queued_sec": 91.7, "failed_sec": 16.7,
   "eta_sec": 21,                    // this project's queue at the current speed
@@ -182,9 +184,17 @@ ranges (margins never warn).
   is fetched from the next lower rendition (that segment only). Then the
   segment is `failed` (kept across restarts). `video.retry {id, ranges?}`
   clears failures and fetches them again.
-- **Rendition**: new ranges use `height` (default `settings.video_height`);
-  a segment next to video already on disk (or being fetched) continues that
-  rendition, so a range stays one stream.
+- **Rendition**: a missing stretch that touches video on disk, being fetched,
+  or an adopted (protocol-2) clip continues that rendition — looking across
+  the queued segments of the gap, so the far end of a top-up already uses it;
+  the left neighbour wins over the right. Only a stretch with no video next
+  to it uses `height` (default `settings.video_height`: the best rendition at
+  or below it, else the closest one — e.g. 360 → SOOP's 540p). If the
+  neighbour's rendition isn't offered any more (an adopted clip's resolution
+  is looked up in the current list), `height` is used and the join is handled
+  like any rendition change (separation re-decodes across it; export
+  re-encodes the joint). `FetchPlan.estimated_bytes` uses the rendition each
+  segment will actually get.
 - **Pause**: `video.pause {paused}` stops every video download of the app
   (downloads in progress are dropped and redone later) and is remembered
   across restarts. While paused nothing starts, top-ups included.
@@ -294,6 +304,26 @@ Exported files are never deleted. Nothing is deleted automatically.
 `project.set_pinned {id, pinned}` sets 📌. `project.drop_media {id}` (protocol 2)
 = level `video`.
 
+## Project locations
+
+Projects are created in the projects folder (`serve --projects`), but
+`project.list` also covers projects elsewhere, remembered in the projects
+folder's `engine.json`:
+
+- `projects.add_root {path}` → `{projects, skipped}`: list every project in
+  another folder — call it with the previous folder after the user picks a new
+  projects folder (plan 14.9: old projects keep opening where they are).
+- `project.open {path}` → `Project`: one project folder from elsewhere (moved by
+  hand, another drive — [다른 위치의 작업 열기]).
+- `projects.remove_location {path}` → bool (nothing is deleted),
+  `projects.locations` → `{root, roots, projects}`.
+- Ids must be unique: the projects folder wins, then roots, then single
+  folders; a clash is reported in `skipped` / as `CONFLICT` with `data.dir`.
+- `ProjectSummary.dir` is each project's absolute folder: resolve media paths
+  against it (not `projects root + id`). Everything inside a project stays
+  relative, so these projects work exactly like local ones (video, stems,
+  exports into their own `exports/`), and `project.delete` deletes their folder.
+
 ## Replay check (S-E9)
 
 `vod.check {id}` → `VodStatus {status: "alive" | "gone" | "unknown", checked_at,
@@ -387,7 +417,7 @@ See `protocol.ts` for exact shapes.
 | `system.cookies_status` | request | → `CookieStatus` (`set, names, platforms, saved_at, encrypted, valid, checked_at, account`) — values are never returned |
 | `system.check_cookies` | request | asks chzzk whether the cookies are still logged in → `CookieStatus` (`valid`, `account`). SOOP can't be checked (`valid: null`) |
 | `system.set_keep_awake` | request | `{enabled}` keep the PC awake while jobs run (persisted; `serve --no-keep-awake` overrides) |
-| `project.list` / `get` / `create` / `delete` | request | `create` takes a URL, chzzk number, `soop:<id>` or a local file path (`source.audio_tracks` lists its audio streams). `list` → `ProjectSummary` with `unreviewed`, `unconfirmed_mutes`, `clips_ready` (enabled songs fully separated), `pinned`, `vod`, `has_audio` (false after cleanup level `audio`), `has_detection`, `last_error`. Opening a protocol-2 project migrates it (see the end) |
+| `project.list` / `get` / `create` / `delete` | request | `create` takes a URL, chzzk number, `soop:<id>` or a local file path (`source.audio_tracks` lists its audio streams). `list` → `ProjectSummary` with `unreviewed`, `unconfirmed_mutes`, `clips_ready` (enabled songs fully separated), `pinned`, `vod`, `dir` (absolute folder), `has_audio` (false after cleanup level `audio`), `has_detection`, `last_error`. Opening a protocol-2 project migrates it (see the end) |
 | `project.update_settings` | request | margins (0–300 s; "앞뒤 여유", per project), rendition height (for video fetched from now on), mute fade, encoder, output dir, `audio_track` (local; run `audio.fetch` again after changing it) |
 | `project.set_pinned` | request | `{id, pinned}` → Project |
 | `song.update` | request | `{song_id, patch, base_revision?}` partial Song (not `id/clip_id/export/confidence`; `mutes` replaces the list) → Project |
@@ -397,6 +427,8 @@ See `protocol.ts` for exact shapes.
 | `mute.remove` | request | `{song_id, mute_id, base_revision?}` → Project |
 | `songs.set` | request | full replacement of `songs` (keep ids; new = `""`); validated; `base_revision?` |
 | `vod.check` | request | → `VodStatus` (see above) |
+| `project.open` | request | `{path}` → Project (a project folder elsewhere; remembered); `CONFLICT` on a duplicate id |
+| `projects.add_root` / `projects.remove_location` / `projects.locations` | request | other folders whose projects `project.list` includes (see Project locations) |
 | `video.status` | request | `{id}` → `VideoState`; `{}` → `{paused, projects: {id: VideoState}}` (loaded projects) |
 | `video.fetch` | request | `{id, ranges?, song_ids?, priority?, reason?, process?, height?}` → `FetchPlan`. Errors `PRECONDITION` (no audio yet), `VOD_GONE`, `NO_SPACE`, `INVALID_PARAMS` |
 | `video.estimate` | request | same params → `FetchPlan` (nothing queued) |
@@ -600,6 +632,15 @@ lists songs that couldn't be exported while others were.
 **Storage / reopen**: `storage.usage`, `media.drop` (4 levels), `project.set_pinned`;
 `vod.check` in the background on open; `project.vod.status == "gone"` → banner,
 no fetch buttons.
+
+**After protocol 3 shipped (C2-1..C2-3)**: top-ups next to an adopted clip
+keep its rendition (no `reencode_joined` / re-separation for those songs);
+`RequestStatus.songs[]` gives per-song progress inside a request;
+`ProjectSummary.dir` + `project.open` / `projects.add_root` for projects
+outside the projects folder — the media protocol must resolve a project's
+files under `dir`, and after switching the projects folder the app calls
+`projects.add_root {old folder}` once (the list lives in the new folder's
+`engine.json`).
 
 **Migration of existing projects**: opening a protocol-2 project converts it
 in place, once, without any download or separation: each downloaded clip's

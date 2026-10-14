@@ -627,3 +627,53 @@ fn clip_type_round_trips() {
     let c: Clip = serde_json::from_value(json!({ "id": "c", "start": 1.0, "end": 2.0, "video": null, "stems": null })).unwrap();
     assert!(!c.pinned && c.alignment.is_none() && c.song_ids.is_empty());
 }
+
+#[tokio::test]
+async fn projects_from_other_locations_stay_listed() {
+    let (eng, _rx, root) = engine("locations");
+    let other = temp_root("locations-old");
+    let single = temp_root("locations-single");
+    // an old projects folder with one project, and a project folder moved elsewhere
+    let old = Store::new(&other);
+    let mut a = old.create("old1", "x").unwrap();
+    old.save(&mut a).unwrap();
+    let s = Store::new(&single);
+    let mut b = s.create("moved1", "y").unwrap();
+    s.save(&mut b).unwrap();
+    let mut here = eng.store.create("here1", "z").unwrap();
+    eng.store.save(&mut here).unwrap();
+
+    let r = eng.add_root(&other).unwrap();
+    assert_eq!(r["projects"].as_array().unwrap().len(), 1);
+    let p = eng.open_project_at(&single.join("moved1")).await.unwrap();
+    assert_eq!(p.id, "moved1");
+    let ids = |e: &Arc<Engine>| {
+        let mut v: Vec<String> = e.list().into_iter().map(|s| s.id).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(ids(&eng), vec!["here1", "moved1", "old1"]);
+    let moved = eng.list().into_iter().find(|s| s.id == "moved1").unwrap();
+    assert!(moved.dir.unwrap().ends_with("moved1"));
+    // works like any project: edits land in its own folder
+    eng.set_pinned("old1", true).await.unwrap();
+    assert!(Store::new(&other).load("old1").unwrap().pinned);
+    // the same id from yet another place is refused
+    let dup = temp_root("locations-dup");
+    let d = Store::new(&dup);
+    let mut c = d.create("moved1", "w").unwrap();
+    d.save(&mut c).unwrap();
+    assert_eq!(eng.open_project_at(&dup.join("moved1")).await.unwrap_err().code, "CONFLICT");
+    // remembered across restarts
+    drop(eng);
+    let (tx, _rx2) = tokio::sync::mpsc::unbounded_channel();
+    let cfg = EngineConfig { projects_root: root.clone(), models_dir: root.join("models"), prefer_cpu: true, keep_awake: Some(false) };
+    let eng = Engine::new(cfg, tx);
+    assert_eq!(ids(&eng), vec!["here1", "moved1", "old1"]);
+    assert!(eng.remove_location(&other).unwrap());
+    assert_eq!(ids(&eng), vec!["here1", "moved1"]);
+    assert!(other.join("old1/project.json").is_file(), "nothing is deleted");
+    for d in [root, other, single, dup] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

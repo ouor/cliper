@@ -291,6 +291,7 @@ impl Engine {
                 priority: args.priority.unwrap_or_default(),
                 reason: args.reason.clone().unwrap_or_else(|| "user".into()),
                 song_ids: args.song_ids.clone().unwrap_or_default(),
+                song_ranges: args.song_ids.iter().flatten().filter_map(|id| p.song(id)).map(|s| s.with_margins(&p.settings)).collect(),
                 height,
                 process: args.process,
                 created_at: project::now(),
@@ -426,12 +427,8 @@ impl Engine {
             return;
         }
         // resume: projects with pending requests
-        for e in std::fs::read_dir(&self.cfg.projects_root).into_iter().flatten().flatten() {
-            let id = e.file_name().to_string_lossy().into_owned();
-            if !project::Store::valid_id(&id) {
-                continue;
-            }
-            let idx = VideoIndex::load(&e.path());
+        for id in self.store.ids() {
+            let idx = VideoIndex::load(&self.store.dir(&id));
             if !idx.requests.is_empty() {
                 tracing::info!("resuming {} video request(s) of {id}", idx.requests.len());
                 let _ = self.with_ps(&id, |_| ());
@@ -505,7 +502,7 @@ impl Engine {
             let ps = st.projects.get_mut(&pid).unwrap();
             let height = ps.idx.requests.iter().find(|r| r.seq == seq).and_then(|r| r.height);
             let preferred = crate::source::pick_variant(&ps.variants, height);
-            let v = ps.choose_variant(i, preferred);
+            let v = ps.choose_variant(i, preferred, &ps.queued());
             let token = tokio_util::sync::CancellationToken::new();
             ps.fetching.insert(i, (v, token.clone()));
             ps.dirty = true;
@@ -1079,12 +1076,23 @@ fn plan_of(ps: &PState, p: &Project, rs: &[Range], height: Option<u32>, request_
     let missing: Vec<usize> = if ps.local { Vec::new() } else { segs.iter().copied().filter(|i| !ps.have.contains_key(i)).collect() };
     let missing_sec = tl.seconds(missing.iter().copied());
     let variants = p.source.as_ref().map(|s| s.variants.clone()).unwrap_or_default();
-    let bw = variants.get(crate::source::pick_variant(&variants, height)).map(|v| v.bandwidth).unwrap_or(8_000_000);
+    // each missing segment at the rendition it will be fetched in (next to
+    // existing video: that one)
+    let preferred = crate::source::pick_variant(&variants, height);
+    let mut queued = ps.queued();
+    queued.extend(missing.iter().copied());
+    let bytes: f64 = missing
+        .iter()
+        .map(|&i| {
+            let v = ps.choose_variant(i, preferred, &queued);
+            tl.dur(i) * variants.get(v).map(|x| x.bandwidth).unwrap_or(8_000_000) as f64 / 8.0
+        })
+        .fold(0.0, |a, b| a + b);
     Ok(FetchPlan {
         request_id,
         total_sec: tl.seconds(segs.iter().copied()),
         missing_sec,
-        estimated_bytes: (missing_sec * bw as f64 / 8.0) as u64,
+        estimated_bytes: bytes as u64,
         ranges: tl.ranges_of(segs),
     })
 }

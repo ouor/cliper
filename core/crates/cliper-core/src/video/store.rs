@@ -54,6 +54,9 @@ pub struct FetchRequest {
     /// songs this request is for (progress per song; `process` separates them)
     #[serde(default)]
     pub song_ids: Vec<String>,
+    /// each song's range ± margins when requested (same order as `song_ids`)
+    #[serde(default)]
+    pub song_ranges: Vec<Range>,
     /// preferred rendition height for segments that don't continue an
     /// existing range (None = settings.video_height at request time)
     #[serde(default)]

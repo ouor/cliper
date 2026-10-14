@@ -19,6 +19,10 @@ reason: string,
  */
 song_ids: Array<string>, 
 /**
+ * each song's range ± margins when requested (same order as `song_ids`)
+ */
+song_ranges: Array<[number, number]>, 
+/**
  * preferred rendition height for segments that don't continue an
  * existing range (None = settings.video_height at request time)
  */

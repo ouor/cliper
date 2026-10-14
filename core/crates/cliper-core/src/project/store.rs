@@ -31,18 +31,93 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
 }
 
+/// Projects living outside the projects folder (C2-2): other project roots
+/// (e.g. the previous projects folder) and single project folders opened
+/// from elsewhere. New projects are always created in `root`.
+#[derive(Debug, Default)]
+struct Extra {
+    roots: Vec<PathBuf>,
+    projects: Vec<PathBuf>,
+    /// project id → its folder (outside `root`)
+    index: std::collections::HashMap<String, PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     pub root: PathBuf,
+    extra: std::sync::Arc<std::sync::RwLock<Extra>>,
+}
+
+/// The id stored in a folder's project.json (None if it isn't a project).
+pub fn project_id_at(dir: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Id {
+        id: String,
+    }
+    let b = std::fs::read(dir.join("project.json")).ok()?;
+    serde_json::from_slice::<Id>(&b).ok().map(|x| x.id).filter(|id| Store::valid_id(id))
 }
 
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self { root: root.into(), extra: Default::default() }
+    }
+
+    fn extra(&self) -> std::sync::RwLockReadGuard<'_, Extra> {
+        self.extra.read().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn dir(&self, id: &str) -> PathBuf {
-        self.root.join(id)
+        match self.extra().index.get(id) {
+            Some(d) => d.clone(),
+            None => self.root.join(id),
+        }
+    }
+
+    /// Other project roots and single project folders to include; returns
+    /// the ids skipped because a project with the same id is already known
+    /// (the projects folder wins, then roots, then single folders, in order).
+    pub fn set_locations(&self, roots: Vec<PathBuf>, projects: Vec<PathBuf>) -> Vec<(String, PathBuf)> {
+        let mut index: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+        let mut skipped = Vec::new();
+        let in_root = |id: &str| self.root.join(id).join("project.json").is_file();
+        let mut add = |id: String, d: PathBuf, index: &mut std::collections::HashMap<String, PathBuf>| {
+            if same_dir(&d, &self.root.join(&id)) {
+                return;
+            }
+            if in_root(&id) || index.contains_key(&id) {
+                if !index.get(&id).is_some_and(|x| same_dir(x, &d)) {
+                    skipped.push((id, d));
+                }
+                return;
+            }
+            index.insert(id, d);
+        };
+        for r in &roots {
+            for e in std::fs::read_dir(r).into_iter().flatten().flatten() {
+                if let Some(id) = project_id_at(&e.path()) {
+                    add(id, e.path(), &mut index);
+                }
+            }
+        }
+        for d in &projects {
+            if let Some(id) = project_id_at(d) {
+                add(id, d.clone(), &mut index);
+            }
+        }
+        let mut x = self.extra.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *x = Extra { roots, projects, index };
+        skipped
+    }
+
+    pub fn locations(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let x = self.extra();
+        (x.roots.clone(), x.projects.clone())
+    }
+
+    /// Is the project outside the projects folder?
+    pub fn is_external(&self, id: &str) -> bool {
+        self.extra().index.contains_key(id)
     }
 
     pub fn path(&self, id: &str, rel: &str) -> PathBuf {
@@ -112,13 +187,28 @@ impl Store {
 
     /// All projects, newest first.
     pub fn list(&self) -> Vec<Project> {
+        let external: Vec<String> = self.extra().index.keys().cloned().collect();
         let mut out: Vec<Project> = std::fs::read_dir(&self.root)
             .into_iter()
             .flatten()
             .flatten()
             .filter_map(|e| self.load(&e.file_name().to_string_lossy()).ok())
+            .chain(external.iter().filter_map(|id| self.load(id).ok()))
             .collect();
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        out
+    }
+
+    /// Ids of every known project (projects folder + other locations).
+    pub fn ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|id| self.exists(id))
+            .collect();
+        out.extend(self.extra().index.keys().cloned());
         out
     }
 
@@ -132,6 +222,13 @@ impl Store {
         }
         std::fs::remove_dir_all(d)?;
         Ok(())
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
     }
 }
 
