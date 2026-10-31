@@ -649,6 +649,9 @@
   border-radius: var(--r-sm);
   background: none;
   cursor: pointer;
+  color: var(--text-1);
+}
+.menu button.danger {
   color: var(--danger);
 }
 .menu button:hover {
@@ -2560,7 +2563,9 @@
   gap: 4px 6px;
   min-width: 0;
 }
+/* basis 0: a long title truncates on the pin's line instead of wrapping below it */
 .st-name .grow {
+  flex: 1 1 0;
   min-width: 0;
 }
 .st-unused {

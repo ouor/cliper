@@ -197,6 +197,11 @@ export function StorageTab() {
                   </span>
                   {gone && <span className="tag doubt st-tag">다시보기 없음</span>}
                 </span>
+                {s?.dir && (
+                  <button className="btn icon xs ghost st-pin" onClick={() => void window.cliper.openPath(s.dir!)} aria-label="작업 폴더 열기" data-tip={`작업 폴더 열기 · ${s.dir}`} data-tip-pos="left">
+                    <FolderOpen size={12} />
+                  </button>
+                )}
                 {u.unused_video > 1e6 && <span className="faint st-unused">곡에 안 쓰는 영상 {fmtBytes(u.unused_video)}</span>}
                 {(u.orphan ?? 0) > 1e6 && <span className="faint st-unused" data-tip="중간에 멈춘 받기·나누기가 남긴 파일이에요. 어떤 정리 단계에서도 지워져요." data-tip-pos="right">남은 임시 파일 {fmtBytes(u.orphan)}</span>}
                 {outside(s?.dir) && (

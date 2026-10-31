@@ -277,7 +277,17 @@ function ProjectRow({ s, usage, onChanged }: { s: ProjectSummary; usage?: Storag
             >
               <HardDrive size={14} /> 저장 공간 · 정리
             </button>
-            <button onClick={() => void remove()}>
+            {s.dir && (
+              <button
+                onClick={() => {
+                  setMenu(false);
+                  void window.cliper.openPath(s.dir!);
+                }}
+              >
+                <FolderOpen size={14} /> 작업 폴더 열기
+              </button>
+            )}
+            <button className="danger" onClick={() => void remove()}>
               <Trash2 size={14} /> 작업 삭제
             </button>
           </div>
