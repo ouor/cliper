@@ -1,6 +1,6 @@
 {
   "name": "cliper-desktop",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Cliper desktop app (Electron UI for the Rust engine)",
   "main": "out/main/index.js",
