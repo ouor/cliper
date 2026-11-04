@@ -28,7 +28,7 @@ export interface CudaAddonInfo {
   needed: boolean;
 }
 
-/** where to get the add-on by hand (private repo / offline PCs: the automatic download can fail) */
+/** where to get the add-on by hand (offline PCs: the automatic download can fail) */
 export const CUDA_ADDON_FILE = "cliper-cuda-addon-v1-amd64.zip";
 export const CUDA_RELEASE_PAGE = "https://github.com/ouor/cliper/releases/tag/v0.1.0";
 

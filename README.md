@@ -63,7 +63,7 @@
 
 ## ⬇️ 설치하기
 
-[최신 릴리즈](https://github.com/ouor/cliper/releases/latest)에서 `cliper-v0.3.2-amd64.exe`를 받아요. 설치 없이 바로 실행하는 포터블이에요. 켤 때마다 압축을 풀어서 시작이 몇 초 걸려요.
+[최신 릴리즈](https://github.com/ouor/cliper/releases/latest)에서 `cliper-v0.3.3-amd64.exe`를 받아요. 설치 없이 바로 실행하는 포터블이에요. 켤 때마다 압축을 풀어서 시작이 몇 초 걸려요.
 
 1. 받은 파일을 원하는 폴더에 두고 실행해요.
 2. "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 눌러요. 코드 서명을 하지 않은 앱이라 뜨는 안내예요.
