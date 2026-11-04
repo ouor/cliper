@@ -85,8 +85,6 @@ npm run dev
 
 디버그 CLI(단계별): `resolve`, `fetch-audio`(`--segments a b`로 일부만, 결과에 세그먼트 색인 포함), `detect`, `fetch-video`, `separate`, `talk`, `export`. `cliper --help`로 확인해요.
 
-세그먼트 영상 모델의 설계·검증 기록은 [docs/product/cycle2-segment-video-core.md](product/cycle2-segment-video-core.md)에 있어요.
-
 헤드리스 일괄 처리: `cliper process <링크·번호·로컬 파일…> [--clips] [--export --format mp4|wav|flac|mp3]`.
 
 ## 테스트
@@ -119,19 +117,10 @@ cd ../app && npm run dist:win
 CUDA 13 + cuDNN 9 런타임(DLL 14개, 압축 약 1 GB)은 앱에 넣지 않고 v0.1.0 릴리즈에 `cliper-cuda-addon-v1-amd64.zip`으로 따로 올려요. NVIDIA 그래픽카드가 있는데 CUDA 런타임이 없으면 앱이 엔진의 `addon.install_cuda`로 자동으로 받아요. 받은 파일은 SHA-256을 확인한 뒤 `%LOCALAPPDATA%\Cliper\addons\cuda-v1`에 풀어요. 이후 버전도 같은 애드온을 써요.
 
 - URL, 크기, SHA-256은 `core/crates/cliper-core/src/addon.rs`에 고정돼 있어요. zip을 다시 만들면 이 값도 같이 바꾸고, 새 이름(`cuda-v2`)으로 올려야 해요.
-- 저장소가 비공개인 동안은 릴리즈 파일을 로그인 없이 받을 수 없어 자동 다운로드가 실패해요. 브라우저로 받은 zip을 앱의 **zip 파일로 설치**(엔진 `addon.install_cuda {zip}`)로 넣으면 같은 해시 검사를 거쳐 설치돼요.
+- 자동으로 받지 못하는 PC(오프라인 등)에서는 브라우저로 받은 zip을 앱의 **zip 파일로 설치**(엔진 `addon.install_cuda {zip}`)로 넣으면 같은 해시 검사를 거쳐 설치돼요.
 - QA: `CLIPER_CUDA_ADDON_URL`로 로컬 서버의 같은 파일을 가리키고(해시는 그대로 검사), `CLIPER_ADDON_DIR`로 설치 위치를 바꿀 수 있어요.
-
-## 참고 구현
-
-`reference/`에 클론해 두고 포팅했어요(커밋하지 않음).
-
-- https://github.com/ouor/quick-stream-audio-download: 치지직·SOOP 오디오만 받기
-- https://github.com/ouor/song-split-research: PANNs 기반 노래 구간 검출
 
 ## 문서
 
 - [docs/ipc.md](ipc.md): 엔진 IPC 계약
-- [docs/PLAN.md](PLAN.md): 설계와 구현하며 알게 된 것
-- [docs/product/desktop-app-plan.md](product/desktop-app-plan.md): 데스크톱 앱 기획
-- [docs/reviews/](reviews/): Rust·ML·Electron 코드 리뷰와 처리 결과
+- [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md): 함께 배포하는 구성요소의 라이선스

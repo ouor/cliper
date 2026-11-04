@@ -5,7 +5,7 @@
 
 - 스택: **Electron 44 + electron-vite 5 (Vite 7) + React 19 + TypeScript 5.9 + zustand**
 - 아이콘 lucide-react, 글꼴 Pretendard(번들 포함, CJK 폴백: 맑은 고딕 / Yu Gothic UI / Meiryo)
-- 기획: `docs/product/desktop-app-plan.md` · IPC: `docs/ipc.md` · 구현 메모: `docs/product/ui-implementation-notes.md` · 엔진 요청: `docs/product/engine-requests.md`
+- IPC: `docs/ipc.md` · 빌드와 구조: `docs/DEVELOPMENT.md`
 
 ## 실행
 
@@ -98,7 +98,7 @@ app/
 - 되돌리기는 그 편집이 바꾼 필드와 그 편집이 추가·삭제·변경한 멘트 구간만 이전 상태로 되돌립니다. 그사이 작업이 넣은 멘트 제안 같은 다른 변경은 지우지 않습니다.
 - 같은 종류 작업이 돌고 있어 `BUSY`가 오면 앱 대기열에 넣고, 앞 작업이 끝나면 자동으로 시작합니다.
 - 소리 받기 → 곡 찾기 연결은 앱이 작업 완료 알림으로 이어 줍니다.
-- **영상(protocol 3)**: 방송 시간축의 받은 범위입니다. 받은 범위는 `video.status` / `video.changed`(`state/video.ts`), 곡 영상 받기는 `video.fetch {song_ids, process: true}`(없는 부분만, 받은 뒤 나누기), 경계를 넓힌 뒤 3초 자동 채우기(`auto`, 5분까지), `V` = 재생 위치 ± 1분(`now`), 지도 `Shift+드래그` = 범위 받기. 재생은 `video.view` 파일(`currentTime = vod − origin`), 빈 곳은 덮개(`components/VideoPane.tsx`). 멘트 다듬기 소리는 `project.stems` 구간, 구간 밖은 분석 오디오로 원본만. 내보내기는 모자라면 `export.run {fetch: true}`. 정리는 `media.drop` 4단계(설정 > 저장 공간). 자세한 기록: `docs/product/cycle2-segment-video-ui.md`.
+- **영상(protocol 3)**: 방송 시간축의 받은 범위입니다. 받은 범위는 `video.status` / `video.changed`(`state/video.ts`), 곡 영상 받기는 `video.fetch {song_ids, process: true}`(없는 부분만, 받은 뒤 나누기), 경계를 넓힌 뒤 3초 자동 채우기(`auto`, 5분까지), `V` = 재생 위치 ± 1분(`now`), 지도 `Shift+드래그` = 범위 받기. 재생은 `video.view` 파일(`currentTime = vod − origin`), 빈 곳은 덮개(`components/VideoPane.tsx`). 멘트 다듬기 소리는 `project.stems` 구간, 구간 밖은 분석 오디오로 원본만. 내보내기는 모자라면 `export.run {fetch: true}`. 정리는 `media.drop` 4단계(설정 > 저장 공간).
 - 진행 표시는 `job.started.items`, `progress.item_index/items_total/eta_sec`, `progress.note.code`(한국어 문장은 앱이 만듦)를 씁니다. 소리 받는 동안은 `progress.peaks_until`에 맞춰 `overview.peaks`를 다시 읽어 파형을 채웁니다.
 - 진행 중 작업 요청은 userData에 기록해 두었다가, 앱이 작업 중에 닫히면 다음 실행 때 "지난번에 멈춘 작업 [이어서 하기]"로 다시 요청합니다.
 

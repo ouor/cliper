@@ -8,7 +8,7 @@
 //! player would see). Decoding a stretch this way is bit-identical to decoding
 //! one file holding all of it (the AAC decoder carries over), so audio decoded
 //! for different requests always agrees sample for sample (verified on SOOP
-//! fMP4 and chzzk TS; see docs/product/cycle2-segment-video-core.md).
+//! fMP4 and chzzk TS).
 //!
 //! Time model: every rendition has its own media clock (fMP4 tfdt / TS PTS).
 //! `vod = media − m` with one measured `m` per rendition ([`super::store::Align`]).

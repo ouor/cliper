@@ -34,3 +34,6 @@ __pycache__/
 /app/out/
 /core/target-dev/
 /core/target-me/
+
+# internal dev docs (planning, interviews, QA, reviews): local only
+/docs/dev/

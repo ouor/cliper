@@ -670,8 +670,7 @@ preferences come from `%LOCALAPPDATA%\Cliper\engine.json`.
 
 ## What changed in protocol 4 (for the UI)
 
-Engine `protocol` = `min_client_protocol` = 4 (review fixes of cycle 2,
-`docs/reviews/cycle2/`). A protocol-3 app shows its version notice.
+Engine `protocol` = `min_client_protocol` = 4 (review fixes of cycle 2). A protocol-3 app shows its version notice.
 
 **Removed** (A-8): methods `clips.plan`, `clips.fetch`, `clip.extend`,
 `clip.drop_media`, `project.drop_media` (→ `METHOD_NOT_FOUND`; use

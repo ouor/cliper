@@ -118,7 +118,7 @@
 - 엔진 IPC 계약: [docs/ipc.md](docs/ipc.md)
 - 쓰인 기술
   - 엔진: Rust, tokio, ONNX Runtime(CUDA), ffmpeg
-  - 노래 찾기: PANNs `Cnn14_DecisionLevelMax`([song-split-research](https://github.com/ouor/song-split-research) v6 분할기)
+  - 노래 찾기: PANNs `Cnn14_DecisionLevelMax`
   - 목소리 나누기: UVR MDX-Net `Voc_FT`
   - 앱: Electron, React, TypeScript, zustand, Web Audio(AudioWorklet)
-- 라이선스: [MIT](LICENSE). 함께 배포하는 모델과 런타임(PANNs, UVR MDX-Net, ONNX Runtime, ffmpeg, CUDA/cuDNN)은 각자의 라이선스를 따라요.
+- 라이선스: [MIT](LICENSE). 함께 배포하는 모델과 런타임(PANNs, UVR MDX-Net, ONNX Runtime, ffmpeg, CUDA/cuDNN)은 각자의 라이선스를 따라요. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 봐 주세요.
